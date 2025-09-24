@@ -1,0 +1,26 @@
+# ===== Core transpile/mapping (IBM heavy-hex; SABRE) =====
+qiskit>=2.1,<3.0
+qiskit-aer>=0.15         # local simulation (shots, durations)
+qiskit-ibm-runtime>=0.41  # fetch real backend targets/calibrations
+
+# ===== QEC sim & decoding =====
+stim                     # fast stabilizer/DEM simulator
+sinter                   # Stim's high-throughput sampler/benchmarker
+pymatching>=2.0          # MWPM decoder (PyMatching v2+)
+
+# ===== Numerics & analysis =====
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.8
+tqdm>=4.66
+pyyaml>=6.0              # QEC schedules in YAML (per project recipe)
+pydantic>=2              # config/validation
+
+# ===== (optional but handy) =====
+# rustworkx>=0.14        # graph utils (often comes with qiskit)
+# networkx>=3.0          # if you prototype custom graph transforms
+# orjson>=3.9            # faster JSON logs
+
+# ===== Dev/test =====
+pytest>=8

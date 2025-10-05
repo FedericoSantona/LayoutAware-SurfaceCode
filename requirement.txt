@@ -16,6 +16,9 @@ matplotlib>=3.8
 tqdm>=4.66
 pyyaml>=6.0              # QEC schedules in YAML (per project recipe)
 pydantic>=2              # config/validation
+stim
+pymatching
+sympy
 
 # ===== (optional but handy) =====
 # rustworkx>=0.14        # graph utils (often comes with qiskit)

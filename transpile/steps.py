@@ -26,6 +26,48 @@ from qiskit.transpiler.passes.scheduling import (
 # Helpers
 # -----------------------------------------------------------------------------
 
+def _prune_idle_qubits_simple(qc: QuantumCircuit) -> QuantumCircuit:
+    """
+    Return a copy of `qc` with qubit wires removed if they are never acted on
+    by any instruction (no gates, no measure/reset). This keeps only the set
+    of *active* physical qubits and remaps instructions accordingly.
+
+    Notes:
+      - This is intentionally minimal and only used for metrics.
+      - QuantumRegister structure is not preserved; classical bits are kept.
+    """
+    # Collect active physical indices in first-seen order for stable remapping.
+    active_order: List[int] = []
+    active_set: set[int] = set()
+    for instr in qc.data:
+        for q in instr.qubits:
+            idx = qc.find_bit(q).index
+            if idx not in active_set:
+                active_set.add(idx)
+                active_order.append(idx)
+
+    if len(active_set) == qc.num_qubits:
+        return qc  # nothing to prune
+
+    # Build a thin circuit with only active wires.
+    new_qc = QuantumCircuit(len(active_order), qc.num_clbits, name=qc.name)
+    if getattr(qc, "metadata", None) is not None:
+        try:
+            new_qc.metadata = dict(qc.metadata)
+        except Exception:
+            pass
+
+    # Helper: map old qargs -> new_qargs using the active-order lookup.
+    index_map = {old: new for new, old in enumerate(active_order)}
+    def _map_qargs(qargs):
+        return [new_qc.qubits[index_map[qc.find_bit(q).index]] for q in qargs]
+
+    for instr in qc.data:
+        new_qc.append(instr.operation, _map_qargs(instr.qubits), instr.clbits)
+
+    return new_qc
+
+
 def _allowed_cx_directions(target: Target) -> set[tuple[int, int]]:
     """Collect directed CX edges allowed by the Target."""
     allowed: set[tuple[int, int]] = set()
@@ -264,10 +306,24 @@ def score(qc: QuantumCircuit, target: Target) -> Dict[str, Any]:
     - duration_ns: set if scheduling populated circuit.duration (dt-aware backends). Otherwise None.
     - twoq, swaps: mapped counts.
     - dir_fixes: heuristic fraction of CX that violate target direction (pre-fix circuits).
+    - n_qubits: RESERVED physical qubits (post-layout/routing wires, even if idle).
+    - n_qubits_active: ACTIVE physical qubits (after pruning idle wires).
     """
     twoq, swaps = _count_2q_and_swaps(qc)
+
+    # Reserved = as-routed wire count
+    n_qubits_reserved = qc.num_qubits
+
+    # Active = after pruning wires that never appear in any instruction
+    try:
+        qc_pruned = _prune_idle_qubits_simple(qc)
+        n_qubits_active = qc_pruned.num_qubits
+    except Exception:
+        n_qubits_active = n_qubits_reserved
+
     metrics: Dict[str, Any] = {
-        "n_qubits": qc.num_qubits,
+        "n_qubits_reserved": n_qubits_reserved,
+        "n_qubits_active": n_qubits_active,
         "depth": int(qc.depth()),
         "twoq": twoq,
         "swaps": swaps,

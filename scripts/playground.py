@@ -21,6 +21,12 @@ if __name__ == "__main__":
     if REPO_ROOT not in sys.path:
         sys.path.insert(0, REPO_ROOT)
 
+# Ensure the src/ directory is available for imports when executed as a script
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_PATH = PROJECT_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
 from benchmarks.BenchmarkCircuit import BenchmarkCircuit
 from benchmarks.circuits.bell import BellStateBenchmark
 from benchmarks.circuits.ghz import GHZ3Benchmark

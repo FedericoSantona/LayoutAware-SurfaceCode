@@ -93,7 +93,6 @@ class PhenomenologicalStimBuilder:
         n = self.code.n
         circuit = stim.Circuit()
 
-        basis = None
         logical_string = None
         if config.init_label is not None:
             basis, _ = self._init_intent(config.init_label.strip())
@@ -109,9 +108,6 @@ class PhenomenologicalStimBuilder:
         for q in range(n):
             circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
-        sz_prev: Optional[list[int]] = None
-        sx_prev: Optional[list[int]] = None
-
         def apply_noise() -> None:
             if config.p_x_error:
                 circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
@@ -120,75 +116,40 @@ class PhenomenologicalStimBuilder:
 
         observable_pairs: list[tuple[int, int]] = []
 
-        if basis == "Z":
+        start: Optional[int] = None
+        if logical_string is not None:
             circuit.append_operation("TICK")
             start = self._mpp_from_string(circuit, logical_string)
-            for _round in range(config.rounds):
-                circuit.append_operation("TICK")
-                apply_noise()
-                sz_curr = self._measure_list(circuit, self.z_stabilizers)
-                if sz_prev is not None:
-                    self._add_detectors(circuit, sz_prev, sz_curr)
-                sz_prev = sz_curr
-            circuit.append_operation("TICK")
-            end = self._mpp_from_string(circuit, logical_string)
-            if start is not None and end is not None:
-                circuit.append_operation(
-                    "OBSERVABLE_INCLUDE",
-                    [self._rec_from_abs(circuit, start), self._rec_from_abs(circuit, end)],
-                    0,
-                )
-                observable_pairs.append((start, end))
-            for _round in range(config.rounds):
-                circuit.append_operation("TICK")
-                apply_noise()
-                sx_curr = self._measure_list(circuit, self.x_stabilizers)
-                if sx_prev is not None:
-                    self._add_detectors(circuit, sx_prev, sx_curr)
-                sx_prev = sx_curr
-            return circuit, observable_pairs
 
-        if basis == "X":
-            circuit.append_operation("TICK")
-            start = self._mpp_from_string(circuit, logical_string)
-            for _round in range(config.rounds):
-                circuit.append_operation("TICK")
-                apply_noise()
-                sx_curr = self._measure_list(circuit, self.x_stabilizers)
-                if sx_prev is not None:
-                    self._add_detectors(circuit, sx_prev, sx_curr)
-                sx_prev = sx_curr
-            circuit.append_operation("TICK")
-            end = self._mpp_from_string(circuit, logical_string)
-            if start is not None and end is not None:
-                circuit.append_operation(
-                    "OBSERVABLE_INCLUDE",
-                    [self._rec_from_abs(circuit, start), self._rec_from_abs(circuit, end)],
-                    0,
-                )
-                observable_pairs.append((start, end))
-            for _round in range(config.rounds):
-                circuit.append_operation("TICK")
-                apply_noise()
-                sz_curr = self._measure_list(circuit, self.z_stabilizers)
-                if sz_prev is not None:
-                    self._add_detectors(circuit, sz_prev, sz_curr)
-                sz_prev = sz_curr
-            return circuit, observable_pairs
+        # Establish reference measurements before noisy cycles.
+        circuit.append_operation("TICK")
+        sz_prev = self._measure_list(circuit, self.z_stabilizers)
+        circuit.append_operation("TICK")
+        sx_prev = self._measure_list(circuit, self.x_stabilizers)
 
         for _round in range(config.rounds):
             circuit.append_operation("TICK")
             apply_noise()
             sz_curr = self._measure_list(circuit, self.z_stabilizers)
-            if sz_prev is not None:
-                self._add_detectors(circuit, sz_prev, sz_curr)
+            self._add_detectors(circuit, sz_prev, sz_curr)
             sz_prev = sz_curr
 
             circuit.append_operation("TICK")
             apply_noise()
             sx_curr = self._measure_list(circuit, self.x_stabilizers)
-            if sx_prev is not None:
-                self._add_detectors(circuit, sx_prev, sx_curr)
+            self._add_detectors(circuit, sx_prev, sx_curr)
             sx_prev = sx_curr
+
+        end: Optional[int] = None
+        if logical_string is not None:
+            circuit.append_operation("TICK")
+            end = self._mpp_from_string(circuit, logical_string)
+            if start is not None and end is not None:
+                circuit.append_operation(
+                    "OBSERVABLE_INCLUDE",
+                    [self._rec_from_abs(circuit, start), self._rec_from_abs(circuit, end)],
+                    0,
+                )
+                observable_pairs.append((start, end))
 
         return circuit, observable_pairs

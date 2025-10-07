@@ -1,0 +1,62 @@
+{
+  "x_only": {
+    "csv": {
+      "3": "output/threshold/x_only_d3.csv",
+      "5": "output/threshold/x_only_d5.csv",
+      "7": "output/threshold/x_only_d7.csv",
+      "9": "output/threshold/x_only_d9.csv"
+    },
+    "plot": "plots/threshold/x_only.png",
+    "crossings": {
+      "3-5": 1e-07,
+      "5-7": 2.530200977944212e-07,
+      "7-9": 4.0604019558884234e-07
+    },
+    "json": "output/threshold/x_only.json"
+  },
+  "z_only": {
+    "csv": {
+      "3": "output/threshold/z_only_d3.csv",
+      "5": "output/threshold/z_only_d5.csv",
+      "7": "output/threshold/z_only_d7.csv",
+      "9": "output/threshold/z_only_d9.csv"
+    },
+    "plot": "plots/threshold/z_only.png",
+    "crossings": {
+      "3-5": 1e-07,
+      "5-7": 1e-07,
+      "7-9": 1e-07
+    },
+    "json": "output/threshold/z_only.json"
+  },
+  "symmetric_Zinit": {
+    "csv": {
+      "3": "output/threshold/symmetric_Zinit_d3.csv",
+      "5": "output/threshold/symmetric_Zinit_d5.csv",
+      "7": "output/threshold/symmetric_Zinit_d7.csv",
+      "9": "output/threshold/symmetric_Zinit_d9.csv"
+    },
+    "plot": "plots/threshold/symmetric_Zinit.png",
+    "crossings": {
+      "3-5": 1e-07,
+      "5-7": 1e-07,
+      "7-9": 0.024261272095714367
+    },
+    "json": "output/threshold/symmetric_Zinit.json"
+  },
+  "symmetric_Xinit": {
+    "csv": {
+      "3": "output/threshold/symmetric_Xinit_d3.csv",
+      "5": "output/threshold/symmetric_Xinit_d5.csv",
+      "7": "output/threshold/symmetric_Xinit_d7.csv",
+      "9": "output/threshold/symmetric_Xinit_d9.csv"
+    },
+    "plot": "plots/threshold/symmetric_Xinit.png",
+    "crossings": {
+      "3-5": 1e-07,
+      "5-7": 1e-07,
+      "7-9": 1e-07
+    },
+    "json": "output/threshold/symmetric_Xinit.json"
+  }
+}

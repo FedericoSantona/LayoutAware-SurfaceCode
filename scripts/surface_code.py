@@ -27,9 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
     parser.add_argument("--px", type=float, default=1e-4, help="Phenomenological X error probability")
     parser.add_argument("--pz", type=float, default=1e-4, help="Phenomenological Z error probability")
-    parser.add_argument("--init", type=str, default="1", help="Logical initialization: one of {0,1,+,-}")
+    parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-}")
     parser.add_argument("--shots", type=int, default=5000, help="Number of Monte Carlo samples")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for Stim samplers")
+    parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
     return parser.parse_args()
 
 

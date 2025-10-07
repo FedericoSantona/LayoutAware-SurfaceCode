@@ -1,0 +1,144 @@
+"""Run threshold sweeps and generate plots for the heavy-hex surface code."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+
+# Ensure src/ is importable when executed directly
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_PATH = PROJECT_ROOT / "src"
+if str(SRC_PATH) not in os.sys.path:
+    os.sys.path.insert(0, str(SRC_PATH))
+
+# Use a local Matplotlib cache to avoid permission issues
+mpl_cache = PROJECT_ROOT / ".mplconfig"
+mpl_cache.mkdir(exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
+
+from simulation.code_threshold import (
+    ThresholdScenario,
+    ThresholdScenarioResult,
+    ThresholdStudyConfig,
+    create_standard_scenarios,
+    estimate_crossings,
+    run_scenario,
+    export_csv,
+    plot_scenario,
+)
+
+
+def parse_distances(values: Sequence[str]) -> list[int]:
+    if not values:
+        return [3, 5, 7, 9]
+    return [int(v) for v in values]
+
+
+def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
+    return np.logspace(np.log10(p_min), np.log10(p_max), num=num)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--shots", type=int, default=15000, help="Monte Carlo shots per data point")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for Stim samplers")
+    parser.add_argument(
+        "--distances",
+        nargs="*",
+        default=None,
+        help="Code distances to include (default: 3 5 7 9)",
+    )
+    parser.add_argument("--p-min", type=float, default=1e-7, help="Minimum physical error rate")
+    parser.add_argument("--p-max", type=float, default=3e-2, help="Maximum physical error rate")
+    parser.add_argument("--num-points", type=int, default=10, help="Number of physical error samples")
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=PROJECT_ROOT / "plots" / "threshold",
+        help="Directory to store generated plots",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=PROJECT_ROOT / "output" / "threshold",
+        help="Directory to store CSV/JSON results",
+    )
+    return parser.parse_args()
+
+
+def scenario_to_dict(result: ThresholdScenarioResult) -> dict:
+    data = {
+        "name": result.name,
+        "init_label": result.init_label,
+        "track": result.track,
+        "distances": result.distances,
+        "sweeps": [],
+    }
+    for sweep in result.sweeps:
+        sweep_data = {
+            "distance": sweep.distance,
+            "points": [
+                {
+                    "p_x": point.p_x,
+                    "p_z": point.p_z,
+                    "logical_error_rate": point.logical_error_rate,
+                    "avg_syndrome_weight": point.avg_syndrome_weight,
+                    "click_rate": point.click_rate,
+                }
+                for point in sweep.points
+            ],
+        }
+        data["sweeps"].append(sweep_data)
+    return data
+
+
+def main() -> None:
+    args = parse_args()
+    distances = parse_distances(args.distances or [])
+    physical_grid = make_physical_grid(args.p_min, args.p_max, args.num_points)
+
+    plot_dir: Path = args.plot_dir
+    data_dir: Path = args.data_dir
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    scenarios = create_standard_scenarios(distances, physical_grid)
+    study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
+
+    summary = {}
+
+    for scenario in scenarios:
+        print(f"Running scenario {scenario.name} (init {scenario.init_label})")
+        result = run_scenario(scenario, study_cfg)
+        csv_paths = export_csv(result, data_dir)
+        plot_path = plot_scenario(result, plot_dir)
+        crossings = estimate_crossings(result)
+        summary[scenario.name] = {
+            "csv": {str(distance): str(path.relative_to(PROJECT_ROOT)) for distance, path in csv_paths.items()},
+            "plot": str(plot_path.relative_to(PROJECT_ROOT)),
+            "crossings": {f"{d1}-{d2}": crossing for (d1, d2), crossing in crossings.items()},
+        }
+        json_path = data_dir / f"{scenario.name}.json"
+        with json_path.open("w") as fh:
+            json.dump(scenario_to_dict(result), fh, indent=2)
+        summary[scenario.name]["json"] = str(json_path.relative_to(PROJECT_ROOT))
+        for pair, crossing in crossings.items():
+            d1, d2 = pair
+            if crossing is None:
+                print(f"  d={d1} vs d={d2}: no crossing within sampled range")
+            else:
+                print(f"  d={d1} vs d={d2}: estimated crossing at p ~ {crossing:.3e}")
+        print(f"  plot saved to {plot_path}")
+
+    summary_path = data_dir / "threshold_summary.json"
+    with summary_path.open("w") as fh:
+        json.dump(summary, fh, indent=2)
+    print(f"Summary saved to {summary_path}")
+
+
+if __name__ == "__main__":
+    main()

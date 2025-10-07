@@ -44,8 +44,6 @@ def run_circuit_logical_error_rate(
     mc_config: MonteCarloConfig,
 ) -> SimulationResult:
     dem = circuit.detector_error_model()
-    components = _component_representatives(dem)
-    _attach_virtual_boundaries_to_dem(dem, components)
     matcher = pm.Matching.from_detector_error_model(dem)
 
     det_sampler = circuit.compile_detector_sampler(seed=mc_config.seed)
@@ -82,65 +80,3 @@ def run_circuit_logical_error_rate(
     )
 
 
-def _component_representatives(dem: stim.DetectorErrorModel) -> list[tuple[int, set[int]]]:
-    parent: dict[int, int] = {}
-
-    def find(x: int) -> int:
-        parent.setdefault(x, x)
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    component_observables: dict[int, set[int]] = {}
-
-    for inst in dem:
-        if inst.type != "error":
-            continue
-        detectors: list[int] = []
-        observables: set[int] = set()
-        for target in inst.targets_copy():
-            label = str(target)
-            if label.startswith("D"):
-                detectors.append(int(label[1:]))
-            elif label.startswith("L"):
-                observables.add(int(label[1:]))
-        if not detectors:
-            continue
-        base = detectors[0]
-        parent.setdefault(base, base)
-        for det in detectors[1:]:
-            parent.setdefault(det, det)
-            union(base, det)
-        if observables:
-            root = find(base)
-            component_observables.setdefault(root, set()).update(observables)
-
-    components: dict[int, list[int]] = {}
-    for det in parent:
-        root = find(det)
-        components.setdefault(root, []).append(det)
-
-    reps: list[tuple[int, set[int]]] = []
-    for root, members in components.items():
-        reps.append((min(members), component_observables.get(root, set())))
-    return reps
-
-
-def _attach_virtual_boundaries_to_dem(
-    dem: stim.DetectorErrorModel,
-    components: Sequence[tuple[int, set[int]]],
-) -> None:
-    if not components:
-        return
-
-    prob = 1e-12
-    for det_idx, observables in components:
-        targets = [stim.target_relative_detector_id(det_idx)]
-        for obs in sorted(observables):
-            targets.append(stim.target_logical_observable_id(obs))
-        dem.append("error", prob, targets)

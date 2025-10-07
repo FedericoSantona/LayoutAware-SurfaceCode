@@ -23,7 +23,7 @@ from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--distance", type=int, default=5, help="Code distance d of the heavy-hex code")
+    parser.add_argument("--distance", type=int, default=11, help="Code distance d of the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
     parser.add_argument("--px", type=float, default=1e-4, help="Phenomenological X error probability")
     parser.add_argument("--pz", type=float, default=1e-4, help="Phenomenological Z error probability")

@@ -135,7 +135,6 @@ class PhenomenologicalStimBuilder:
             sz_prev = sz_curr
 
             circuit.append_operation("TICK")
-            apply_noise()
             sx_curr = self._measure_list(circuit, self.x_stabilizers)
             self._add_detectors(circuit, sx_prev, sx_curr)
             sx_prev = sx_curr

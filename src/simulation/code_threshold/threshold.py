@@ -100,6 +100,8 @@ def run_scenario(scenario: ThresholdScenario, study_cfg: ThresholdStudyConfig) -
                 p_x_error=p_x,
                 p_z_error=p_z,
                 init_label=scenario.init_label,
+                family=("Z" if isinstance(scenario, XOnlyScenario) else
+                        "X" if isinstance(scenario, ZOnlyScenario) else None)
             )
             result: SimulationResult = run_logical_error_rate(
                 builder,
@@ -134,13 +136,17 @@ def estimate_crossings(result: ThresholdScenarioResult) -> Dict[tuple[int, int],
     for sweep_low, sweep_high in zip(result.sweeps, result.sweeps[1:]):
         low = np.array([pt.logical_error_rate for pt in sweep_low.points])
         high = np.array([pt.logical_error_rate for pt in sweep_high.points])
+        # Use the same physical x-axis convention as plotting:
+        #   track == 'Z'  -> x-axis is p_x (X faults drive Z-logicals)
+        #   track == 'X'  -> x-axis is p_z
         physical = np.array([pt.p_x if result.track == 'Z' else pt.p_z for pt in sweep_low.points])
         diff = low - high
         crossing_p = None
         for i in range(len(diff) - 1):
-            if diff[i] == 0:
-                crossing_p = physical[i]
-                break
+            # Skip exact or near-zero differences (flat floor region)
+            if diff[i] == 0 or diff[i + 1] == 0:
+                continue
+            # Detect a sign change between neighboring non-zero points
             if diff[i] * diff[i + 1] < 0:
                 p1, p2 = physical[i], physical[i + 1]
                 y1, y2 = diff[i], diff[i + 1]

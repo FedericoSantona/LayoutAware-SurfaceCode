@@ -9,11 +9,20 @@ import stim
 
 @dataclass
 class PhenomenologicalStimConfig:
-    """Configuration values for phenomenological stabilizer sampling."""
+    """Configuration values for phenomenological stabilizer sampling.
+
+    family:
+        None  -> interleave Z and X halves (measure both each round)
+        "Z"   -> Z-only family (CSS split, measure only Z stabilizers)
+        "X"   -> X-only family (CSS split, measure only X stabilizers)
+    """
     rounds: int = 5
     p_x_error: float = 1e-3
     p_z_error: float = 1e-3
     init_label: Optional[str] = None  # one of {"0", "1", "+", "-"}
+    family: Optional[str] = None
+   
+
 
 
 class PhenomenologicalStimBuilder:
@@ -87,11 +96,19 @@ class PhenomenologicalStimBuilder:
                 [self._rec_from_abs(circuit, prev_idx), self._rec_from_abs(circuit, curr_idx)],
             )
 
+
     # ----- public API --------------------------------------------------
 
     def build(self, config: PhenomenologicalStimConfig) -> tuple[stim.Circuit, list[tuple[int, int]]]:
         n = self.code.n
         circuit = stim.Circuit()
+
+        # Which CSS family to measure in this circuit
+        fam = (config.family or "").upper()
+        if fam not in {"", "Z", "X"}:
+            raise ValueError("config.family must be one of None, 'Z', or 'X'")
+        measure_Z = (fam in {"", "Z"})
+        measure_X = (fam in {"", "X"})
 
         logical_string = None
         if config.init_label is not None:
@@ -108,9 +125,11 @@ class PhenomenologicalStimBuilder:
         for q in range(n):
             circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
-        def apply_noise() -> None:
-            if config.p_x_error:
+        def apply_x_noise() -> None:
+            if config.p_x_error:    
                 circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
+
+        def apply_z_noise() -> None:
             if config.p_z_error:
                 circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
 
@@ -121,23 +140,38 @@ class PhenomenologicalStimBuilder:
             circuit.append_operation("TICK")
             start = self._mpp_from_string(circuit, logical_string)
 
-        # Establish reference measurements before noisy cycles.
-        circuit.append_operation("TICK")
-        sz_prev = self._measure_list(circuit, self.z_stabilizers)
-        circuit.append_operation("TICK")
-        sx_prev = self._measure_list(circuit, self.x_stabilizers)
+        # Establish reference measurements before noisy cycles, per-family.
+        sz_prev: Optional[list[int]] = None
+        sx_prev: Optional[list[int]] = None
+        if measure_Z:
+            circuit.append_operation("TICK")
+            sz_prev = self._measure_list(circuit, self.z_stabilizers)
+        if measure_X:
+            circuit.append_operation("TICK")
+            sx_prev = self._measure_list(circuit, self.x_stabilizers)
 
         for _round in range(config.rounds):
-            circuit.append_operation("TICK")
-            apply_noise()
-            sz_curr = self._measure_list(circuit, self.z_stabilizers)
-            self._add_detectors(circuit, sz_prev, sz_curr)
-            sz_prev = sz_curr
+            # Z half
+            if measure_Z:
+                circuit.append_operation("TICK")
+              
+                apply_x_noise()
+                sz_curr = self._measure_list(circuit, self.z_stabilizers)
+                if sz_prev is not None:
+                    self._add_detectors(circuit, sz_prev, sz_curr)
 
-            circuit.append_operation("TICK")
-            sx_curr = self._measure_list(circuit, self.x_stabilizers)
-            self._add_detectors(circuit, sx_prev, sx_curr)
-            sx_prev = sx_curr
+                sz_prev = sz_curr
+
+            # X half
+            if measure_X:
+                circuit.append_operation("TICK")
+                
+                apply_z_noise()
+                sx_curr = self._measure_list(circuit, self.x_stabilizers)
+                if sx_prev is not None:
+                    self._add_detectors(circuit, sx_prev, sx_curr)
+        
+                sx_prev = sx_curr
 
         end: Optional[int] = None
         if logical_string is not None:

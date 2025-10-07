@@ -23,13 +23,14 @@ from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--distance", type=int, default=11, help="Code distance d of the heavy-hex code")
+    parser.add_argument("--distance", type=int, default=7, help="Code distance d of the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
     parser.add_argument("--px", type=float, default=1e-4, help="Phenomenological X error probability")
     parser.add_argument("--pz", type=float, default=1e-4, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-}")
-    parser.add_argument("--shots", type=int, default=5000, help="Number of Monte Carlo samples")
+    parser.add_argument("--shots", type=int, default=10**4, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
+
     return parser.parse_args()
 
 
@@ -41,6 +42,7 @@ def run_experiment(
     init_label: str,
     shots: int,
     seed: int | None,
+    spatial: bool = True,
 ):
     model = build_heavy_hex_model(distance)
 
@@ -99,7 +101,10 @@ def run_experiment(
     result = run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config)
 
     print(f"shots={result.shots}")
+    print(f"Physical error rates: p_x={p_x}, p_z={p_z}")
     print(f"logical_error_rate = {result.logical_error_rate:.3e}")
+    if result.logical_error_rate > (p_x + p_z)/2:
+        print("WARNING: Logical error rate is higher than physical error rates!")
     print(f"avg_syndrome_weight = {result.avg_syndrome_weight:.3f}")
     print(f"click_rate(any_detector) = {result.click_rate:.3f}")
     print("Decoding complete with logical initialization.")

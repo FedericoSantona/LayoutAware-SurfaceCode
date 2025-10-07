@@ -44,17 +44,17 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=15000, help="Monte Carlo shots per data point")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for Stim samplers")
+    parser.add_argument("--shots", type=int, default=10**4, help="Monte Carlo shots per data point")
+    parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=None,
+        default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
-    parser.add_argument("--p-min", type=float, default=1e-7, help="Minimum physical error rate")
-    parser.add_argument("--p-max", type=float, default=3e-2, help="Maximum physical error rate")
-    parser.add_argument("--num-points", type=int, default=10, help="Number of physical error samples")
+    parser.add_argument("--p-min", type=float, default=1e-3, help="Minimum physical error rate")
+    parser.add_argument("--p-max", type=float, default=0.5, help="Maximum physical error rate")
+    parser.add_argument("--num-points", type=int, default=15, help="Number of physical error samples")
     parser.add_argument(
         "--plot-dir",
         type=Path,

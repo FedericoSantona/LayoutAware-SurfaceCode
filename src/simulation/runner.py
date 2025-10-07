@@ -46,28 +46,25 @@ def run_circuit_logical_error_rate(
     dem = circuit.detector_error_model()
     matcher = pm.Matching.from_detector_error_model(dem)
 
-    det_sampler = circuit.compile_detector_sampler(seed=mc_config.seed)
-    detector_samples = det_sampler.sample(mc_config.shots)
+    dem_sampler = dem.compile_sampler(seed=mc_config.seed)
+    detector_samples, observable_samples, _ = dem_sampler.sample(mc_config.shots)
 
-    if observable_pairs:
-        sampler = circuit.compile_sampler(seed=mc_config.seed)
-        meas_samples = sampler.sample(mc_config.shots)
-        logical_measurements = []
-        for start, end in observable_pairs:
-            logical_measurements.append(meas_samples[:, start] ^ meas_samples[:, end])
-        logical_array = np.vstack(logical_measurements).T.astype(np.uint8)
-    else:
+    detector_samples_bool = np.asarray(detector_samples, dtype=np.bool_)
+    if observable_samples is None or observable_samples.size == 0:
         logical_array = np.zeros((mc_config.shots, 1), dtype=np.uint8)
+    else:
+        logical_array = np.asarray(observable_samples, dtype=np.uint8)
 
-    predictions = matcher.decode_batch(detector_samples)
+    predictions = matcher.decode_batch(detector_samples_bool)
     predictions = np.asarray(predictions, dtype=np.uint8)
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
 
+    detector_samples_uint8 = detector_samples_bool.astype(np.uint8)
     logical_error_rate = (predictions[:, 0] ^ logical_array[:, 0]).mean()
 
-    avg_syndrome_weight = detector_samples.sum(axis=1).mean()
-    click_rate = (detector_samples.sum(axis=1) > 0).mean()
+    avg_syndrome_weight = detector_samples_uint8.sum(axis=1).mean()
+    click_rate = (detector_samples_uint8.sum(axis=1) > 0).mean()
 
     return SimulationResult(
         logical_error_rate=float(logical_error_rate),

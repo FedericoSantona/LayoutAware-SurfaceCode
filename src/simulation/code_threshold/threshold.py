@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from typing import Callable, Dict, Iterable, List, Sequence
 
 import numpy as np
 
@@ -82,7 +82,11 @@ class ThresholdStudyConfig:
     seed: int | None = None
 
 
-def run_scenario(scenario: ThresholdScenario, study_cfg: ThresholdStudyConfig) -> ThresholdScenarioResult:
+def run_scenario(
+    scenario: ThresholdScenario,
+    study_cfg: ThresholdStudyConfig,
+    progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
+) -> ThresholdScenarioResult:
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
         model = build_heavy_hex_model(distance)
@@ -118,6 +122,8 @@ def run_scenario(scenario: ThresholdScenario, study_cfg: ThresholdStudyConfig) -
                     click_rate=result.click_rate,
                 )
             )
+            if progress is not None:
+                progress(scenario, distance, p_x, p_z)
         sweeps.append(DistanceSweepResult(distance=distance, points=points))
     return ThresholdScenarioResult(
         name=scenario.name,

@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-
+import matplotlib.pyplot as plt
+ 
 # Ensure the src/ directory is available for imports when executed as a script
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
@@ -45,6 +46,21 @@ def run_experiment(
     spatial: bool = True,
 ):
     model = build_heavy_hex_model(distance)
+
+
+    # save the heavy-hex tiling
+    plot_dir = PROJECT_ROOT / "plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig = model.code.draw(
+        face_colors=False,
+        xcolor="lightcoral",
+        zcolor="skyblue",
+        figsize=(5, 5),
+    )
+    plt.savefig(plot_dir / f"heavy_hex_d{distance}.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Heavy-hex tiling saved to {plot_dir}/heavy_hex_d{distance}.png")
 
     print(f"Heavy-hex code with d={distance} has {model.code.n} physical qubits.")
     print(f"Number of gauge generators: {len(model.generators)}")

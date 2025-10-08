@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -19,6 +20,11 @@ if str(SRC_PATH) not in os.sys.path:
 mpl_cache = PROJECT_ROOT / ".mplconfig"
 mpl_cache.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
+
+try:  # Prefer a progress bar when available, but don't fail without it
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - tqdm is optional at runtime
+    tqdm = None  # type: ignore[assignment]
 
 from simulation.code_threshold import (
     ThresholdScenario,
@@ -44,7 +50,7 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=10**4, help="Monte Carlo shots per data point")
+    parser.add_argument("--shots", type=int, default=10**6, help="Monte Carlo shots per data point")
     parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
@@ -52,9 +58,9 @@ def parse_args() -> argparse.Namespace:
         default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
-    parser.add_argument("--p-min", type=float, default=1e-3, help="Minimum physical error rate")
+    parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
     parser.add_argument("--p-max", type=float, default=0.5, help="Maximum physical error rate")
-    parser.add_argument("--num-points", type=int, default=15, help="Number of physical error samples")
+    parser.add_argument("--num-points", type=int, default=20, help="Number of physical error samples")
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -110,10 +116,40 @@ def main() -> None:
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
 
     summary = {}
+    use_tqdm = tqdm is not None and sys.stdout.isatty()
 
     for scenario in scenarios:
-        print(f"Running scenario {scenario.name} (init {scenario.init_label})")
-        result = run_scenario(scenario, study_cfg)
+        total_runs = len(scenario.distances) * len(scenario.physical_error_grid)
+        progress_bar = None
+        if use_tqdm and total_runs > 0:
+            progress_bar = tqdm(
+                total=total_runs,
+                desc=f"{scenario.name} sweeps",
+                unit="run",
+                dynamic_ncols=True,
+            )
+
+        def log(message: str) -> None:
+            if progress_bar is not None:
+                progress_bar.write(message)
+            else:
+                print(message)
+
+        def update_progress(scenario: ThresholdScenario, distance: int, p_x: float, p_z: float) -> None:
+            if progress_bar is None:
+                return
+            progress_bar.set_postfix_str(
+                f"d={distance} p_x={p_x:.1e} p_z={p_z:.1e}",
+                refresh=False,
+            )
+            progress_bar.update()
+
+        log(f"Running scenario {scenario.name} (init {scenario.init_label})")
+        result = run_scenario(
+            scenario,
+            study_cfg,
+            progress=update_progress if progress_bar is not None else None,
+        )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir)
         crossings = estimate_crossings(result)
@@ -129,14 +165,18 @@ def main() -> None:
         for pair, crossing in crossings.items():
             d1, d2 = pair
             if crossing is None:
-                print(f"  d={d1} vs d={d2}: no crossing within sampled range")
+                log(f"  d={d1} vs d={d2}: no crossing within sampled range")
             else:
-                print(f"  d={d1} vs d={d2}: estimated crossing at p ~ {crossing:.3e}")
-        print(f"  plot saved to {plot_path}")
+                log(f"  d={d1} vs d={d2}: estimated crossing at p ~ {crossing:.3e}")
+        log(f"  plot saved to {plot_path}")
+
+        if progress_bar is not None:
+            progress_bar.close()
 
     summary_path = data_dir / "threshold_summary.json"
     with summary_path.open("w") as fh:
         json.dump(summary, fh, indent=2)
+
     print(f"Summary saved to {summary_path}")
 
 

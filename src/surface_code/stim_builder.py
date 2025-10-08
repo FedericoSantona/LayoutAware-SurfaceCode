@@ -165,7 +165,7 @@ class PhenomenologicalStimBuilder:
             # X half
             if measure_X:
                 circuit.append_operation("TICK")
-                
+
                 apply_z_noise()
                 sx_curr = self._measure_list(circuit, self.x_stabilizers)
                 if sx_prev is not None:

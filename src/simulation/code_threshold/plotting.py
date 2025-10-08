@@ -16,12 +16,9 @@ def _x_values(result: ThresholdScenarioResult, sweep: DistanceSweepResult) -> np
     return np.array([pt.p_z for pt in sweep.points])
 
 
-def plot_scenario(result: ThresholdScenarioResult, output_dir: Path) -> Path:
+def plot_scenario(result: ThresholdScenarioResult, output_dir: Path ,floor_value: float) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 4))
-
-    # Constant floor for zero-valued points on a log scale.
-    floor_value = 1e-12
 
     for sweep in result.sweeps:
         x_vals = _x_values(result, sweep)
@@ -34,7 +31,7 @@ def plot_scenario(result: ThresholdScenarioResult, output_dir: Path) -> Path:
         ax.plot(x_vals, y_vals, marker='o', label=f"d={sweep.distance}")
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_ylim(bottom=1e-12)
+    ax.set_ylim(bottom=floor_value)
     axis_label = "p_X" if result.track == "Z" else ("p_Z" if result.track == "X" else "p")
     ax.set_xlabel(f"Physical error rate ({axis_label})")
     ax.set_ylabel("Logical error rate")

@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
-    parser.add_argument("--p-max", type=float, default=0.5, help="Maximum physical error rate")
+    parser.add_argument("--p-max", type=float, default=0.05, help="Maximum physical error rate")
     parser.add_argument("--num-points", type=int, default=20, help="Number of physical error samples")
     parser.add_argument(
         "--plot-dir",
@@ -151,7 +151,7 @@ def main() -> None:
             progress=update_progress if progress_bar is not None else None,
         )
         csv_paths = export_csv(result, data_dir)
-        plot_path = plot_scenario(result, plot_dir)
+        plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
         crossings = estimate_crossings(result)
         summary[scenario.name] = {
             "csv": {str(distance): str(path.relative_to(PROJECT_ROOT)) for distance, path in csv_paths.items()},

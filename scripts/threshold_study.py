@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
-    parser.add_argument("--p-max", type=float, default=0.05, help="Maximum physical error rate")
+    parser.add_argument("--p-max", type=float, default=0.1, help="Maximum physical error rate")
     parser.add_argument("--num-points", type=int, default=20, help="Number of physical error samples")
     parser.add_argument(
         "--plot-dir",

@@ -15,7 +15,6 @@ from typing import Dict, List, Sequence, Tuple, Type
 import importlib
 import os
 import sys
-
 if __name__ == "__main__":
     REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if REPO_ROOT not in sys.path:
@@ -31,12 +30,32 @@ from benchmarks.BenchmarkCircuit import BenchmarkCircuit
 from benchmarks.circuits.bell import BellStateBenchmark
 from benchmarks.circuits.ghz import GHZ3Benchmark
 from benchmarks.circuits.parity_check import ParityCheckBenchmark
+from benchmarks.circuits.simple import Simple1QXZHBenchmark
 from benchmarks.circuits.teleportation import TeleportationBenchmark
+from surface_code.utils import (
+    plot_heavy_hex_code,
+    diagnostic_print,
+    print_logical_results,
+    compute_pauli_frame_stats,
+)
 from qiskit import QuantumCircuit
 from qiskit.transpiler import Target
 
 from transpile.config import TranspileConfig
 from transpile.pipeline import HeavyHexTranspiler
+from surface_code import (
+    build_heavy_hex_model,
+    PhenomenologicalStimBuilder,
+    PhenomenologicalStimConfig,
+)
+from surface_code.logical_ops import (
+    LogicalFrame,
+    apply_sequence,
+    end_basis_and_flip,
+    circuit_to_gates,
+    parse_init_label,
+)
+from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +67,19 @@ BENCHMARKS: Dict[str, Type[BenchmarkCircuit]] = {
     "ghz3": GHZ3Benchmark,
     "parity_check": ParityCheckBenchmark,
     "teleportation": TeleportationBenchmark,
+    "simple_1q_xzh": Simple1QXZHBenchmark,
 }
+
+
+def _str2bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value for flag, got '{value}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -119,13 +150,25 @@ TARGET_LOADERS = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the heavy-hex transpilation pipeline on a benchmark circuit.",
+        description="Transpile logical benchmarks and optionally simulate logical 1Q sequences on the surface code.",
     )
     parser.add_argument(
         "--benchmark",
-        default="parity_check", # options are bell, ghz3, parity_check, teleportation
+        default="simple_1q_xzh", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
-        help="Logical circuit template to transpile.",
+        help="Logical circuit template (used for transpile or simulation).",
+    )
+    parser.add_argument(
+        "--logical-encoding",
+        type=_str2bool,
+        default=True,
+        help="Run the logical encoding/surface-code simulation branch (true/false).",
+    )
+    parser.add_argument(
+        "--transpilation",
+        type=_str2bool,
+        default=False,
+        help="Run the heavy-hex transpilation branch (true/false).",
     )
     parser.add_argument(
         "--target",
@@ -168,6 +211,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional path to dump a JSON snapshot of the results.",
     )
+    # Simulation options (used when logical encoding branch is enabled)
+
+    parser.add_argument("--distance", type=int, default=5, help="Code distance d for the heavy-hex code")
+    parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
+    parser.add_argument("--px", type=float, default=1e-2, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=1e-2, help="Phenomenological Z error probability")
+    parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
+    parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
+    parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
+    
     return parser
 
 
@@ -211,44 +264,158 @@ def format_leaderboard(
 def main() -> None:
     args = build_parser().parse_args()
 
-    benchmark = instantiate_benchmark(args.benchmark)
-    logical_metrics = benchmark.compute_logical_metrics()
+    run_logical = bool(args.logical_encoding)
+    run_transpile = bool(args.transpilation)
 
-    target = load_target(args.target)
-    config = build_config(target, args)
-    transpiler = HeavyHexTranspiler(config)
+    if not run_logical and not run_transpile:
+        print("No action requested: enable --logical-encoding true and/or --transpilation true.")
+        return
 
-    logical_circuit = benchmark.get_circuit()
-    best, best_metrics, leaderboard = transpiler.run_baseline(logical_circuit)
+    json_payloads: List[Dict[str, object]] = []
 
-    leaderboard_payload = format_leaderboard(leaderboard)
-    payload = {
-        "benchmark": args.benchmark,
-        "target": args.target,
-        "logical_metrics": logical_metrics,
-        "best_metrics": best_metrics,
-        "leaderboard": leaderboard_payload,
-    }
+    if run_logical:
+        benchmark = instantiate_benchmark(args.benchmark)
+        qc = benchmark.get_circuit()
 
-    print(f"Benchmark: {args.benchmark}")
-    print(f"Target: {args.target}")
-    print(f"Logical metrics: {logical_metrics}")
-    print(f"Best mapped metrics: {best_metrics}")
-    print("Leaderboard (top candidates):")
-    for entry in leaderboard_payload:
-        metrics = entry["metrics"]
-        print(
-            "  #{rank}: depth={depth} twoq={twoq} swaps={swaps} duration_ns={dur}".format(
-                rank=entry["rank"],
-                depth=metrics.get("depth"),
-                twoq=metrics.get("twoq"),
-                swaps=metrics.get("swaps"),
-                dur=metrics.get("duration_ns"),
-            )
+        gate_seq = circuit_to_gates(qc)
+        frame = apply_sequence(LogicalFrame(), gate_seq)
+
+        init_label = (args.init or "0").strip()
+        # Parse basis and eigen-sign (+1/-1) from init label
+        start_basis, init_sign = parse_init_label(init_label)
+        end_basis, expected_flip = end_basis_and_flip(start_basis, frame)
+        # Incorporate the initial eigen-sign into the expected correlation parity.
+        # A '-1' eigenstate contributes a unit flip to the start-vs-end parity definition.
+        expected_flip_total = int(expected_flip) ^ (0 if init_sign == +1 else 1)
+
+        model = build_heavy_hex_model(args.distance)
+
+        plot_heavy_hex_code(model, args.distance)
+
+        diagnostic_print(model, args)
+
+        stim_rounds = int(args.rounds) if args.rounds is not None else int(args.distance)
+        stim_cfg = PhenomenologicalStimConfig(
+            rounds=stim_rounds,
+            p_x_error=float(args.px),
+            p_z_error=float(args.pz),
+            init_label=init_label,
+            logical_start=start_basis,
+            logical_end=end_basis,
+        )
+        builder = PhenomenologicalStimBuilder(
+            code=model.code,
+            z_stabilizers=model.z_stabilizers,
+            x_stabilizers=model.x_stabilizers,
+            logical_z=model.logical_z,
+            logical_x=model.logical_x,
+        )
+        circuit, observable_pairs = builder.build(stim_cfg)
+        result = run_circuit_logical_error_rate(
+            circuit,
+            observable_pairs,
+            stim_cfg,
+            MonteCarloConfig(shots=int(args.shots), seed=int(args.seed) if args.seed is not None else None),
+        )
+        frame_stats = compute_pauli_frame_stats(result, end_basis, expected_flip_total)
+
+        print_logical_results(
+            args,
+            gate_seq,
+            start_basis,
+            init_sign,
+            end_basis,
+            expected_flip_total,
+            stim_rounds,
+            result,
+            frame_stats,
         )
 
-    if args.dump_json:
-        args.dump_json.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        json_payloads.append(
+            {
+                "branch": "logical_encoding",
+                "benchmark": args.benchmark,
+                "sequence": gate_seq,
+                "start_basis": start_basis,
+                "end_basis": end_basis,
+                "init_sign": int(init_sign),
+                "expected_flip": int(expected_flip),
+                "expected_flip_total": int(expected_flip_total),
+                "decoder_frame_basis": end_basis,
+                "distance": int(args.distance),
+                "rounds": int(stim_rounds),
+                "p_x": float(args.px),
+                "p_z": float(args.pz),
+                "shots": int(result.shots),
+                "logical_error_rate": float(result.logical_error_rate),
+                "avg_syndrome_weight": float(result.avg_syndrome_weight),
+                "click_rate": float(result.click_rate),
+                "frame_flip": int(expected_flip_total),
+                "logical_mean_raw": float(frame_stats.logical_means["raw"]),
+                "logical_mean_expected_frame": float(frame_stats.logical_means["expected"]),
+                "logical_mean_decoder_frame": float(frame_stats.logical_means["decoder"]),
+                "decoded_mean_raw": float(frame_stats.decoded_means["raw"]),
+                "decoded_mean_expected_frame": float(frame_stats.decoded_means["expected"]),
+                "decoded_mean_decoder_frame": float(frame_stats.decoded_means["decoder"]),
+                "decoder_frame_flip_rate": float(frame_stats.decoder_flip_rate),
+                "tracked_frame_flip_rate": float(frame_stats.tracked_frame_rate),
+                "logical_prob_raw": {k: float(v) for k, v in frame_stats.logical_probs["raw"].items()},
+                "logical_prob_expected_frame": {k: float(v) for k, v in frame_stats.logical_probs["expected_frame"].items()},
+                "logical_prob_decoder_frame": {k: float(v) for k, v in frame_stats.logical_probs["decoder_frame"].items()},
+                "decoded_prob_raw": {k: float(v) for k, v in frame_stats.decoded_probs["raw"].items()},
+                "decoded_prob_expected_frame": {k: float(v) for k, v in frame_stats.decoded_probs["expected_frame"].items()},
+                "decoded_prob_decoder_frame": {k: float(v) for k, v in frame_stats.decoded_probs["decoder_frame"].items()},
+                "tracked_frame_prob": {k: float(v) for k, v in frame_stats.frame_prob.items()},
+            }
+        )
+
+    if run_transpile:
+        benchmark = instantiate_benchmark(args.benchmark)
+        logical_metrics = benchmark.compute_logical_metrics()
+
+        target = load_target(args.target)
+        config = build_config(target, args)
+        transpiler = HeavyHexTranspiler(config)
+
+        logical_circuit = benchmark.get_circuit()
+        best, best_metrics, leaderboard = transpiler.run_baseline(logical_circuit)
+
+        leaderboard_payload = format_leaderboard(leaderboard)
+        print(f"Benchmark: {args.benchmark}")
+        print(f"Target: {args.target}")
+        print(f"Logical metrics: {logical_metrics}")
+        print(f"Best mapped metrics: {best_metrics}")
+        print("Leaderboard (top candidates):")
+        for entry in leaderboard_payload:
+            metrics = entry["metrics"]
+            print(
+                "  #{rank}: depth={depth} twoq={twoq} swaps={swaps} duration_ns={dur}".format(
+                    rank=entry["rank"],
+                    depth=metrics.get("depth"),
+                    twoq=metrics.get("twoq"),
+                    swaps=metrics.get("swaps"),
+                    dur=metrics.get("duration_ns"),
+                )
+            )
+
+        json_payloads.append(
+            {
+                "branch": "transpilation",
+                "benchmark": args.benchmark,
+                "target": args.target,
+                "logical_metrics": logical_metrics,
+                "best_metrics": best_metrics,
+                "leaderboard": leaderboard_payload,
+            }
+        )
+
+    if args.dump_json and json_payloads:
+        payload_out: List[Dict[str, object]] | Dict[str, object]
+        if len(json_payloads) == 1:
+            payload_out = json_payloads[0]
+        else:
+            payload_out = json_payloads
+        args.dump_json.write_text(json.dumps(payload_out, indent=2, sort_keys=True))
         print(f"\nDumped JSON snapshot to {args.dump_json}")
 
 

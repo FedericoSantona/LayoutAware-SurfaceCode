@@ -21,9 +21,11 @@ class PhenomenologicalStimConfig:
     p_z_error: float = 1e-3
     init_label: Optional[str] = None  # one of {"0", "1", "+", "-"}
     family: Optional[str] = None
-   
-
-
+    # Optional explicit logical correlation measurement: start/end operator choice
+    # as basis labels 'Z' or 'X'. When provided, they override the default derived
+    # from init_label for the start, and allow using a different operator at the end.
+    logical_start: Optional[str] = None
+    logical_end: Optional[str] = None
 
 class PhenomenologicalStimBuilder:
     """Construct Stim circuits for repeated stabilizer measurements."""
@@ -110,17 +112,52 @@ class PhenomenologicalStimBuilder:
         measure_Z = (fam in {"", "Z"})
         measure_X = (fam in {"", "X"})
 
-        logical_string = None
-        if config.init_label is not None:
+        # Determine which logical string(s) to correlate between start and end.
+        # Backward compatible default: if only init_label is set, use the same
+        # logical string at start and end.
+        logical_start_str: Optional[str] = None
+        logical_end_str: Optional[str] = None
+        # Prefer explicit overrides if provided.
+        if config.logical_start is not None:
+            b = config.logical_start.strip().upper()
+            if b == "Z":
+                if self.logical_z is None:
+                    raise ValueError("Z logical operator required for start measurement")
+                logical_start_str = self.logical_z
+            elif b == "X":
+                if self.logical_x is None:
+                    raise ValueError("X logical operator required for start measurement")
+                logical_start_str = self.logical_x
+            else:
+                raise ValueError("logical_start must be 'Z' or 'X'")
+        if config.logical_end is not None:
+            b = config.logical_end.strip().upper()
+            if b == "Z":
+                if self.logical_z is None:
+                    raise ValueError("Z logical operator required for end measurement")
+                logical_end_str = self.logical_z
+            elif b == "X":
+                if self.logical_x is None:
+                    raise ValueError("X logical operator required for end measurement")
+                logical_end_str = self.logical_x
+            else:
+                raise ValueError("logical_end must be 'Z' or 'X'")
+
+        # If overrides weren't provided, fall back to init_label-driven defaults.
+        if logical_end_str is None and config.init_label is not None:
             basis, _ = self._init_intent(config.init_label.strip())
             if basis == "Z":
                 if self.logical_z is None:
                     raise ValueError("Z logical operator required for Z-basis initialization")
-                logical_string = self.logical_z
+                logical_end_str = self.logical_z
+                if logical_start_str is None:
+                    logical_start_str = self.logical_z
             else:
                 if self.logical_x is None:
                     raise ValueError("X logical operator required for X-basis initialization")
-                logical_string = self.logical_x
+                logical_end_str = self.logical_x
+                if logical_start_str is None:
+                    logical_start_str = self.logical_x
 
         for q in range(n):
             circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
@@ -136,9 +173,9 @@ class PhenomenologicalStimBuilder:
         observable_pairs: list[tuple[int, int]] = []
 
         start: Optional[int] = None
-        if logical_string is not None:
+        if logical_start_str is not None:
             circuit.append_operation("TICK")
-            start = self._mpp_from_string(circuit, logical_string)
+            start = self._mpp_from_string(circuit, logical_start_str)
 
         # Establish reference measurements before noisy cycles, per-family.
         sz_prev: Optional[list[int]] = None
@@ -174,15 +211,16 @@ class PhenomenologicalStimBuilder:
                 sx_prev = sx_curr
 
         end: Optional[int] = None
-        if logical_string is not None:
+        if logical_end_str is not None:
             circuit.append_operation("TICK")
-            end = self._mpp_from_string(circuit, logical_string)
-            if start is not None and end is not None:
-                circuit.append_operation(
-                    "OBSERVABLE_INCLUDE",
-                    [self._rec_from_abs(circuit, start), self._rec_from_abs(circuit, end)],
-                    0,
-                )
+            end = self._mpp_from_string(circuit, logical_end_str)
+            obs_targets: list[stim.GateTarget] = []
+            if start is not None:
+                obs_targets.append(self._rec_from_abs(circuit, start))
+            if end is not None:
+                obs_targets.append(self._rec_from_abs(circuit, end))
+            if obs_targets:
+                circuit.append_operation("OBSERVABLE_INCLUDE", obs_targets, 0)
                 observable_pairs.append((start, end))
 
         return circuit, observable_pairs

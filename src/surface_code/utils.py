@@ -207,21 +207,11 @@ def print_logical_results(
     )
 
     print("----------------TRACKED PAULI FRAME (GATES + DECODER):----------------")
-    print(
-        "  tracked_frame dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.frame_prob["|0>"] * 100.0,
-            frame_stats.frame_prob["|1>"] * 100.0,
-        )
-    )
+
     print(
         "  logical_post_correction dist: |0>={:6.2f}% |1>={:6.2f}%".format(
             frame_stats.logical_probs["decoder_frame"]["|0>"] * 100.0,
             frame_stats.logical_probs["decoder_frame"]["|1>"] * 100.0,
         )
     )
-    print(
-        "  decoded_post_correction dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.decoded_probs["decoder_frame"]["|0>"] * 100.0,
-            frame_stats.decoded_probs["decoder_frame"]["|1>"] * 100.0,
-        )
-    )
+   

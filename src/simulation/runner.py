@@ -93,6 +93,9 @@ class SimulationResult:
     logical_observables: np.ndarray
     num_detectors: int
     observable_basis: Tuple[str, ...]
+    # Optional physics-based end-basis reporting (demo readout)
+    demo_bits: Optional[np.ndarray] = None
+    demo_basis: Optional[str] = None
 
     def frame_corrected_observables(self, frame_flip: int) -> Tuple[np.ndarray, np.ndarray]:
         """Return logical observables and decoder predictions after applying a frame flip."""
@@ -128,8 +131,8 @@ def run_logical_error_rate(
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
 ) -> SimulationResult:
-    circuit, observable_pairs = builder.build(stim_config)
-    return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config)
+    circuit, observable_pairs, metadata = builder.build(stim_config)
+    return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
 
 
 def run_circuit_logical_error_rate(
@@ -137,6 +140,7 @@ def run_circuit_logical_error_rate(
     observable_pairs: Sequence[Tuple[int, int]],
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
+    metadata: Optional[dict] = None,
 ) -> SimulationResult:
     dem = circuit.detector_error_model()
     matcher = pm.Matching.from_detector_error_model(dem)
@@ -164,6 +168,22 @@ def run_circuit_logical_error_rate(
 
     observable_basis = _infer_observable_basis(predictions.shape[1], stim_config)
 
+    # Optionally sample demo measurement bits from the circuit's measurement
+    # record (end-only MPP in requested basis). This is independent from DEM.
+    demo_bits: Optional[np.ndarray] = None
+    demo_basis: Optional[str] = None
+    if metadata is not None and "demo_index" in metadata:
+        demo_basis = metadata.get("demo_basis")
+        # Compile a circuit sampler to sample raw measurements including the demo.
+        circ_sampler = circuit.compile_sampler(seed=mc_config.seed)
+        # Sample measurements only (detector samples not needed here).
+        m_samples = circ_sampler.sample(shots=mc_config.shots)
+        # The returned array is [shots, num_measurements]; pick the column at demo_index.
+        # Stim returns booleans; convert to uint8 for consistency.
+        demo_col = int(metadata["demo_index"]) if metadata["demo_index"] is not None else None
+        if demo_col is not None:
+            demo_bits = np.asarray(m_samples[:, demo_col], dtype=np.uint8)
+
     return SimulationResult(
         logical_error_rate=float(logical_error_rate),
         avg_syndrome_weight=float(avg_syndrome_weight),
@@ -173,6 +193,8 @@ def run_circuit_logical_error_rate(
         logical_observables=logical_array,
         num_detectors=dem.num_detectors,
         observable_basis=observable_basis,
+        demo_bits=demo_bits,
+        demo_basis=demo_basis,
     )
 
 
@@ -180,10 +202,9 @@ def _infer_observable_basis(num_observables: int, stim_config: PhenomenologicalS
     """Infer logical basis labels for each tracked observable column."""
     if num_observables == 0:
         return tuple()
-    if stim_config.logical_end is not None:
-        basis = stim_config.logical_end.strip().upper()
-    elif stim_config.logical_start is not None:
-        basis = stim_config.logical_start.strip().upper()
+    # Bracket basis is fixed for DEM/decoding
+    if stim_config.bracket_basis is not None:
+        basis = stim_config.bracket_basis.strip().upper()
     elif stim_config.init_label is not None:
         basis, _ = parse_init_label(stim_config.init_label)
     else:

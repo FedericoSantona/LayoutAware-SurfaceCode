@@ -26,6 +26,14 @@ class PhenomenologicalStimConfig:
     # from init_label for the start, and allow using a different operator at the end.
     logical_start: Optional[str] = None
     logical_end: Optional[str] = None
+    # Select the fixed bracketing basis for the start/end logical MPP used in
+    # OBSERVABLE_INCLUDE. One of None, 'Z', or 'X'. If None, derive from
+    # init_label: Z for {0,1}, X for {+,-}.
+    bracket_basis: Optional[str] = None
+    # Optional: append a final end-only demo readout MPP in the requested basis
+    # ("X" or "Z"). This extra measurement is NOT part of OBSERVABLE_INCLUDE and
+    # NOT used by detectors; it is for physics-based reporting in the end basis.
+    demo_basis: Optional[str] = None
 
 class PhenomenologicalStimBuilder:
     """Construct Stim circuits for repeated stabilizer measurements."""
@@ -101,7 +109,7 @@ class PhenomenologicalStimBuilder:
 
     # ----- public API --------------------------------------------------
 
-    def build(self, config: PhenomenologicalStimConfig) -> tuple[stim.Circuit, list[tuple[int, int]]]:
+    def build(self, config: PhenomenologicalStimConfig) -> tuple[stim.Circuit, list[tuple[int, int]], dict]:
         n = self.code.n
         circuit = stim.Circuit()
 
@@ -112,52 +120,30 @@ class PhenomenologicalStimBuilder:
         measure_Z = (fam in {"", "Z"})
         measure_X = (fam in {"", "X"})
 
-        # Determine which logical string(s) to correlate between start and end.
-        # Backward compatible default: if only init_label is set, use the same
-        # logical string at start and end.
-        logical_start_str: Optional[str] = None
-        logical_end_str: Optional[str] = None
-        # Prefer explicit overrides if provided.
-        if config.logical_start is not None:
-            b = config.logical_start.strip().upper()
-            if b == "Z":
-                if self.logical_z is None:
-                    raise ValueError("Z logical operator required for start measurement")
-                logical_start_str = self.logical_z
-            elif b == "X":
-                if self.logical_x is None:
-                    raise ValueError("X logical operator required for start measurement")
-                logical_start_str = self.logical_x
-            else:
-                raise ValueError("logical_start must be 'Z' or 'X'")
-        if config.logical_end is not None:
-            b = config.logical_end.strip().upper()
-            if b == "Z":
-                if self.logical_z is None:
-                    raise ValueError("Z logical operator required for end measurement")
-                logical_end_str = self.logical_z
-            elif b == "X":
-                if self.logical_x is None:
-                    raise ValueError("X logical operator required for end measurement")
-                logical_end_str = self.logical_x
-            else:
-                raise ValueError("logical_end must be 'Z' or 'X'")
+        # Deterministic DEM: always bracket with a single logical operator at
+        # start and end, chosen by bracket_basis (Z or X). If not provided,
+        # derive from init_label: Z for {0,1}, X for {+,-}. Default to Z.
+        chosen_basis: str
+        if config.bracket_basis is not None:
+            chosen_basis = config.bracket_basis.strip().upper()
+            if chosen_basis not in {"Z", "X"}:
+                raise ValueError("bracket_basis must be 'Z' or 'X'")
+        elif config.init_label is not None:
+            init_b, _ = self._init_intent(config.init_label.strip())
+            chosen_basis = init_b
+        else:
+            chosen_basis = "Z"
 
-        # If overrides weren't provided, fall back to init_label-driven defaults.
-        if logical_end_str is None and config.init_label is not None:
-            basis, _ = self._init_intent(config.init_label.strip())
-            if basis == "Z":
-                if self.logical_z is None:
-                    raise ValueError("Z logical operator required for Z-basis initialization")
-                logical_end_str = self.logical_z
-                if logical_start_str is None:
-                    logical_start_str = self.logical_z
-            else:
-                if self.logical_x is None:
-                    raise ValueError("X logical operator required for X-basis initialization")
-                logical_end_str = self.logical_x
-                if logical_start_str is None:
-                    logical_start_str = self.logical_x
+        if chosen_basis == "Z":
+            if self.logical_z is None:
+                raise ValueError("Z logical operator required for Z bracketing")
+            logical_start_str: Optional[str] = self.logical_z
+            logical_end_str: Optional[str] = self.logical_z
+        else:
+            if self.logical_x is None:
+                raise ValueError("X logical operator required for X bracketing")
+            logical_start_str = self.logical_x
+            logical_end_str = self.logical_x
 
         for q in range(n):
             circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
@@ -171,6 +157,7 @@ class PhenomenologicalStimBuilder:
                 circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
 
         observable_pairs: list[tuple[int, int]] = []
+        metadata: dict = {}
 
         start: Optional[int] = None
         if logical_start_str is not None:
@@ -223,4 +210,24 @@ class PhenomenologicalStimBuilder:
                 circuit.append_operation("OBSERVABLE_INCLUDE", obs_targets, 0)
                 observable_pairs.append((start, end))
 
-        return circuit, observable_pairs
+        # Optional: append an end-only demo readout in requested basis for
+        # physics-based reporting (not part of observables/detectors).
+        if config.demo_basis is not None:
+            b = config.demo_basis.strip().upper()
+            if b not in {"X", "Z"}:
+                raise ValueError("demo_basis must be 'X' or 'Z'")
+            if b == "X":
+                if self.logical_x is None:
+                    raise ValueError("X logical operator required for demo readout")
+                circuit.append_operation("TICK")
+                demo_idx = self._mpp_from_string(circuit, self.logical_x)
+                metadata["demo_basis"] = "X"
+                metadata["demo_index"] = demo_idx
+            else:
+                # Z basis demo (use same Z_L string)
+                circuit.append_operation("TICK")
+                demo_idx = self._mpp_from_string(circuit, self.logical_z)
+                metadata["demo_basis"] = "Z"
+                metadata["demo_index"] = demo_idx
+
+        return circuit, observable_pairs, metadata

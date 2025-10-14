@@ -215,9 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--distance", type=int, default=5, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--px", type=float, default=1e-2, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=1e-2, help="Phenomenological Z error probability")
+    parser.add_argument("--px", type=float, default=5e-3, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=5e-3, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
+    parser.add_argument(
+        "--bracket-basis",
+        type=str,
+        choices=["auto", "Z", "X"],
+        default="auto",
+        help="Choose which logical basis to bracket in the DEM (start/end observable). 'auto' derives from --init (Z for 0/1, X for +/-).",
+    )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
     
@@ -295,13 +302,23 @@ def main() -> None:
         diagnostic_print(model, args)
 
         stim_rounds = int(args.rounds) if args.rounds is not None else int(args.distance)
+        # Resolve bracket basis: auto derives from init label
+        if (args.bracket_basis or "auto").lower() == "auto":
+            bracket_basis = start_basis
+        else:
+            bracket_basis = args.bracket_basis.strip().upper()
+        # Physics-based reporting in the end basis: request an end-only demo
+        # MPP if the end basis differs from the bracket basis.
+        demo_basis = end_basis if end_basis != bracket_basis else None
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
             p_x_error=float(args.px),
             p_z_error=float(args.pz),
             init_label=init_label,
-            logical_start=start_basis,
-            logical_end=end_basis,
+            logical_start=None,
+            logical_end=None,
+            bracket_basis=bracket_basis,
+            demo_basis=demo_basis,
         )
         builder = PhenomenologicalStimBuilder(
             code=model.code,
@@ -310,14 +327,27 @@ def main() -> None:
             logical_z=model.logical_z,
             logical_x=model.logical_x,
         )
-        circuit, observable_pairs = builder.build(stim_cfg)
+        circuit, observable_pairs, metadata = builder.build(stim_cfg)
         result = run_circuit_logical_error_rate(
             circuit,
             observable_pairs,
             stim_cfg,
             MonteCarloConfig(shots=int(args.shots), seed=int(args.seed) if args.seed is not None else None),
+            metadata,
         )
-        frame_stats = compute_pauli_frame_stats(result, end_basis, expected_flip_total)
+        # If demo bits are present for physics-based end-basis reporting, compute
+        # stats from them without applying decoder corrections (decoder doesn't act
+        # on the demo readout). Otherwise, fall back to DEM observable.
+        if getattr(result, "demo_bits", None) is not None and result.demo_bits is not None:
+            frame_stats = compute_pauli_frame_stats(
+                result,
+                end_basis,
+                expected_flip_total,
+                override_raw=result.demo_bits,
+                apply_decoder=False,
+            )
+        else:
+            frame_stats = compute_pauli_frame_stats(result, end_basis, expected_flip_total)
 
         print_logical_results(
             args,

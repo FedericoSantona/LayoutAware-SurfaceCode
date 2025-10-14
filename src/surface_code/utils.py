@@ -93,13 +93,18 @@ def compute_pauli_frame_stats(
     basis: str,
     expected_flip_total: int,
     column: int = 0,
+    override_raw: np.ndarray | None = None,
+    apply_decoder: bool = True,
 ) -> PauliFrameStats:
     """Return Pauli-frame derived quantities for a given logical basis."""
 
-    raw_logicals = result.logical_observables[:, column]
+    raw_logicals = result.logical_observables[:, column] if override_raw is None else np.asarray(override_raw, dtype=np.uint8)
     raw_predictions = result.predictions[:, column]
     decoder_frame = result.decoder_frame()
-    decoder_corrections = decoder_frame.correction_bits(basis, column=column)
+    if apply_decoder:
+        decoder_corrections = decoder_frame.correction_bits(basis, column=column)
+    else:
+        decoder_corrections = np.zeros_like(raw_logicals, dtype=np.uint8)
     decoder_flip_rate = float(decoder_corrections.mean())
 
     expected_frame_bit = int(expected_flip_total) & 1

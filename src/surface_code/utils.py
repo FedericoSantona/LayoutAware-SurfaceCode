@@ -158,65 +158,97 @@ def compute_pauli_frame_stats(
     )
 
 
-def print_logical_results(
+def print_multi_qubit_results(
     args,
-    gate_seq,
-    start_basis,
-    init_sign,
-    end_basis,
-    expected_flip_total,
-    stim_rounds,
-    result,
-    frame_stats: PauliFrameStats,
+    basis_labels: tuple[str, ...],
+    stim_rounds: int,
+    result: "SimulationResult",
+    expected_flips: "np.ndarray | list[int] | tuple[int, ...] | None" = None,
+    gate_seq: "list[str] | None" = None,
 ):
-    print("Simulation: logical 1Q sequence on heavy-hex surface code")
+    """Print per-qubit logical distributions in the style of print_logical_results.
+
+    For each observable column, prints the raw/expected/decoder distributions.
+    Expected-frame bit defaults to 0 in this multi-qubit summary unless the
+    caller pre-adjusts the SimulationResult or passes override bits elsewhere.
+
+    """
+    print("Simulation: logical sequence on heavy-hex surface code")
     print(f"  benchmark = {args.benchmark}")
-    print(f"  sequence  = {' '.join(gate_seq) if gate_seq else '(empty)'}")
-    print(f"  init/start basis = {start_basis} (sign {init_sign:+d}), end basis = {end_basis}, expected flip = {expected_flip_total}")
-    print(f"  distance = {args.distance}, rounds = {stim_rounds}")
+    if gate_seq is not None:
+        print(f"  sequence  = {' '.join(gate_seq) if gate_seq else '(empty)'}")
+    num_cols = len(basis_labels)
+    print(f"  qubits = {num_cols}, distance = {args.distance}, rounds = {stim_rounds}")
     print(f"  p_x = {args.px}, p_z = {args.pz}")
     print(f"  shots = {result.shots}, detectors = {result.num_detectors}")
-    print(f"  logical_error_rate = {result.logical_error_rate:.3e}")
-    print(f"  avg_syndrome_weight = {result.avg_syndrome_weight:.3f}")
-    print(f"  click_rate = {result.click_rate:.3f}")
-    print(f"  decoder_observable parity rate (basis {end_basis}) = {frame_stats.decoder_flip_rate:.3f}")
-    print(f"  tracked_pauli_frame parity rate (basis {end_basis}) = {frame_stats.tracked_frame_rate:.3f}")
-
-    """"""
-
-    print("----------------EXPECTED RESULTS WITHOUT PAULI FRAME CORRECTION:----------------")
-    print(
-        "  logical_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.logical_probs["raw"]["|0>"] * 100.0, frame_stats.logical_probs["raw"]["|1>"] * 100.0
+    # Decoder logical error rate: mean over columns of XOR(predictions, observables)
+    try:
+        preds = np.asarray(result.predictions, dtype=np.uint8)
+        obs = np.asarray(result.logical_observables, dtype=np.uint8)
+        if preds.ndim == 1:
+            preds = preds.reshape(-1, 1)
+        if obs.ndim == 1:
+            obs = obs.reshape(-1, 1)
+        min_cols = min(preds.shape[1], obs.shape[1])
+        if min_cols > 0:
+            per_qubit_ler = (np.bitwise_xor(preds[:, :min_cols], obs[:, :min_cols]).mean(axis=0)).astype(float)
+            avg_ler = float(per_qubit_ler.mean())
+            print(f"  decoder logical_error_rate (avg over qubits) = {avg_ler:.3e}")
+        else:
+            per_qubit_ler = None
+    except Exception:
+        per_qubit_ler = None
+    print("----------------PER-QUBIT LOGICAL RESULTS----------------")
+    for idx, basis in enumerate(basis_labels):
+        ef = 0
+        if expected_flips is not None:
+            try:
+                ef = int(expected_flips[idx]) & 1
+            except Exception:
+                ef = 0
+        # Ensure column index is within bounds
+        column_idx = min(idx, result.logical_observables.shape[1] - 1) if result.logical_observables.shape[1] > 0 else 0
+        stats = compute_pauli_frame_stats(
+            result,
+            basis=basis,
+            expected_flip_total=ef,
+            column=column_idx,
+            override_raw=None,
+            apply_decoder=True,
         )
-    )
-    print(
-        "  decoded_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.decoded_probs["raw"]["|0>"] * 100.0,
-            frame_stats.decoded_probs["raw"]["|1>"] * 100.0,
+        qlabel = f"Q{idx+1} (basis {basis})"
+        print(f"{qlabel} -- raw")
+        print(
+            "  logical_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
+                stats.logical_probs["raw"]["|0>"] * 100.0,
+                stats.logical_probs["raw"]["|1>"] * 100.0,
+            )
         )
-    )
-
-    print("----------------EXPECTED FRAME (LOGICAL GATE TRACKING ONLY):----------------")
-    print(
-        "  logical_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.logical_probs["expected_frame"]["|0>"] * 100.0,
-            frame_stats.logical_probs["expected_frame"]["|1>"] * 100.0,
+        print(
+            "  decoded_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
+                stats.decoded_probs["raw"]["|0>"] * 100.0,
+                stats.decoded_probs["raw"]["|1>"] * 100.0,
+            )
         )
-    )
-    print(
-        "  decoded_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.decoded_probs["expected_frame"]["|0>"] * 100.0,
-            frame_stats.decoded_probs["expected_frame"]["|1>"] * 100.0,
+        print(f"{qlabel} -- expected frame")
+        print(
+            "  logical_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
+                stats.logical_probs["expected_frame"]["|0>"] * 100.0,
+                stats.logical_probs["expected_frame"]["|1>"] * 100.0,
+            )
         )
-    )
-
-    print("----------------TRACKED PAULI FRAME (GATES + DECODER):----------------")
-
-    print(
-        "  logical_post_correction dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-            frame_stats.logical_probs["decoder_frame"]["|0>"] * 100.0,
-            frame_stats.logical_probs["decoder_frame"]["|1>"] * 100.0,
+        print(
+            "  decoded_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
+                stats.decoded_probs["expected_frame"]["|0>"] * 100.0,
+                stats.decoded_probs["expected_frame"]["|1>"] * 100.0,
+            )
         )
-    )
-   
+        print(f"{qlabel} -- tracked Pauli frame (decoder)")
+        print(
+            "  logical_post_correction dist: |0>={:6.2f}% |1>={:6.2f}%".format(
+                stats.logical_probs["decoder_frame"]["|0>"] * 100.0,
+                stats.logical_probs["decoder_frame"]["|1>"] * 100.0,
+            )
+        )
+        if per_qubit_ler is not None and idx < len(per_qubit_ler):
+            print(f"  decoder logical_error_rate = {per_qubit_ler[idx]:.3e}")

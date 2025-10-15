@@ -166,7 +166,15 @@ def run_circuit_logical_error_rate(
     avg_syndrome_weight = detector_samples_uint8.sum(axis=1).mean()
     click_rate = (detector_samples_uint8.sum(axis=1) > 0).mean()
 
-    observable_basis = _infer_observable_basis(predictions.shape[1], stim_config)
+    # Prefer basis labels provided by builder metadata, fallback to inference
+    if metadata is not None and "observable_basis" in metadata:
+        basis_tuple = tuple(str(b) for b in metadata.get("observable_basis", tuple()))
+        if len(basis_tuple) != predictions.shape[1]:
+            observable_basis = _infer_observable_basis(predictions.shape[1], stim_config)
+        else:
+            observable_basis = basis_tuple
+    else:
+        observable_basis = _infer_observable_basis(predictions.shape[1], stim_config)
 
     # Optionally sample demo measurement bits from the circuit's measurement
     # record (end-only MPP in requested basis). This is independent from DEM.

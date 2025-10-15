@@ -15,6 +15,8 @@ from typing import Dict, List, Sequence, Tuple, Type
 import importlib
 import os
 import sys
+import numpy as np
+import pymatching as pm
 if __name__ == "__main__":
     REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if REPO_ROOT not in sys.path:
@@ -35,8 +37,8 @@ from benchmarks.circuits.teleportation import TeleportationBenchmark
 from surface_code.utils import (
     plot_heavy_hex_code,
     diagnostic_print,
-    print_logical_results,
     compute_pauli_frame_stats,
+    print_multi_qubit_results,
 )
 from qiskit import QuantumCircuit
 from qiskit.transpiler import Target
@@ -48,6 +50,10 @@ from surface_code import (
     PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
 )
+from surface_code.multi_patch import PatchObject
+from surface_code.surgery_compile import compile_circuit_to_surgery
+from surface_code.global_stim_builder import GlobalStimBuilder
+from surface_code.joint_parity import decode_joint_parity
 from surface_code.logical_ops import (
     LogicalFrame,
     apply_sequence,
@@ -154,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="simple_1q_xzh", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="teleportation", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -234,6 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
+    parser.add_argument(
+        "--seam-json",
+        type=Path,
+        default=None,
+        help="Optional JSON path specifying explicit seam pairs per CNOT ((kind,a,b)->pairs).",
+    )
     
     return parser
 
@@ -291,39 +303,82 @@ def main() -> None:
         benchmark = instantiate_benchmark(args.benchmark)
         qc = benchmark.get_circuit()
 
-        gate_seq = circuit_to_gates(qc)
-        frame = apply_sequence(LogicalFrame(), gate_seq)
-
+        # Multi-qubit unified path: gate summary and start/end basis
         init_label = (args.init or "0").strip()
-        # Parse basis and eigen-sign (+1/-1) from init label
         start_basis, init_sign = parse_init_label(init_label)
-        end_basis, expected_flip = end_basis_and_flip(start_basis, frame)
+        gate_seq = [ci.operation.name.upper() for ci in qc.data]
+        # Global end-basis heuristic for demo auto: flip if any H is present
+        any_h = any(ci.operation.name.lower() == "h" for ci in qc.data)
+        end_basis = ("X" if start_basis == "Z" else "Z") if any_h else start_basis
+        expected_flip = 0
         # Incorporate the initial eigen-sign into the expected correlation parity.
         # A '-1' eigenstate contributes a unit flip to the start-vs-end parity definition.
         expected_flip_total = int(expected_flip) ^ (0 if init_sign == +1 else 1)
 
+        # Unified surgery-based path (works for any number of qubits)
         model = build_heavy_hex_model(args.distance)
 
         plot_heavy_hex_code(model, args.distance)
-
         diagnostic_print(model, args)
 
-        stim_rounds = int(args.rounds) if args.rounds is not None else int(args.distance)
-        # Resolve bracket basis: auto derives from init label
+        d = int(args.distance)
+        stim_rounds = int(args.rounds) if args.rounds is not None else d
+
+        # Resolve bracket basis for all patches
         if (args.bracket_basis or "auto").lower() == "auto":
             bracket_basis = start_basis
         else:
             bracket_basis = args.bracket_basis.strip().upper()
-        # Resolve demo basis from CLI (auto/Z/X/none)
         db_mode = (args.demo_basis or "auto").lower()
         if db_mode == "none":
             demo_basis = None
         elif db_mode == "auto":
-            # Physics-based reporting in the end basis: request an end-only demo
-            # MPP if the end basis differs from the bracket basis.
             demo_basis = end_basis if end_basis != bracket_basis else None
         else:
             demo_basis = args.demo_basis.strip().upper()
+
+        # Build one PatchObject per qubit
+        def build_patch() -> PatchObject:
+            return PatchObject(
+                n=model.code.n,
+                z_stabs=model.z_stabilizers,
+                x_stabs=model.x_stabilizers,
+                logical_z=model.logical_z,
+                logical_x=model.logical_x,
+                coords={i: (float(i), 0.0) for i in range(model.code.n)},
+            )
+
+        patches = {f"q{i}": build_patch() for i in range(qc.num_qubits)}
+
+        # Default seams: for each CNOT pair, use (i,i) for i in [0..d-1]
+        default_pairs = [(i, i) for i in range(d)]
+        seams = {}
+        for ci in qc.data:
+            name = ci.operation.name.lower()
+            if name in {"cx", "cz", "cnot"}:
+                qa, qb = ci.qubits[0], ci.qubits[1]
+                a = f"q{qc.find_bit(qa).index}"
+                b = f"q{qc.find_bit(qb).index}"
+                seams[("rough", a, b)] = list(default_pairs)
+                seams[("smooth", a, b)] = list(default_pairs)
+
+        # Optional seam JSON override
+        if args.seam_json is not None:
+            try:
+                seam_cfg = json.loads(args.seam_json.read_text())
+                # Expect keys like "rough:q0:q1" mapping to list of [i,j]
+                for key, pairs in seam_cfg.items():
+                    try:
+                        kind, a, b = key.split(":", 2)
+                    except Exception:
+                        continue
+                    seams[(kind, a, b)] = [tuple(map(int, p)) for p in pairs]
+            except Exception as _exc:
+                pass
+
+        bracket_map = {f"q{i}": bracket_basis for i in range(qc.num_qubits)}
+        layout, ops = compile_circuit_to_surgery(qc, patches, seams, distance=d, bracket_map=bracket_map, warmup_rounds=1)
+
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
             p_x_error=float(args.px),
@@ -334,82 +389,130 @@ def main() -> None:
             bracket_basis=bracket_basis,
             demo_basis=demo_basis,
         )
-        builder = PhenomenologicalStimBuilder(
-            code=model.code,
-            z_stabilizers=model.z_stabilizers,
-            x_stabilizers=model.x_stabilizers,
-            logical_z=model.logical_z,
-            logical_x=model.logical_x,
-        )
-        circuit, observable_pairs, metadata = builder.build(stim_cfg)
-        result = run_circuit_logical_error_rate(
-            circuit,
-            observable_pairs,
-            stim_cfg,
-            MonteCarloConfig(shots=int(args.shots), seed=int(args.seed) if args.seed is not None else None),
-            metadata,
-        )
-        # If demo bits are present for physics-based end-basis reporting, compute
-        # stats from them without applying decoder corrections (decoder doesn't act
-        # on the demo readout). Otherwise, fall back to DEM observable.
-        if getattr(result, "demo_bits", None) is not None and result.demo_bits is not None:
-            frame_stats = compute_pauli_frame_stats(
-                result,
-                end_basis,
-                expected_flip_total,
-                override_raw=result.demo_bits,
-                apply_decoder=False,
-            )
-        else:
-            frame_stats = compute_pauli_frame_stats(result, end_basis, expected_flip_total)
 
-        print_logical_results(
-            args,
-            gate_seq,
-            start_basis,
-            init_sign,
-            end_basis,
-            expected_flip_total,
-            stim_rounds,
-            result,
-            frame_stats,
+        gb = GlobalStimBuilder(layout)
+        circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map)
+
+        # Sample DEM and decode
+        dem = circuit.detector_error_model()
+        matcher = pm.Matching.from_detector_error_model(dem)
+        dem_sampler = dem.compile_sampler(seed=int(args.seed))
+        det_samp, obs_samp, _ = dem_sampler.sample(int(args.shots))
+        det_samp_u8 = np.asarray(det_samp, dtype=np.uint8)
+        obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((int(args.shots), len(observable_pairs)), dtype=np.uint8)
+        preds = matcher.decode_batch(det_samp.astype(bool))
+        preds = np.asarray(preds, dtype=np.uint8)
+        if preds.ndim == 1:
+            preds = preds.reshape(-1, 1)
+
+        # Print DEM/decoder stats per patch
+        print("Surgery DEM summary:")
+        print(f"  detectors = {dem.num_detectors}, observables = {obs_u8.shape[1]}")
+        avg_weight = det_samp_u8.sum(axis=1).mean() if det_samp_u8.size else 0.0
+        click_rate = (det_samp_u8.sum(axis=1) > 0).mean() if det_samp_u8.size else 0.0
+        print(f"  avg_syndrome_weight = {avg_weight:.3f}, click_rate = {click_rate:.3f}")
+
+        # Per-window parity bits via temporal MWPM (1D chain XOR)
+        merge_bits = {}
+        for window in metadata.get("merge_windows", []):
+            bit = decode_joint_parity(det_samp_u8, window)
+            key = (window.get("parity_type"), window.get("a"), window.get("b"), window.get("id"))
+            merge_bits[key] = bit
+            print(f"  merge {key}: mean={float(bit.mean()):.3f}")
+
+        # Use utils-style printing for multi-qubit distributions per column
+        basis_labels = tuple(metadata.get("observable_basis", tuple()))
+        if not basis_labels or len(basis_labels) != obs_u8.shape[1]:
+            basis_labels = tuple(bracket_map[q] for q in sorted(bracket_map))
+        # Wrap DEM outputs into a SimulationResult-like object for printing
+        from types import SimpleNamespace
+        result_like = SimpleNamespace(
+            logical_observables=obs_u8,
+            predictions=preds,
+            shots=int(args.shots),
+            num_detectors=int(dem.num_detectors),
+            decoder_frame=lambda: SimpleNamespace(
+                bases=basis_labels,
+                flips=preds,
+                correction_bits=lambda basis, column=None: preds[:, column if column is not None else 0],
+            ),
         )
 
+        # Track virtual single-qubit gates (X,Z,H) to compute expected flips per qubit
+        # Build a gate list per wire in order of the circuit and compute end-basis and flips
+        gate_map = {f"q{i}": [] for i in range(qc.num_qubits)}
+        for ci in qc.data:
+            name = ci.operation.name.lower()
+            if name in {"x", "z", "h"}:
+                for qb in ci.qubits:
+                    qidx = qc.find_bit(qb).index
+                    gate_map[f"q{qidx}"].append(name.upper())
+        # Derive per-qubit expected flips in the chosen bracket basis
+        import surface_code.logical_ops as lo
+        expected_flips = []
+        for i in range(qc.num_qubits):
+            seq = gate_map[f"q{i}"]
+            frame = lo.apply_sequence(lo.LogicalFrame(), seq)
+            end_b, flip = lo.end_basis_and_flip(bracket_basis, frame)
+            # We always bracket in 'bracket_basis'; if end basis differs, demo readout reports it separately
+            expected_flips.append(int(flip))
+
+        print_multi_qubit_results(args, basis_labels, stim_rounds, result_like, expected_flips, gate_seq)
+
+        # If demo basis requested (auto or explicit), sample end-only demo readouts and report physics-respecting outcomes
+        demo_meta = metadata.get("demo", {})
+        if demo_meta:
+            circ_sampler = circuit.compile_sampler(seed=int(args.seed))
+            m_samples = circ_sampler.sample(shots=int(args.shots))
+            print("----------------END-ONLY DEMO READOUTS (PHYSICS BASIS)----------------")
+            for name in sorted(demo_meta.keys()):
+                info = demo_meta[name]
+                idx = int(info.get("index")) if info.get("index") is not None else None
+                b = info.get("basis")
+                if idx is None:
+                    continue
+                col = np.asarray(m_samples[:, idx], dtype=np.uint8)
+                mean = float(col.mean())
+                p0 = (1.0 - mean) * 100.0
+                p1 = mean * 100.0
+                print(f"  {name} demo basis={b}: |0>={p0:6.2f}% |1>={p1:6.2f}%")
+
+        # Also print per-qubit applied gate sequences
+        print("Applied virtual gates per qubit:")
+        for i in range(qc.num_qubits):
+            seq = gate_map[f"q{i}"]
+            print(f"  q{i}: {' '.join(seq) if seq else '(none)'}")
+
+        # Optional JSON dump
         json_payloads.append(
             {
-                "branch": "logical_encoding",
+                "branch": "surgery",
                 "benchmark": args.benchmark,
                 "sequence": gate_seq,
-                "start_basis": start_basis,
-                "end_basis": end_basis,
-                "init_sign": int(init_sign),
-                "expected_flip": int(expected_flip),
-                "expected_flip_total": int(expected_flip_total),
-                "decoder_frame_basis": end_basis,
-                "distance": int(args.distance),
+                "num_qubits": int(qc.num_qubits),
+                "distance": int(d),
                 "rounds": int(stim_rounds),
                 "p_x": float(args.px),
                 "p_z": float(args.pz),
-                "shots": int(result.shots),
-                "logical_error_rate": float(result.logical_error_rate),
-                "avg_syndrome_weight": float(result.avg_syndrome_weight),
-                "click_rate": float(result.click_rate),
-                "frame_flip": int(expected_flip_total),
-                "logical_mean_raw": float(frame_stats.logical_means["raw"]),
-                "logical_mean_expected_frame": float(frame_stats.logical_means["expected"]),
-                "logical_mean_decoder_frame": float(frame_stats.logical_means["decoder"]),
-                "decoded_mean_raw": float(frame_stats.decoded_means["raw"]),
-                "decoded_mean_expected_frame": float(frame_stats.decoded_means["expected"]),
-                "decoded_mean_decoder_frame": float(frame_stats.decoded_means["decoder"]),
-                "decoder_frame_flip_rate": float(frame_stats.decoder_flip_rate),
-                "tracked_frame_flip_rate": float(frame_stats.tracked_frame_rate),
-                "logical_prob_raw": {k: float(v) for k, v in frame_stats.logical_probs["raw"].items()},
-                "logical_prob_expected_frame": {k: float(v) for k, v in frame_stats.logical_probs["expected_frame"].items()},
-                "logical_prob_decoder_frame": {k: float(v) for k, v in frame_stats.logical_probs["decoder_frame"].items()},
-                "decoded_prob_raw": {k: float(v) for k, v in frame_stats.decoded_probs["raw"].items()},
-                "decoded_prob_expected_frame": {k: float(v) for k, v in frame_stats.decoded_probs["expected_frame"].items()},
-                "decoded_prob_decoder_frame": {k: float(v) for k, v in frame_stats.decoded_probs["decoder_frame"].items()},
-                "tracked_frame_prob": {k: float(v) for k, v in frame_stats.frame_prob.items()},
+                "shots": int(args.shots),
+                "detectors": int(dem.num_detectors),
+                "avg_syndrome_weight": float(avg_weight),
+                "click_rate": float(click_rate),
+                "observable_basis": list(basis_labels),
+                "per_qubit_raw_mean": [float(obs_u8[:, i].mean()) for i in range(obs_u8.shape[1])],
+                "per_qubit_decoder_mean": [float(preds[:, i].mean()) for i in range(preds.shape[1])],
+                "merge_windows": [
+                    {
+                        "id": int(w.get("id")),
+                        "type": w.get("type"),
+                        "parity_type": w.get("parity_type"),
+                        "a": w.get("a"),
+                        "b": w.get("b"),
+                        "rounds": int(w.get("rounds", 0)),
+                        "mean": float(merge_bits[(w.get("parity_type"), w.get("a"), w.get("b"), w.get("id"))].mean()) if (w.get("parity_type"), w.get("a"), w.get("b"), w.get("id")) in merge_bits else 0.0,
+                    }
+                    for w in metadata.get("merge_windows", [])
+                ],
             }
         )
 

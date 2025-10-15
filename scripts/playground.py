@@ -225,6 +225,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Choose which logical basis to bracket in the DEM (start/end observable). 'auto' derives from --init (Z for 0/1, X for +/-).",
     )
+    parser.add_argument(
+        "--demo-basis",
+        type=str,
+        choices=["auto", "Z", "X", "none"],
+        default="auto",
+        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'none' disables the demo readout.",
+    )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
     
@@ -307,9 +314,16 @@ def main() -> None:
             bracket_basis = start_basis
         else:
             bracket_basis = args.bracket_basis.strip().upper()
-        # Physics-based reporting in the end basis: request an end-only demo
-        # MPP if the end basis differs from the bracket basis.
-        demo_basis = end_basis if end_basis != bracket_basis else None
+        # Resolve demo basis from CLI (auto/Z/X/none)
+        db_mode = (args.demo_basis or "auto").lower()
+        if db_mode == "none":
+            demo_basis = None
+        elif db_mode == "auto":
+            # Physics-based reporting in the end basis: request an end-only demo
+            # MPP if the end basis differs from the bracket basis.
+            demo_basis = end_basis if end_basis != bracket_basis else None
+        else:
+            demo_basis = args.demo_basis.strip().upper()
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
             p_x_error=float(args.px),

@@ -9,7 +9,7 @@ import pymatching as pm
 import stim
 
 from surface_code.logical_ops import PauliFrame, parse_init_label
-from surface_code.stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig
+from surface_code import GlobalStimBuilder, PhenomenologicalStimConfig, create_single_patch_layout, MeasureRound
 
 
 @dataclass
@@ -127,11 +127,28 @@ class SimulationResult:
 
 
 def run_logical_error_rate(
-    builder: PhenomenologicalStimBuilder,
+    model,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
 ) -> SimulationResult:
-    circuit, observable_pairs, metadata = builder.build(stim_config)
+    """Run logical error rate simulation for a single-patch code model.
+    
+    Args:
+        model: Code model with attributes: code, z_stabilizers, x_stabilizers, logical_z, logical_x
+        stim_config: Stim circuit configuration
+        mc_config: Monte Carlo configuration
+    """
+    # Create single-patch layout
+    layout = create_single_patch_layout(model)
+    
+    # Generate explicit timeline of measure rounds
+    ops = [MeasureRound(patch_ids=None) for _ in range(stim_config.rounds)]
+    
+    # Create builder and build circuit
+    builder = GlobalStimBuilder(layout)
+    bracket_map = {"q0": "Z"}  # Default bracket basis
+    circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map)
+    
     return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
 
 

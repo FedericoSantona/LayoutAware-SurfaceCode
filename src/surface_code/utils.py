@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, TYPE_CHECKING
+from typing import Dict, TYPE_CHECKING, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,6 +13,97 @@ if TYPE_CHECKING:  # pragma: no cover - import guard for type checking only
     from simulation.runner import SimulationResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def wilson_rate_ci(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+    """Compute Wilson score confidence interval for a Bernoulli rate.
+    
+    Args:
+        k: Number of successes
+        n: Total number of trials
+        z: Z-score for desired confidence level (default 1.96 for 95% CI)
+        
+    Returns:
+        Tuple of (lower_bound, upper_bound) for the confidence interval
+    """
+    if n == 0:
+        return (0.0, 1.0)
+    
+    p = k / n
+    z_squared = z * z
+    n_plus_z_squared = n + z_squared
+    
+    # Wilson score interval formula
+    center = (k + z_squared / 2) / n_plus_z_squared
+    margin = z * np.sqrt((p * (1 - p) + z_squared / (4 * n)) / n_plus_z_squared)
+    
+    lower = max(0.0, center - margin)
+    upper = min(1.0, center + margin)
+    
+    return (lower, upper)
+
+
+def compute_two_qubit_correlations(
+    demo_z_bits: Dict[str, np.ndarray], 
+    demo_x_bits: Dict[str, np.ndarray], 
+    pairs: list[Tuple[str, str]], 
+    shots: int
+) -> Dict[str, Dict[str, float]]:
+    """Compute two-qubit correlations and Bell state fidelity bounds.
+    
+    Args:
+        demo_z_bits: Dict mapping qubit names to Z-basis demo measurement arrays
+        demo_x_bits: Dict mapping qubit names to X-basis demo measurement arrays  
+        pairs: List of (qubit1, qubit2) tuples to compute correlations for
+        shots: Total number of shots
+        
+    Returns:
+        Dict with correlation data for each pair:
+        {
+            "q0,q1": {
+                "zz_correlator": float,  # ⟨Z⊗Z⟩
+                "xx_correlator": float,  # ⟨X⊗X⟩
+                "zz_ci": (lower, upper), # Wilson CI for ZZ parity-0 rate
+                "xx_ci": (lower, upper), # Wilson CI for XX parity-0 rate
+                "fidelity_bound": float  # F ≥ 0.5(⟨Z⊗Z⟩ + ⟨X⊗X⟩)
+            }
+        }
+    """
+    correlations = {}
+    
+    for q1, q2 in pairs:
+        if q1 not in demo_z_bits or q2 not in demo_z_bits:
+            continue
+        if q1 not in demo_x_bits or q2 not in demo_x_bits:
+            continue
+            
+        # Compute Z⊗Z parity: z_parity = z_demo[q1] ⊕ z_demo[q2]
+        z_parity = np.bitwise_xor(demo_z_bits[q1], demo_z_bits[q2])
+        z_parity_0_count = int(np.sum(z_parity == 0))
+        z_parity_0_rate = z_parity_0_count / shots
+        zz_correlator = 1.0 - 2.0 * (1.0 - z_parity_0_rate)  # ⟨Z⊗Z⟩ = 1 - 2·P(z_parity=1)
+        zz_ci = wilson_rate_ci(z_parity_0_count, shots)
+        
+        # Compute X⊗X parity: x_parity = x_demo[q1] ⊕ x_demo[q2]  
+        x_parity = np.bitwise_xor(demo_x_bits[q1], demo_x_bits[q2])
+        x_parity_0_count = int(np.sum(x_parity == 0))
+        x_parity_0_rate = x_parity_0_count / shots
+        xx_correlator = 1.0 - 2.0 * (1.0 - x_parity_0_rate)  # ⟨X⊗X⟩ = 1 - 2·P(x_parity=1)
+        xx_ci = wilson_rate_ci(x_parity_0_count, shots)
+        
+        # Bell state fidelity bound: F ≥ 0.5(⟨Z⊗Z⟩ + ⟨X⊗X⟩)
+        fidelity_bound = 0.5 * (zz_correlator + xx_correlator)
+        
+        pair_key = f"{q1},{q2}"
+        correlations[pair_key] = {
+            "zz_correlator": zz_correlator,
+            "xx_correlator": xx_correlator,
+            "zz_ci": zz_ci,
+            "xx_ci": xx_ci,
+            "fidelity_bound": fidelity_bound
+        }
+    
+    return correlations
 
 
 def plot_heavy_hex_code(model, distance):

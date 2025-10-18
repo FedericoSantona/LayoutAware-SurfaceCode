@@ -41,3 +41,22 @@ class ParityReadout:
     b: str
 
 
+@dataclass
+class CNOTOp:
+    """High-level CNOT operation using ancilla-mediated surgery.
+    
+    This operation will be expanded by the compiler into:
+    1. Rough ZZ merge (control-ancilla) for d rounds
+    2. Split rough seam
+    3. Smooth XX merge (ancilla-target) for d rounds  
+    4. Split smooth seam
+    5. Parity readouts for both merge windows
+    
+    The ancilla is virtually initialized in |+⟩_L (X-basis, +1 eigenstate).
+    """
+    control: str
+    target: str
+    ancilla: str
+    rounds: int  # d
+
+

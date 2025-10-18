@@ -15,9 +15,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import stim
 
-from .multi_patch import Layout
+from .layout import Layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
-from .stim_builder import PhenomenologicalStimConfig
+from .configs import PhenomenologicalStimConfig
+from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index
 
 
 GateTarget = stim.GateTarget
@@ -28,28 +29,11 @@ def _mpp_from_positions(circuit: stim.Circuit, positions: Sequence[int], pauli: 
 
     Returns the absolute measurement index, or None if positions is empty.
     """
-    if not positions:
-        return None
-    targets: List[GateTarget] = []
-    first = True
-    for q in positions:
-        if not first:
-            targets.append(stim.target_combiner())
-        if pauli == "X":
-            targets.append(stim.target_x(q))
-        elif pauli == "Z":
-            targets.append(stim.target_z(q))
-        elif pauli == "Y":
-            targets.append(stim.target_y(q))
-        else:
-            raise ValueError("Unsupported Pauli for MPP")
-        first = False
-    circuit.append_operation("MPP", targets)
-    return circuit.num_measurements - 1
+    return mpp_from_positions(circuit, positions, pauli)
 
 
 def _rec_from_abs(circuit: stim.Circuit, idx: int) -> GateTarget:
-    return stim.target_rec(idx - circuit.num_measurements)
+    return rec_from_abs(circuit, idx)
 
 
 def _add_temporal_detectors_with_index(
@@ -58,11 +42,7 @@ def _add_temporal_detectors_with_index(
     curr: Sequence[int],
     append_detector_cb,
 ) -> List[int]:
-    indices: List[int] = []
-    for a, b in zip(prev, curr):
-        idx = append_detector_cb([_rec_from_abs(circuit, a), _rec_from_abs(circuit, b)])
-        indices.append(idx)
-    return indices
+    return add_temporal_detectors_with_index(circuit, prev, curr, append_detector_cb)
 
 
 @dataclass
@@ -194,6 +174,10 @@ class GlobalStimBuilder:
         merge_windows: List[Dict[str, object]] = []
         current_window: Optional[Dict[str, object]] = None
         window_id = 0
+        
+        # CNOT operation tracking for Pauli frame updates
+        cnot_operations: List[Dict[str, object]] = []
+        current_cnot: Optional[Dict[str, object]] = None
 
         def _begin_window(kind: str, a: str, b: str, rounds: int) -> None:
             nonlocal current_window, window_id
@@ -327,9 +311,24 @@ class GlobalStimBuilder:
                 _end_window()
 
             elif isinstance(op, ParityReadout):
-                # No circuit op; the previous merge window already captured indices.
-                # We just record an association by name in metadata later.
-                pass
+                # Track CNOT operations by grouping ZZ and XX parity readouts
+                if op.type == "ZZ":
+                    # Start of a CNOT operation (rough merge completed)
+                    current_cnot = {
+                        "control": op.a,
+                        "target": op.b,  # This will be updated to actual target when XX comes
+                        "ancilla": op.b,  # For ZZ, b is the ancilla
+                        "rough_window_id": window_id - 1 if current_window is None else window_id,
+                        "smooth_window_id": None,
+                        "m_zz": None,  # Will be filled in post-processing
+                        "m_xx": None,  # Will be filled in post-processing
+                    }
+                elif op.type == "XX" and current_cnot is not None:
+                    # Complete the CNOT operation (smooth merge completed)
+                    current_cnot["target"] = op.b  # Update target (for XX, b is the target)
+                    current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
+                    cnot_operations.append(current_cnot)
+                    current_cnot = None
 
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
@@ -384,6 +383,7 @@ class GlobalStimBuilder:
             "merge_windows": merge_windows,
             "observable_basis": tuple(basis_labels),
             "demo": demo_info,
+            "cnot_operations": cnot_operations,
         }
 
         return circuit, observable_pairs, metadata

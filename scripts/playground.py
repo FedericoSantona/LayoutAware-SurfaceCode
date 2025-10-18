@@ -37,8 +37,17 @@ from benchmarks.circuits.teleportation import TeleportationBenchmark
 from surface_code.utils import (
     plot_heavy_hex_code,
     diagnostic_print,
-    compute_pauli_frame_stats,
-    print_multi_qubit_results,
+    wilson_rate_ci,
+    compute_two_qubit_correlations,
+)
+from surface_code.reporting import (
+    print_header,
+    print_per_qubit_results,
+    print_physics_demo,
+    print_pauli_frame_audit,
+    print_debug_details,
+    generate_detailed_json,
+    save_detailed_json,
 )
 from qiskit import QuantumCircuit
 from qiskit.transpiler import Target
@@ -47,12 +56,11 @@ from transpile.config import TranspileConfig
 from transpile.pipeline import HeavyHexTranspiler
 from surface_code import (
     build_heavy_hex_model,
-    PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
 )
-from surface_code.multi_patch import PatchObject
+from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
-from surface_code.global_stim_builder import GlobalStimBuilder
+from surface_code.builder import GlobalStimBuilder
 from surface_code.joint_parity import decode_joint_parity
 from surface_code.logical_ops import (
     LogicalFrame,
@@ -160,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="teleportation", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -245,6 +253,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional JSON path specifying explicit seam pairs per CNOT ((kind,a,b)->pairs).",
+    )
+    parser.add_argument(
+        "--cnot-ancilla-strategy",
+        type=str,
+        choices=["serialize", "parallelize"],
+        default="serialize",
+        help="CNOT ancilla allocation strategy: 'serialize' reuses one ancilla (default), 'parallelize' uses multiple ancillas for concurrent CNOTs.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose debug output including raw/expected/decoded distributions and detailed diagnostics.",
+    )
+    parser.add_argument(
+        "--corr-pairs",
+        type=str,
+        default=None,
+        help="Custom correlation pairs in format 'q0,q1;q2,q3' for two-qubit correlation analysis.",
     )
     
     return parser
@@ -377,7 +403,10 @@ def main() -> None:
                 pass
 
         bracket_map = {f"q{i}": bracket_basis for i in range(qc.num_qubits)}
-        layout, ops = compile_circuit_to_surgery(qc, patches, seams, distance=d, bracket_map=bracket_map, warmup_rounds=1)
+        layout, ops = compile_circuit_to_surgery(
+            qc, patches, seams, distance=d, bracket_map=bracket_map, 
+            warmup_rounds=1, ancilla_strategy=args.cnot_ancilla_strategy
+        )
 
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
@@ -405,41 +434,77 @@ def main() -> None:
         if preds.ndim == 1:
             preds = preds.reshape(-1, 1)
 
-        # Print DEM/decoder stats per patch
-        print("Surgery DEM summary:")
-        print(f"  detectors = {dem.num_detectors}, observables = {obs_u8.shape[1]}")
-        avg_weight = det_samp_u8.sum(axis=1).mean() if det_samp_u8.size else 0.0
-        click_rate = (det_samp_u8.sum(axis=1) > 0).mean() if det_samp_u8.size else 0.0
-        print(f"  avg_syndrome_weight = {avg_weight:.3f}, click_rate = {click_rate:.3f}")
-
         # Per-window parity bits via temporal MWPM (1D chain XOR)
         merge_bits = {}
         for window in metadata.get("merge_windows", []):
             bit = decode_joint_parity(det_samp_u8, window)
             key = (window.get("parity_type"), window.get("a"), window.get("b"), window.get("id"))
             merge_bits[key] = bit
-            print(f"  merge {key}: mean={float(bit.mean()):.3f}")
 
-        # Use utils-style printing for multi-qubit distributions per column
+        # Extract CNOT parity bits and update Pauli frame
+        pauli_frame = {f"q{i}": {"fx": 0, "fz": 0} for i in range(qc.num_qubits)}
+        cnot_metadata = []
+        
+        for cnot_op in metadata.get("cnot_operations", []):
+            control = cnot_op["control"]
+            target = cnot_op["target"]
+            ancilla = cnot_op["ancilla"]
+            rough_window_id = cnot_op["rough_window_id"]
+            smooth_window_id = cnot_op["smooth_window_id"]
+            
+            # Extract m_ZZ from rough merge window (Control-Ancilla)
+            rough_key = ("ZZ", control, ancilla, rough_window_id)
+            m_zz = merge_bits.get(rough_key, np.zeros(int(args.shots), dtype=np.uint8))
+            
+            # Extract m_XX from smooth merge window (Ancilla-Target)  
+            smooth_key = ("XX", ancilla, target, smooth_window_id)
+            m_xx = merge_bits.get(smooth_key, np.zeros(int(args.shots), dtype=np.uint8))
+            
+            # Update Pauli frame: fz[target] ^= m_ZZ, fx[control] ^= m_XX
+            pauli_frame[target]["fz"] ^= m_zz
+            pauli_frame[control]["fx"] ^= m_xx
+            
+            # Store CNOT metadata for reporting
+            cnot_metadata.append({
+                "control": control,
+                "target": target,
+                "ancilla": ancilla,
+                "m_zz_mean": float(m_zz.mean()),
+                "m_xx_mean": float(m_xx.mean()),
+            })
+        
+        # Apply Pauli frame to logical observables
+        corrected_obs = obs_u8.copy()
+        
+        # Map patch names to their observable indices
+        patch_to_obs_idx = {}
+        for i, patch_name in enumerate(sorted(bracket_map.keys())):
+            patch_to_obs_idx[patch_name] = i
+        
+        # Apply Pauli frame corrections
+        for patch_name, frame in pauli_frame.items():
+            if patch_name in patch_to_obs_idx:
+                obs_idx = patch_to_obs_idx[patch_name]
+                # Check if obs_idx is within bounds
+                if obs_idx < corrected_obs.shape[1]:
+                    basis = bracket_map[patch_name]
+                    if basis == "Z":
+                        # For Z-basis bracketing, apply fz frame
+                        corrected_obs[:, obs_idx] ^= frame["fz"]
+                    else:  # X-basis bracketing
+                        # For X-basis bracketing, apply fx frame  
+                        corrected_obs[:, obs_idx] ^= frame["fx"]
+
+        # Get basis labels
         basis_labels = tuple(metadata.get("observable_basis", tuple()))
         if not basis_labels or len(basis_labels) != obs_u8.shape[1]:
             basis_labels = tuple(bracket_map[q] for q in sorted(bracket_map))
-        # Wrap DEM outputs into a SimulationResult-like object for printing
-        from types import SimpleNamespace
-        result_like = SimpleNamespace(
-            logical_observables=obs_u8,
-            predictions=preds,
-            shots=int(args.shots),
-            num_detectors=int(dem.num_detectors),
-            decoder_frame=lambda: SimpleNamespace(
-                bases=basis_labels,
-                flips=preds,
-                correction_bits=lambda basis, column=None: preds[:, column if column is not None else 0],
-            ),
-        )
+        
+        # Ensure basis_labels matches the actual number of observable columns
+        if len(basis_labels) > obs_u8.shape[1]:
+            basis_labels = basis_labels[:obs_u8.shape[1]]
 
         # Track virtual single-qubit gates (X,Z,H) to compute expected flips per qubit
-        # Build a gate list per wire in order of the circuit and compute end-basis and flips
         gate_map = {f"q{i}": [] for i in range(qc.num_qubits)}
         for ci in qc.data:
             name = ci.operation.name.lower()
@@ -447,6 +512,7 @@ def main() -> None:
                 for qb in ci.qubits:
                     qidx = qc.find_bit(qb).index
                     gate_map[f"q{qidx}"].append(name.upper())
+        
         # Derive per-qubit expected flips in the chosen bracket basis
         import surface_code.logical_ops as lo
         expected_flips = []
@@ -454,36 +520,85 @@ def main() -> None:
             seq = gate_map[f"q{i}"]
             frame = lo.apply_sequence(lo.LogicalFrame(), seq)
             end_b, flip = lo.end_basis_and_flip(bracket_basis, frame)
-            # We always bracket in 'bracket_basis'; if end basis differs, demo readout reports it separately
             expected_flips.append(int(flip))
 
-        print_multi_qubit_results(args, basis_labels, stim_rounds, result_like, expected_flips, gate_seq)
-
-        # If demo basis requested (auto or explicit), sample end-only demo readouts and report physics-respecting outcomes
+        # Extract demo readouts for physics analysis
+        demo_z_bits = {}
+        demo_x_bits = {}
         demo_meta = metadata.get("demo", {})
+        
         if demo_meta:
             circ_sampler = circuit.compile_sampler(seed=int(args.seed))
             m_samples = circ_sampler.sample(shots=int(args.shots))
-            print("----------------END-ONLY DEMO READOUTS (PHYSICS BASIS)----------------")
+            
             for name in sorted(demo_meta.keys()):
                 info = demo_meta[name]
                 idx = int(info.get("index")) if info.get("index") is not None else None
                 b = info.get("basis")
                 if idx is None:
                     continue
+                
                 col = np.asarray(m_samples[:, idx], dtype=np.uint8)
-                mean = float(col.mean())
-                p0 = (1.0 - mean) * 100.0
-                p1 = mean * 100.0
-                print(f"  {name} demo basis={b}: |0>={p0:6.2f}% |1>={p1:6.2f}%")
+                if b == "Z":
+                    demo_z_bits[name] = col
+                elif b == "X":
+                    demo_x_bits[name] = col
 
-        # Also print per-qubit applied gate sequences
-        print("Applied virtual gates per qubit:")
-        for i in range(qc.num_qubits):
-            seq = gate_map[f"q{i}"]
-            print(f"  q{i}: {' '.join(seq) if seq else '(none)'}")
+        # Parse correlation pairs (default: CNOT control-target pairs)
+        correlation_pairs = []
+        for cnot_op in metadata.get("cnot_operations", []):
+            control = cnot_op["control"]
+            target = cnot_op["target"]
+            correlation_pairs.append((control, target))
+        
+        # Add custom correlation pairs if specified
+        if args.corr_pairs:
+            try:
+                custom_pairs = args.corr_pairs.split(';')
+                for pair_str in custom_pairs:
+                    if ',' in pair_str:
+                        q1, q2 = pair_str.strip().split(',', 1)
+                        correlation_pairs.append((q1.strip(), q2.strip()))
+            except Exception:
+                pass  # Ignore malformed correlation pairs
 
-        # Optional JSON dump
+        # Compute per-qubit LER with Wilson CI
+        per_qubit_ler = []
+        per_qubit_ler_ci = []
+        for i in range(min(len(basis_labels), obs_u8.shape[1])):
+            errors = np.bitwise_xor(obs_u8[:, i], preds[:, i])
+            error_count = int(np.sum(errors))
+            ler = error_count / int(args.shots)
+            ler_ci = wilson_rate_ci(error_count, int(args.shots))
+            per_qubit_ler.append(ler)
+            per_qubit_ler_ci.append(ler_ci)
+
+        # Compute two-qubit correlations
+        correlations = {}
+        if correlation_pairs and demo_z_bits and demo_x_bits:
+            correlations = compute_two_qubit_correlations(demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots))
+
+        # Print structured report
+        print_header(args, model, dem, metadata, merge_bits, cnot_metadata, stim_rounds, int(args.shots))
+        print_per_qubit_results(args, bracket_map, corrected_obs, obs_u8, preds, int(args.shots))
+        print_physics_demo(demo_meta, demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots))
+        print_pauli_frame_audit(gate_map, pauli_frame, cnot_metadata)
+        
+        if args.verbose:
+            print_debug_details(args, basis_labels, obs_u8, preds, corrected_obs, expected_flips)
+
+        # Generate and save detailed JSON report
+        detailed_json = generate_detailed_json(
+            args, model, metadata, merge_bits, cnot_metadata,
+            bracket_map, corrected_obs, obs_u8, preds,
+            demo_z_bits, demo_x_bits, correlations,
+            gate_map, pauli_frame, int(args.shots), stim_rounds
+        )
+        
+        json_filepath = save_detailed_json(detailed_json, args)
+        print(f"\nDetailed report saved to: {json_filepath}")
+
+        # Keep existing JSON dump for backward compatibility
         json_payloads.append(
             {
                 "branch": "surgery",
@@ -496,11 +611,11 @@ def main() -> None:
                 "p_z": float(args.pz),
                 "shots": int(args.shots),
                 "detectors": int(dem.num_detectors),
-                "avg_syndrome_weight": float(avg_weight),
-                "click_rate": float(click_rate),
                 "observable_basis": list(basis_labels),
                 "per_qubit_raw_mean": [float(obs_u8[:, i].mean()) for i in range(obs_u8.shape[1])],
                 "per_qubit_decoder_mean": [float(preds[:, i].mean()) for i in range(preds.shape[1])],
+                "per_qubit_corrected_mean": [float(corrected_obs[:, i].mean()) for i in range(corrected_obs.shape[1])],
+                "cnot_operations": cnot_metadata,
                 "merge_windows": [
                     {
                         "id": int(w.get("id")),

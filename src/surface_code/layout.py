@@ -168,3 +168,39 @@ class Layout:
         }
 
 
+def create_single_patch_layout(
+    model,
+    *,
+    name: str = "q0",
+    offset: int = 0
+) -> Layout:
+    """Create a single-patch Layout from a code model.
+    
+    Args:
+        model: Code model with attributes: code, z_stabilizers, x_stabilizers, logical_z, logical_x
+        name: Name for the patch in the layout
+        offset: Starting qubit index offset (usually 0)
+        
+    Returns:
+        Layout containing a single patch ready for use with GlobalStimBuilder
+    """
+    # Create coordinates for local indices 0..n-1
+    coords = {i: (float(i), 0.0) for i in range(model.code.n)}
+    
+    # Create the patch object
+    patch = PatchObject(
+        n=model.code.n,
+        z_stabs=list(model.z_stabilizers),
+        x_stabs=list(model.x_stabilizers),
+        logical_z=model.logical_z,
+        logical_x=model.logical_x,
+        coords=coords,
+    )
+    
+    # Create layout and add the patch
+    layout = Layout()
+    layout.add_patch(name, patch)
+    
+    return layout
+
+

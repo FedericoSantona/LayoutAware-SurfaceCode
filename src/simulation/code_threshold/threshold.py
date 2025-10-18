@@ -7,7 +7,6 @@ from typing import Callable, Dict, Iterable, List, Sequence
 import numpy as np
 
 from surface_code import (
-    PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
     build_heavy_hex_model,
 )
@@ -90,25 +89,17 @@ def run_scenario(
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
         model = build_heavy_hex_model(distance)
-        builder = PhenomenologicalStimBuilder(
-            code=model.code,
-            z_stabilizers=model.z_stabilizers,
-            x_stabilizers=model.x_stabilizers,
-            logical_z=model.logical_z,
-            logical_x=model.logical_x,
-        )
         points: List[ThresholdPoint] = []
         for p_x, p_z in scenario.px_pz_pairs():
             stim_cfg = PhenomenologicalStimConfig(
                 rounds=scenario.rounds_for_distance(distance),
                 p_x_error=p_x,
                 p_z_error=p_z,
-                init_label=scenario.init_label,
                 family=("Z" if isinstance(scenario, XOnlyScenario) else
                         "X" if isinstance(scenario, ZOnlyScenario) else None)
             )
             result: SimulationResult = run_logical_error_rate(
-                builder,
+                model,
                 stim_cfg,
                 MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
             )

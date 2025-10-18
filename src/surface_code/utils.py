@@ -249,97 +249,70 @@ def compute_pauli_frame_stats(
     )
 
 
-def print_multi_qubit_results(
-    args,
-    basis_labels: tuple[str, ...],
-    stim_rounds: int,
-    result: "SimulationResult",
-    expected_flips: "np.ndarray | list[int] | tuple[int, ...] | None" = None,
-    gate_seq: "list[str] | None" = None,
-):
-    """Print per-qubit logical distributions in the style of print_logical_results.
-
-    For each observable column, prints the raw/expected/decoder distributions.
-    Expected-frame bit defaults to 0 in this multi-qubit summary unless the
-    caller pre-adjusts the SimulationResult or passes override bits elsewhere.
-
+def compute_joint_correlations(joint_demo_bits: Dict[str, Dict], shots: int) -> Dict[str, Dict[str, float]]:
+    """Compute two-qubit correlations from joint demo measurements.
+    
+    Args:
+        joint_demo_bits: Dictionary mapping joint demo keys to measurement data
+        shots: Number of shots for confidence interval calculation
+        
+    Returns:
+        Dictionary mapping pair keys to correlation data
     """
-    print("Simulation: logical sequence on heavy-hex surface code")
-    print(f"  benchmark = {args.benchmark}")
-    if gate_seq is not None:
-        print(f"  sequence  = {' '.join(gate_seq) if gate_seq else '(empty)'}")
-    num_cols = len(basis_labels)
-    print(f"  qubits = {num_cols}, distance = {args.distance}, rounds = {stim_rounds}")
-    print(f"  p_x = {args.px}, p_z = {args.pz}")
-    print(f"  shots = {result.shots}, detectors = {result.num_detectors}")
-    # Decoder logical error rate: mean over columns of XOR(predictions, observables)
-    try:
-        preds = np.asarray(result.predictions, dtype=np.uint8)
-        obs = np.asarray(result.logical_observables, dtype=np.uint8)
-        if preds.ndim == 1:
-            preds = preds.reshape(-1, 1)
-        if obs.ndim == 1:
-            obs = obs.reshape(-1, 1)
-        min_cols = min(preds.shape[1], obs.shape[1])
-        if min_cols > 0:
-            per_qubit_ler = (np.bitwise_xor(preds[:, :min_cols], obs[:, :min_cols]).mean(axis=0)).astype(float)
-            avg_ler = float(per_qubit_ler.mean())
-            print(f"  decoder logical_error_rate (avg over qubits) = {avg_ler:.3e}")
-        else:
-            per_qubit_ler = None
-    except Exception:
-        per_qubit_ler = None
-    print("----------------PER-QUBIT LOGICAL RESULTS----------------")
-    for idx, basis in enumerate(basis_labels):
-        ef = 0
-        if expected_flips is not None:
-            try:
-                ef = int(expected_flips[idx]) & 1
-            except Exception:
-                ef = 0
-        # Ensure column index is within bounds
-        column_idx = min(idx, result.logical_observables.shape[1] - 1) if result.logical_observables.shape[1] > 0 else 0
-        stats = compute_pauli_frame_stats(
-            result,
-            basis=basis,
-            expected_flip_total=ef,
-            column=column_idx,
-            override_raw=None,
-            apply_decoder=True,
-        )
-        qlabel = f"Q{idx+1} (basis {basis})"
-        print(f"{qlabel} -- raw")
-        print(
-            "  logical_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-                stats.logical_probs["raw"]["|0>"] * 100.0,
-                stats.logical_probs["raw"]["|1>"] * 100.0,
-            )
-        )
-        print(
-            "  decoded_raw dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-                stats.decoded_probs["raw"]["|0>"] * 100.0,
-                stats.decoded_probs["raw"]["|1>"] * 100.0,
-            )
-        )
-        print(f"{qlabel} -- expected frame")
-        print(
-            "  logical_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-                stats.logical_probs["expected_frame"]["|0>"] * 100.0,
-                stats.logical_probs["expected_frame"]["|1>"] * 100.0,
-            )
-        )
-        print(
-            "  decoded_expected dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-                stats.decoded_probs["expected_frame"]["|0>"] * 100.0,
-                stats.decoded_probs["expected_frame"]["|1>"] * 100.0,
-            )
-        )
-        print(f"{qlabel} -- tracked Pauli frame (decoder)")
-        print(
-            "  logical_post_correction dist: |0>={:6.2f}% |1>={:6.2f}%".format(
-                stats.logical_probs["decoder_frame"]["|0>"] * 100.0,
-                stats.logical_probs["decoder_frame"]["|1>"] * 100.0,
-            )
-        )
-        if per_qubit_ler is not None and idx < len(per_qubit_ler):
-            print(f"  decoder logical_error_rate = {per_qubit_ler[idx]:.3e}")
+    correlations = {}
+    
+    # Group joint demos by pair
+    pair_demos = {}
+    for joint_key, demo_data in joint_demo_bits.items():
+        pair = demo_data["pair"]
+        basis = demo_data["basis"]
+        pair_key = f"{pair[0]},{pair[1]}"
+        
+        if pair_key not in pair_demos:
+            pair_demos[pair_key] = {}
+        pair_demos[pair_key][basis] = demo_data
+    
+    # Compute correlations for each pair
+    for pair_key, demos in pair_demos.items():
+        zz_data = demos.get("Z")
+        xx_data = demos.get("X")
+        
+        if zz_data and xx_data:
+            # Compute expectation values: ⟨O⟩ = 1 - 2·P(meas=1)
+            zz_bits = zz_data["bits"]
+            xx_bits = xx_data["bits"]
+            
+            zz_p1 = float(zz_bits.mean())
+            xx_p1 = float(xx_bits.mean())
+            
+            zz_expectation = 1.0 - 2.0 * zz_p1
+            xx_expectation = 1.0 - 2.0 * xx_p1
+            
+            # Compute Wilson CI on expectation value
+            # For expectation E = 1 - 2p, we need CI on p first, then transform
+            zz_p1_count = int(np.sum(zz_bits))
+            xx_p1_count = int(np.sum(xx_bits))
+            
+            zz_p1_ci = wilson_rate_ci(zz_p1_count, shots)
+            xx_p1_ci = wilson_rate_ci(xx_p1_count, shots)
+            
+            # Transform CI endpoints: E = 1 - 2p
+            zz_ci = (1.0 - 2.0 * zz_p1_ci[1], 1.0 - 2.0 * zz_p1_ci[0])  # Reverse order for E
+            xx_ci = (1.0 - 2.0 * xx_p1_ci[1], 1.0 - 2.0 * xx_p1_ci[0])  # Reverse order for E
+            
+            # Bell fidelity bound
+            fidelity_bound = 0.5 * (zz_expectation + xx_expectation)
+            
+            correlations[pair_key] = {
+                "zz_correlator": zz_expectation,
+                "xx_correlator": xx_expectation,
+                "zz_ci": zz_ci,
+                "xx_ci": xx_ci,
+                "fidelity_bound": fidelity_bound,
+                "zz_operator": zz_data.get("logical_operator"),
+                "xx_operator": xx_data.get("logical_operator"),
+                "zz_physical": zz_data.get("physical_realization"),
+                "xx_physical": xx_data.get("physical_realization"),
+            }
+    
+    return correlations

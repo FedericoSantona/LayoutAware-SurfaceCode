@@ -77,7 +77,7 @@ def print_header(
         key = (parity_type, a, b, window_id)
         mean_parity = float(merge_bits[key].mean()) if key in merge_bits else 0.0
         
-        print(f"  merge ({parity_type}, {a}, {b}, rounds={rounds}): mean={mean_parity:.3f}")
+        print(f"  merge ({parity_type}, {a}, {b}, rounds={rounds}): mean={mean_parity:.5f}")
     
     # CNOT operations
     if cnot_metadata:
@@ -87,7 +87,7 @@ def print_header(
             target = cnot["target"]
             m_zz = cnot["m_zz_mean"]
             m_xx = cnot["m_xx_mean"]
-            print(f"  CNOT({control}->{target}): m_ZZ={m_zz:.3f}, m_XX={m_xx:.3f}")
+            print(f"  CNOT({control}->{target}): m_ZZ={m_zz:.5f}, m_XX={m_xx:.5f}")
             print(f"    Applied Pauli-frame updates:")
             print(f"      fz[{target}] ^= m_ZZ")
             print(f"      fx[{control}] ^= m_XX")
@@ -145,11 +145,13 @@ def print_physics_demo(
     demo_x_bits: Dict[str, np.ndarray],
     correlation_pairs: List[Tuple[str, str]],
     shots: int,
+    pauli_frame: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
+    joint_demo_bits: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """Print Section C: Physics demo readouts with single-qubit marginals and two-qubit correlations."""
     
     print("\n" + "=" * 80)
-    print("PHYSICS DEMO READOUTS (END-ONLY MPPs)")
+    print("PHYSICS DEMO READOUTS (FRAME-CONJUGATED OPERATORS)")
     print("=" * 80)
     
     # Single-qubit marginals
@@ -159,17 +161,118 @@ def print_physics_demo(
             z_prob = float(demo_z_bits[qubit_name].mean()) if qubit_name in demo_z_bits else None
             x_prob = float(demo_x_bits[qubit_name].mean()) if qubit_name in demo_x_bits else None
             
+            # Show logical operator expressions
+            z_operator = None
+            x_operator = None
+            if qubit_name in demo_z_bits:
+                z_key = f"{qubit_name}_Z"
+                if z_key in demo_meta:
+                    z_operator = demo_meta[z_key].get("logical_operator", "unknown")
+            if qubit_name in demo_x_bits:
+                x_key = f"{qubit_name}_X"
+                if x_key in demo_meta:
+                    x_operator = demo_meta[x_key].get("logical_operator", "unknown")
+            
+            # Compute post-frame corrected probabilities if pauli_frame is available
+            z_prob_corrected = None
+            x_prob_corrected = None
+            if pauli_frame and qubit_name in pauli_frame:
+                frame = pauli_frame[qubit_name]
+                if z_prob is not None:
+                    # Apply fz frame flip to Z-basis demo
+                    fz_flip = frame.get("fz", np.zeros(shots, dtype=np.uint8))
+                    if isinstance(fz_flip, np.ndarray):
+                        corrected_z_bits = np.bitwise_xor(demo_z_bits[qubit_name], fz_flip)
+                        z_prob_corrected = float(corrected_z_bits.mean())
+                if x_prob is not None:
+                    # Apply fx frame flip to X-basis demo
+                    fx_flip = frame.get("fx", np.zeros(shots, dtype=np.uint8))
+                    if isinstance(fx_flip, np.ndarray):
+                        corrected_x_bits = np.bitwise_xor(demo_x_bits[qubit_name], fx_flip)
+                        x_prob_corrected = float(corrected_x_bits.mean())
+            
+            # Print results with clear operator-based labels
             if z_prob is not None and x_prob is not None:
-                print(f"  {qubit_name}: P_Z(|1⟩) = {z_prob:.3f}  P_X(|1⟩) = {x_prob:.3f}")
+                print(f"  {qubit_name}:")
+                print(f"    Operator {z_operator}: P(meas=1) = {z_prob:.3f}", end="")
+                if z_prob_corrected is not None:
+                    print(f" (raw), {z_prob_corrected:.3f} (post-frame)")
+                else:
+                    print(" (raw)")
+                print(f"    Operator {x_operator}: P(meas=1) = {x_prob:.3f}", end="")
+                if x_prob_corrected is not None:
+                    print(f" (raw), {x_prob_corrected:.3f} (post-frame)")
+                else:
+                    print(" (raw)")
             elif x_prob is not None:
-                print(f"  {qubit_name}: P_X(|1⟩) = {x_prob:.3f}  (Z-basis measurement not available)")
+                print(f"  {qubit_name}:")
+                print(f"    Operator {x_operator}: P(meas=1) = {x_prob:.3f}", end="")
+                if x_prob_corrected is not None:
+                    print(f" (raw), {x_prob_corrected:.3f} (post-frame)")
+                else:
+                    print(" (raw)")
+                print(f"    Z-basis measurement not available")
             elif z_prob is not None:
-                print(f"  {qubit_name}: P_Z(|1⟩) = {z_prob:.3f}  (X-basis measurement not available)")
+                print(f"  {qubit_name}:")
+                print(f"    Operator {z_operator}: P(meas=1) = {z_prob:.3f}", end="")
+                if z_prob_corrected is not None:
+                    print(f" (raw), {z_prob_corrected:.3f} (post-frame)")
+                else:
+                    print(" (raw)")
+                print(f"    X-basis measurement not available")
     else:
         print("  No demo readouts available")
     
     # Two-qubit correlations
-    if correlation_pairs and (demo_z_bits or demo_x_bits):
+    if joint_demo_bits:
+        print("\nTwo-qubit correlations (frame-conjugated operators):")
+        
+        # Group joint demos by pair
+        pair_demos = {}
+        for joint_key, demo_data in joint_demo_bits.items():
+            pair = demo_data["pair"]
+            basis = demo_data["basis"]
+            pair_key = f"{pair[0]},{pair[1]}"
+            
+            if pair_key not in pair_demos:
+                pair_demos[pair_key] = {}
+            pair_demos[pair_key][basis] = demo_data
+        
+        for pair_key, demos in pair_demos.items():
+            zz_data = demos.get("Z")
+            xx_data = demos.get("X")
+
+            q_a, q_b = pair_key.split(',', 1)
+            print(f"\n  ({q_a},{q_b}):")
+
+            if zz_data is not None:
+                zz_bits = zz_data["bits"]
+                zz_p1 = float(zz_bits.mean())
+                zz_expectation = 1.0 - 2.0 * zz_p1
+                zz_p1_count = int(np.sum(zz_bits))
+                zz_p1_ci = wilson_rate_ci(zz_p1_count, shots)
+                zz_ci = (1.0 - 2.0 * zz_p1_ci[1], 1.0 - 2.0 * zz_p1_ci[0])
+                zz_operator = zz_data.get("logical_operator", "Z⊗Z")
+                zz_physical = zz_data.get("physical_realization") or ""
+                print(f"    ⟨Z⊗Z⟩ = {zz_expectation:+.3f} via operator: {zz_operator} {zz_physical}".rstrip())
+                print(f"               CI on ⟨O⟩: [{zz_ci[0]:.3f}, {zz_ci[1]:.3f}]")
+
+            if xx_data is not None:
+                xx_bits = xx_data["bits"]
+                xx_p1 = float(xx_bits.mean())
+                xx_expectation = 1.0 - 2.0 * xx_p1
+                xx_p1_count = int(np.sum(xx_bits))
+                xx_p1_ci = wilson_rate_ci(xx_p1_count, shots)
+                xx_ci = (1.0 - 2.0 * xx_p1_ci[1], 1.0 - 2.0 * xx_p1_ci[0])
+                xx_operator = xx_data.get("logical_operator", "X⊗X")
+                xx_physical = xx_data.get("physical_realization") or ""
+                print(f"    ⟨X⊗X⟩ = {xx_expectation:+.3f} via operator: {xx_operator} {xx_physical}".rstrip())
+                print(f"               CI on ⟨O⟩: [{xx_ci[0]:.3f}, {xx_ci[1]:.3f}]")
+
+            if zz_data is not None and xx_data is not None:
+                fidelity_bound = 0.5 * (zz_expectation + xx_expectation)
+                print(f"    Bell fidelity bound F ≥ 0.5(⟨ZZ⟩+⟨XX⟩) = {fidelity_bound:.3f}")
+    elif correlation_pairs and (demo_z_bits or demo_x_bits):
         print("\nTwo-qubit correlations:")
         
         # Check if we have both Z and X measurements for proper Bell state verification
@@ -191,20 +294,26 @@ def print_physics_demo(
                 print(f"\n  ({q1},{q2}): ⟨Z⊗Z⟩ = {zz_corr:+.3f}  (CI on parity-0: [{zz_ci[0]:.3f}, {zz_ci[1]:.3f}])")
                 print(f"            ⟨X⊗X⟩ = {xx_corr:+.3f}  (CI on parity-0: [{xx_ci[0]:.3f}, {xx_ci[1]:.3f}])")
                 print(f"            Bell fidelity bound F ≥ 0.5(⟨ZZ⟩+⟨XX⟩) = {fidelity_bound:.3f}")
-        else:
-            # Partial verification - only X⊗X correlations available
-            print("  Note: Only X-basis measurements available. Full Bell state verification requires both Z⊗Z and X⊗X correlations.")
-            if has_x_measurements:
-                # Compute X⊗X correlations only
-                correlations = compute_two_qubit_correlations({}, demo_x_bits, correlation_pairs, shots)
+        elif has_x_measurements:
+            # Only X⊗X correlations available
+            correlations = compute_two_qubit_correlations({}, demo_x_bits, correlation_pairs, shots)
+            
+            for pair_key, corr_data in correlations.items():
+                q1, q2 = pair_key.split(',')
+                xx_corr = corr_data["xx_correlator"]
+                xx_ci = corr_data["xx_ci"]
                 
-                for pair_key, corr_data in correlations.items():
-                    q1, q2 = pair_key.split(',')
-                    xx_corr = corr_data["xx_correlator"]
-                    xx_ci = corr_data["xx_ci"]
-                    
-                    print(f"\n  ({q1},{q2}): ⟨X⊗X⟩ = {xx_corr:+.3f}  (CI on parity-0: [{xx_ci[0]:.3f}, {xx_ci[1]:.3f}])")
-                    print(f"            Note: Z⊗Z correlation not available - cannot compute full Bell fidelity bound")
+                print(f"\n  ({q1},{q2}): ⟨X⊗X⟩ = {xx_corr:+.3f}  (CI on parity-0: [{xx_ci[0]:.3f}, {xx_ci[1]:.3f}])")
+        elif has_z_measurements:
+            # Only Z⊗Z correlations available
+            correlations = compute_two_qubit_correlations(demo_z_bits, {}, correlation_pairs, shots)
+            
+            for pair_key, corr_data in correlations.items():
+                q1, q2 = pair_key.split(',')
+                zz_corr = corr_data["zz_correlator"]
+                zz_ci = corr_data["zz_ci"]
+                
+                print(f"\n  ({q1},{q2}): ⟨Z⊗Z⟩ = {zz_corr:+.3f}  (CI on parity-0: [{zz_ci[0]:.3f}, {zz_ci[1]:.3f}])")
     else:
         print("\nTwo-qubit correlations:")
         print("  No correlation pairs or demo readouts available for entanglement verification")
@@ -244,7 +353,7 @@ def print_pauli_frame_audit(
             target = cnot["target"]
             m_zz = cnot["m_zz_mean"]
             m_xx = cnot["m_xx_mean"]
-            print(f"  CNOT({control}->{target}): m_ZZ={m_zz:.3f}, m_XX={m_xx:.3f}")
+            print(f"  CNOT({control}->{target}): m_ZZ={m_zz:.5f}, m_XX={m_xx:.5f}")
 
 
 def print_debug_details(
@@ -281,14 +390,14 @@ def print_debug_details(
         expected_p1 = expected_mean * 100.0
         
         # Decoded distributions
-        decoded_mean = float(preds[:, i].mean())
-        decoded_p0 = (1.0 - decoded_mean) * 100.0
-        decoded_p1 = decoded_mean * 100.0
+        corrected_mean = float(corrected_obs[:, i].mean())
+        corrected_p0 = (1.0 - corrected_mean) * 100.0
+        corrected_p1 = corrected_mean * 100.0
         
         print(f"\n{qubit_name} (basis {basis}):")
         print(f"  Raw: |0⟩ = {raw_p0:6.2f}%, |1⟩ = {raw_p1:6.2f}%")
         print(f"  Expected (flip={expected_flip}): |0⟩ = {expected_p0:6.2f}%, |1⟩ = {expected_p1:6.2f}%")
-        print(f"  Decoded: |0⟩ = {decoded_p0:6.2f}%, |1⟩ = {decoded_p1:6.2f}%")
+        print(f"  Decoded: |0⟩ = {corrected_p0:6.2f}%, |1⟩ = {corrected_p1:6.2f}%")
 
 
 def generate_detailed_json(

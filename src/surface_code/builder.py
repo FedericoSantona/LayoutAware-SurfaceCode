@@ -19,6 +19,8 @@ from .layout import Layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
 from .configs import PhenomenologicalStimConfig
 from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index
+from .pauli_tracker import PauliOperator, conjugate_circuit, pauli_to_physical_mpp, map_logical_to_physical_string
+from .logical_ops import LogicalFrame, apply_sequence
 
 
 GateTarget = stim.GateTarget
@@ -121,6 +123,7 @@ class GlobalStimBuilder:
         ops: Sequence[object],
         cfg: PhenomenologicalStimConfig,
         bracket_map: Dict[str, str],  # patch_name -> 'Z'|'X'
+        qiskit_circuit: Optional[object] = None,  # Qiskit circuit for demo conjugation
     ) -> Tuple[stim.Circuit, List[Tuple[int, int]], Dict[str, object]]:
         layout = self.layout
         circuit = stim.Circuit()
@@ -146,8 +149,11 @@ class GlobalStimBuilder:
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
 
         circuit.append_operation("TICK")
-        for name in all_patches:
-            basis = bracket_map.get(name, "Z").upper()
+        # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
+        for name in bracket_map.keys():
+            if name not in layout.patches:
+                continue  # Skip if patch doesn't exist in layout
+            basis = bracket_map[name].upper()
             if basis not in {"Z", "X"}:
                 raise ValueError("bracket_map values must be 'Z' or 'X'")
             patch = layout.patches[name]
@@ -337,8 +343,12 @@ class GlobalStimBuilder:
         circuit.append_operation("TICK")
         observable_pairs: List[Tuple[int, int]] = []
         basis_labels: List[str] = []
-        for name in all_patches:
-            basis = bracket_map.get(name, "Z").upper()
+        observable_index = 0
+        # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
+        for name in bracket_map.keys():
+            if name not in layout.patches:
+                continue  # Skip if patch doesn't exist in layout
+            basis = bracket_map[name].upper()
             patch = layout.patches[name]
             s = patch.logical_z if basis == "Z" else patch.logical_x
             offs = layout.offsets()[name]
@@ -352,40 +362,226 @@ class GlobalStimBuilder:
             if end_idx is not None:
                 targets.append(_rec_from_abs(circuit, end_idx))
             if targets:
-                circuit.append_operation("OBSERVABLE_INCLUDE", targets, 0)
+                circuit.append_operation("OBSERVABLE_INCLUDE", targets, observable_index)
                 observable_pairs.append((start_idx, end_idx))
                 basis_labels.append(basis)
+                observable_index += 1
 
-        # Optional end-only demo readout per patch (same basis for all patches, if requested)
+        # Optional end-only demo readout with conjugated operators
         demo_info: Dict[str, object] = {}
-        # Try to read a bracket/demo basis from cfg; treat any invalid as disabled
+        
+        # Try to read demo basis from cfg; treat any invalid as disabled
         demo_basis = None
         try:
             db = getattr(cfg, "demo_basis", None)
             if db is not None:
-                b = str(db).strip().upper()
-                if b in {"X", "Z"}:
-                    demo_basis = b
+                demo_basis = db
         except Exception:
             demo_basis = None
 
+        # Normalize demo_basis to list format
+        demo_bases = []
         if demo_basis is not None:
-            circuit.append_operation("TICK")
-            for name in all_patches:
-                patch = layout.patches[name]
-                s = patch.logical_x if demo_basis == "X" else patch.logical_z
-                offs = layout.offsets()[name]
-                positions = [offs + i for i, c in enumerate(s) if c == demo_basis]
-                demo_idx = _mpp_from_positions(circuit, positions, demo_basis)
-                demo_info[name] = {"basis": demo_basis, "index": demo_idx}
+            if isinstance(demo_basis, list):
+                demo_bases = demo_basis
+            else:
+                demo_bases = [demo_basis]
+
+        # Emit end-of-circuit demos in two epochs per basis: joint first, then singles
+        joint_demo_info: Dict[str, object] = {}
+        if demo_bases and qiskit_circuit is not None:
+            # Prepare mapping between logical names and qiskit indices using the
+            # explicit QuantumCircuit qubit order. This implicitly excludes any
+            # ancilla patches that are not part of the original circuit.
+            name_to_idx: Dict[str, int] = {}
+            idx_to_name: Dict[int, str] = {}
+            n_logical = qiskit_circuit.num_qubits
+            for qi in range(n_logical):
+                name = f"q{qi}"
+                name_to_idx[name] = qi
+                idx_to_name[qi] = name
+
+            # Correlation pairs from compiled CNOT operations
+            correlation_pairs: List[Tuple[str, str]] = []
+            for cnot_op in cnot_operations:
+                control = cnot_op["control"]
+                target = cnot_op["target"]
+                correlation_pairs.append((control, target))
+
+            # Track frame orientation (swap_xz) per logical qubit from virtual single-qubit gates
+            frame_states: Dict[str, LogicalFrame] = {}
+            for qi, name in idx_to_name.items():
+                if name not in bracket_map:
+                    continue
+                virtual_gates: List[str] = []
+                for instruction in qiskit_circuit.data:
+                    gate_name = instruction.operation.name.lower()
+                    if gate_name in {"h", "x", "z"}:
+                        qubits = [qiskit_circuit.find_bit(qb).index for qb in instruction.qubits]
+                        if qi in qubits:
+                            virtual_gates.append(gate_name.upper())
+                frame = apply_sequence(LogicalFrame(), virtual_gates)
+                frame_states[name] = frame
+
+            for basis in demo_bases:
+                # ----- Joint product first (final-frame per-qubit products) -----
+                circuit.append_operation("TICK")
+                for (q0_name, q1_name) in correlation_pairs:
+                    if q0_name not in layout.patches or q1_name not in layout.patches:
+                        continue
+                    offs = layout.offsets()
+                    if basis == "X" and qiskit_circuit is not None:
+                        # Build Heisenberg-conjugated joint operator for XX
+                        op = PauliOperator.two_qubit_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                        conj = conjugate_circuit(op, qiskit_circuit)
+                        physical_targets: List[Tuple[int, str]] = []
+                        axes_map: Dict[str, List[str]] = {}
+                        for qi in range(n_logical):
+                            name_i = idx_to_name.get(qi)
+                            if name_i is None or name_i not in layout.patches:
+                                continue
+                            pch = conj.get_qubit_pauli(qi)
+                            if pch == "I":
+                                continue
+                            patch = layout.patches[name_i]
+                            base = offs[name_i]
+                            if pch == "X":
+                                axes_map[name_i] = ["X"]
+                                s = patch.logical_x
+                                for i, ch in enumerate(s):
+                                    if ch == "X":
+                                        physical_targets.append((base + i, "X"))
+                            elif pch == "Z":
+                                axes_map[name_i] = ["Z"]
+                                s = patch.logical_z
+                                for i, ch in enumerate(s):
+                                    if ch == "Z":
+                                        physical_targets.append((base + i, "Z"))
+                            else:  # Y
+                                axes_map[name_i] = ["X", "Z"]
+                                sx = patch.logical_x
+                                sz = patch.logical_z
+                                for i, (cx, cz) in enumerate(zip(sx, sz)):
+                                    if cx == "X" and cz == "Z":
+                                        physical_targets.append((base + i, "Y"))
+                                    elif cx == "X":
+                                        physical_targets.append((base + i, "X"))
+                                    elif cz == "Z":
+                                        physical_targets.append((base + i, "Z"))
+                        # Resolve collisions
+                        qops: Dict[int, set] = {}
+                        for gidx, pch in physical_targets:
+                            qops.setdefault(gidx, set()).add(pch)
+                        final_targets: List[Tuple[int, str]] = []
+                        for gidx, opset in qops.items():
+                            if opset == {"X", "Z"}:
+                                final_targets.append((gidx, "Y"))
+                            else:
+                                final_targets.append((gidx, next(iter(opset))))
+                        if not final_targets:
+                            continue
+                        mpp_targets: List[stim.GateTarget] = []
+                        for k, (gidx, pch) in enumerate(final_targets):
+                            if k > 0:
+                                mpp_targets.append(stim.target_combiner())
+                            if pch == "X":
+                                mpp_targets.append(stim.target_x(gidx))
+                            elif pch == "Z":
+                                mpp_targets.append(stim.target_z(gidx))
+                            else:
+                                mpp_targets.append(stim.target_y(gidx))
+                        circuit.append_operation("MPP", mpp_targets)
+                        joint_idx = circuit.num_measurements - 1
+                        joint_key = f"{q0_name}_{q1_name}_{basis}"
+                        joint_demo_info[joint_key] = {
+                            "pair": [q0_name, q1_name],
+                            "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
+                            "physical_realization": conj.to_string(),
+                            "basis": basis,
+                            "axes": axes_map,
+                            "index": joint_idx,
+                        }
+                    else:
+                        # Target logical correlator for ZZ: Z_L⊗Z_L
+                        patch0 = layout.patches[q0_name]
+                        patch1 = layout.patches[q1_name]
+                        s0 = patch0.logical_z
+                        s1 = patch1.logical_z
+                        base0 = offs[q0_name]
+                        base1 = offs[q1_name]
+                        physical_targets: List[Tuple[int, str]] = []
+                        for i, cch in enumerate(s0):
+                            if cch == "Z":
+                                physical_targets.append((base0 + i, "Z"))
+                        for i, cch in enumerate(s1):
+                            if cch == "Z":
+                                physical_targets.append((base1 + i, "Z"))
+                        if not physical_targets:
+                            continue
+                        mpp_targets: List[stim.GateTarget] = []
+                        for k, (gidx, pch) in enumerate(physical_targets):
+                            if k > 0:
+                                mpp_targets.append(stim.target_combiner())
+                            mpp_targets.append(stim.target_z(gidx))
+                        circuit.append_operation("MPP", mpp_targets)
+                        joint_idx = circuit.num_measurements - 1
+                        joint_key = f"{q0_name}_{q1_name}_{basis}"
+                        joint_demo_info[joint_key] = {
+                            "pair": [q0_name, q1_name],
+                            "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
+                            "physical_realization": f"via Z_L({q0_name})⊗Z_L({q1_name})",
+                            "basis": basis,
+                            "final_bases": {q0_name: "Z", q1_name: "Z"},
+                            "index": joint_idx,
+                        }
+                circuit.append_operation("TICK")
+
+                # ----- Then single-qubit demos for this basis (Heisenberg-conjugated σ) -----
+                if getattr(cfg, "demo_joint_only", False):
+                    continue
+                logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
+                for patch_name in logical_names:
+                    # Initialize single-qubit operator in desired basis
+                    if basis == "Z":
+                        initial_pauli = PauliOperator.single_qubit_z(n_logical, name_to_idx.get(patch_name, 0))
+                    else:
+                        initial_pauli = PauliOperator.single_qubit_x(n_logical, name_to_idx.get(patch_name, 0))
+                    # Conjugate through the circuit to get U†σU
+                    conjugated_pauli = conjugate_circuit(initial_pauli, qiskit_circuit)
+                    # Convert to physical qubit positions (use existing utility)
+                    physical_targets = pauli_to_physical_mpp(conjugated_pauli, layout, bracket_map)
+                    if not physical_targets:
+                        continue
+                    # Build Stim MPP targets as a single Pauli product
+                    mpp_targets = []
+                    for k, (global_idx, pauli_char) in enumerate(physical_targets):
+                        if k > 0:
+                            mpp_targets.append(stim.target_combiner())
+                        if pauli_char == "X":
+                            mpp_targets.append(stim.target_x(global_idx))
+                        elif pauli_char == "Z":
+                            mpp_targets.append(stim.target_z(global_idx))
+                        elif pauli_char == "Y":
+                            mpp_targets.append(stim.target_y(global_idx))
+                    circuit.append_operation("MPP", mpp_targets)
+                    demo_idx = circuit.num_measurements - 1
+                    key = f"{patch_name}_{basis}"
+                    demo_info[key] = {
+                        "basis": basis,
+                        "index": demo_idx,
+                        "patch": patch_name,
+                        "logical_operator": conjugated_pauli.to_string(),
+                        "physical_support": [(idx, pauli) for idx, pauli in physical_targets],
+                        "logical_qubit": name_to_idx.get(patch_name, 0),
+                    }
+                circuit.append_operation("TICK")
 
         metadata: Dict[str, object] = {
             "merge_windows": merge_windows,
             "observable_basis": tuple(basis_labels),
             "demo": demo_info,
+            "joint_demos": joint_demo_info,
             "cnot_operations": cnot_operations,
         }
 
         return circuit, observable_pairs, metadata
-
-

@@ -1,0 +1,150 @@
+{
+  "header": {
+    "cnot_operations": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q1"
+      }
+    ],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 5,
+      "logical_x_weight": 5,
+      "logical_z_weight": 5,
+      "measurement_rounds": 5,
+      "physical_qubits": 25,
+      "x_stabilizers": 12,
+      "z_stabilizers": 4
+    },
+    "noise_config": {
+      "p_x": 0.005,
+      "p_z": 0.005,
+      "shots": 10000
+    },
+    "scenario": "bell",
+    "seed": 46,
+    "surgery_timeline": [
+      {
+        "a": "q0",
+        "b": "ancilla_0",
+        "id": 0,
+        "mean_parity": 0.0,
+        "rounds": 5,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q1",
+        "id": 1,
+        "mean_parity": 0.0,
+        "rounds": 5,
+        "type": "XX"
+      }
+    ],
+    "timestamp": "20251018_162856"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q1"
+      }
+    ],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0.0,
+        "fz": 0
+      },
+      "q1": {
+        "fx": 0,
+        "fz": 0.0
+      }
+    },
+    "virtual_gates": {
+      "q0": [
+        "H"
+      ],
+      "q1": []
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0001,
+      "logical_error_rate_ci": {
+        "lower": 1.759953404235822e-05,
+        "upper": 0.0005663361412286297
+      },
+      "post_correction_distribution": {
+        "p0": 0.9744,
+        "p1": 0.0256
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 0.9744,
+        "p1": 0.0256
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0002,
+      "logical_error_rate_ci": {
+        "lower": 5.4783038781430846e-05,
+        "upper": 0.0007290758339940038
+      },
+      "post_correction_distribution": {
+        "p0": 0.9747,
+        "p1": 0.0253
+      },
+      "qubit": "q1",
+      "raw_distribution": {
+        "p0": 0.9747,
+        "p1": 0.0253
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_x": {
+        "p0": 0.5032,
+        "p1": 0.4968
+      },
+      "q0_z": {
+        "p0": 0.9722,
+        "p1": 0.0278
+      },
+      "q1_x": {
+        "p0": 0.5085999999999999,
+        "p1": 0.4914
+      },
+      "q1_z": {
+        "p0": 0.978,
+        "p1": 0.022
+      }
+    },
+    "two_qubit_correlations": {
+      "q0,q1": {
+        "fidelity_bound": 0.4494,
+        "xx_ci": {
+          "lower": 0.4874012288411327,
+          "upper": 0.5070009216287428
+        },
+        "xx_correlator": -0.005600000000000049,
+        "zz_ci": {
+          "lower": 0.9478412247176112,
+          "upper": 0.9562114743974967
+        },
+        "zz_correlator": 0.9044000000000001
+      }
+    }
+  }
+}

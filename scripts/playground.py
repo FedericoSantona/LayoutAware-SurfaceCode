@@ -39,6 +39,7 @@ from surface_code.utils import (
     diagnostic_print,
     wilson_rate_ci,
     compute_two_qubit_correlations,
+    compute_joint_correlations,
 )
 from surface_code.reporting import (
     print_header,
@@ -229,8 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--distance", type=int, default=5, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--px", type=float, default=5e-3, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=5e-3, help="Phenomenological Z error probability")
+    parser.add_argument("--px", type=float, default=0, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=0, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
     parser.add_argument(
         "--bracket-basis",
@@ -242,12 +243,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--demo-basis",
         type=str,
-        choices=["auto", "Z", "X", "none"],
-        default="auto",
-        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'none' disables the demo readout.",
+        choices=["auto", "Z", "X", "both", "none"],
+        default="Z",
+        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
+    parser.add_argument(
+        "--joint-only",
+        action="store_true",
+        help="Emit only joint product demos at end of circuit (skip singles)",
+    )
     parser.add_argument(
         "--seam-json",
         type=Path,
@@ -360,8 +366,20 @@ def main() -> None:
             demo_basis = None
         elif db_mode == "auto":
             demo_basis = end_basis if end_basis != bracket_basis else None
+        elif db_mode == "both":
+            demo_basis = ["Z", "X"]
         else:
-            demo_basis = args.demo_basis.strip().upper()
+            # Handle single basis (Z or X) or comma-separated formats like "Z,X"
+            demo_str = args.demo_basis.strip().upper()
+            if "," in demo_str:
+                # Parse comma-separated list and normalize to ["Z", "X"]
+                bases = [b.strip() for b in demo_str.split(",")]
+                if set(bases) == {"Z", "X"}:
+                    demo_basis = ["Z", "X"]
+                else:
+                    demo_basis = demo_str  # Fallback to single string
+            else:
+                demo_basis = demo_str
 
         # Build one PatchObject per qubit
         def build_patch() -> PatchObject:
@@ -417,10 +435,11 @@ def main() -> None:
             logical_end=None,
             bracket_basis=bracket_basis,
             demo_basis=demo_basis,
+            demo_joint_only=bool(args.joint_only),
         )
 
         gb = GlobalStimBuilder(layout)
-        circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map)
+        circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map, qc)
 
         # Sample DEM and decode
         dem = circuit.detector_error_model()
@@ -473,7 +492,7 @@ def main() -> None:
                 "m_xx_mean": float(m_xx.mean()),
             })
         
-        # Apply Pauli frame to logical observables
+        # Apply Pauli frame and decoder corrections to logical observables
         corrected_obs = obs_u8.copy()
         
         # Map patch names to their observable indices
@@ -494,6 +513,10 @@ def main() -> None:
                     else:  # X-basis bracketing
                         # For X-basis bracketing, apply fx frame  
                         corrected_obs[:, obs_idx] ^= frame["fx"]
+        
+        # Apply decoder predictions to flip outcomes when decoder detects errors
+        # The decoder predictions indicate when the logical outcome should be flipped
+        corrected_obs ^= preds
 
         # Get basis labels
         basis_labels = tuple(metadata.get("observable_basis", tuple()))
@@ -526,25 +549,98 @@ def main() -> None:
         demo_z_bits = {}
         demo_x_bits = {}
         demo_meta = metadata.get("demo", {})
-        
+
+        # DEBUG: print tail of circuit operations to ensure joint MPPs are last
+        try:
+            tail_ops = str(circuit).strip().splitlines()[-80:]
+            print("\n[DEBUG] Tail of Stim circuit (last ~80 ops):")
+            for ln in tail_ops:
+                print("  ", ln)
+        except Exception:
+            pass
+
+        # Compile sampler once for both singles and joint demos
+        circ_sampler = circuit.compile_sampler(seed=int(args.seed))
+        m_samples = circ_sampler.sample(shots=int(args.shots))
+
+        # Singles (if present)
         if demo_meta:
-            circ_sampler = circuit.compile_sampler(seed=int(args.seed))
-            m_samples = circ_sampler.sample(shots=int(args.shots))
-            
             for name in sorted(demo_meta.keys()):
                 info = demo_meta[name]
                 idx = int(info.get("index")) if info.get("index") is not None else None
                 b = info.get("basis")
-                if idx is None:
+                patch_name = info.get("patch")
+                if idx is None or patch_name is None:
                     continue
-                
                 col = np.asarray(m_samples[:, idx], dtype=np.uint8)
                 if b == "Z":
-                    demo_z_bits[name] = col
+                    demo_z_bits[patch_name] = col
                 elif b == "X":
-                    demo_x_bits[name] = col
+                    demo_x_bits[patch_name] = col
 
-        # Parse correlation pairs (default: CNOT control-target pairs)
+        # Extract joint demo readouts for correlations
+        joint_demo_bits = {}
+        joint_demo_meta = metadata.get("joint_demos", {})
+
+        if joint_demo_meta:
+            for joint_key in sorted(joint_demo_meta.keys()):
+                joint_info = joint_demo_meta[joint_key]
+                idx = int(joint_info.get("index")) if joint_info.get("index") is not None else None
+                basis = joint_info.get("basis")
+                pair = joint_info.get("pair")
+                if idx is None or basis is None or pair is None:
+                    continue
+                col = np.asarray(m_samples[:, idx], dtype=np.uint8)
+                # DEBUG: print direct raw mean for this column
+                print(f"[DEBUG] Joint {joint_key}: idx={idx}, raw_mean={float(col.mean()):.4f}, phys={joint_info.get('physical_realization','')}")
+                joint_demo_bits[joint_key] = {
+                    "bits": col,
+                    "basis": basis,
+                    "pair": pair,
+                    "logical_operator": joint_info.get("logical_operator", "unknown"),
+                    "physical_realization": joint_info.get("physical_realization", ""),
+                    "final_bases": joint_info.get("final_bases", {}),
+                    "axes": joint_info.get("axes", {}),
+                }
+
+        # Apply Pauli-frame corrections to joint demo bits (flip parity by fx/fz as needed)
+        if joint_demo_bits and pauli_frame:
+            corrected_joint_demo_bits: Dict[str, Dict[str, object]] = {}
+            for joint_key, demo_data in joint_demo_bits.items():
+                bits = demo_data["bits"]
+                basis = demo_data["basis"]
+                pair = demo_data["pair"]
+                axes_map = demo_data.get("axes", {})
+                final_bases = demo_data.get("final_bases", {})
+
+                # Prefer axes_map from conjugated operator; fallback to final_bases
+                flips = np.zeros_like(bits, dtype=np.uint8)
+                for qubit_name in pair:
+                    frame = pauli_frame.get(qubit_name)
+                    if frame is None:
+                        continue
+                    axes = axes_map.get(qubit_name)
+                    if not axes:
+                        fb = final_bases.get(qubit_name, basis)
+                        axes = [fb]
+                    partial = np.zeros_like(bits, dtype=np.uint8)
+                    for ax in axes:
+                        axis_key = "fz" if ax == "Z" else "fx"
+                        raw_val = frame.get(axis_key, 0)
+                        if isinstance(raw_val, np.ndarray):
+                            partial ^= raw_val.astype(np.uint8)
+                        else:
+                            if int(raw_val) & 1:
+                                partial ^= np.ones_like(bits, dtype=np.uint8)
+                    flips ^= partial
+
+                corrected_bits = np.bitwise_xor(bits, flips)
+                new_entry = dict(demo_data)
+                new_entry["raw_bits"] = bits
+                new_entry["bits"] = corrected_bits
+                new_entry["frame_flip"] = flips
+                corrected_joint_demo_bits[joint_key] = new_entry
+            joint_demo_bits = corrected_joint_demo_bits
         correlation_pairs = []
         for cnot_op in metadata.get("cnot_operations", []):
             control = cnot_op["control"]
@@ -573,15 +669,18 @@ def main() -> None:
             per_qubit_ler.append(ler)
             per_qubit_ler_ci.append(ler_ci)
 
-        # Compute two-qubit correlations
+        # Compute two-qubit correlations using joint demos
         correlations = {}
-        if correlation_pairs and demo_z_bits and demo_x_bits:
+        if joint_demo_bits:
+            correlations = compute_joint_correlations(joint_demo_bits, int(args.shots))
+        elif correlation_pairs and demo_z_bits and demo_x_bits:
+            # Fallback to old method if no joint demos available
             correlations = compute_two_qubit_correlations(demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots))
 
         # Print structured report
         print_header(args, model, dem, metadata, merge_bits, cnot_metadata, stim_rounds, int(args.shots))
         print_per_qubit_results(args, bracket_map, corrected_obs, obs_u8, preds, int(args.shots))
-        print_physics_demo(demo_meta, demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots))
+        print_physics_demo(demo_meta, demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots), pauli_frame, joint_demo_bits)
         print_pauli_frame_audit(gate_map, pauli_frame, cnot_metadata)
         
         if args.verbose:

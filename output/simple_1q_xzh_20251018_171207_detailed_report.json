@@ -1,0 +1,105 @@
+{
+  "header": {
+    "cnot_operations": [],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 5,
+      "logical_x_weight": 5,
+      "logical_z_weight": 5,
+      "measurement_rounds": 5,
+      "physical_qubits": 25,
+      "x_stabilizers": 12,
+      "z_stabilizers": 4
+    },
+    "noise_config": {
+      "p_x": 0.005,
+      "p_z": 0.005,
+      "shots": 1000000
+    },
+    "scenario": "simple_1q_xzh",
+    "seed": 46,
+    "surgery_timeline": [],
+    "timestamp": "20251018_171207"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0,
+        "fz": 0
+      },
+      "q1": {
+        "fx": 0,
+        "fz": 0
+      }
+    },
+    "virtual_gates": {
+      "q0": [
+        "X"
+      ],
+      "q1": [
+        "X"
+      ]
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.000141,
+      "logical_error_rate_ci": {
+        "lower": 0.00011956909246262406,
+        "upper": 0.00016627140945250376
+      },
+      "post_correction_distribution": {
+        "p0": 0.999859,
+        "p1": 0.000141
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 0.975289,
+        "p1": 0.024711
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.000151,
+      "logical_error_rate_ci": {
+        "lower": 0.00012876071672643098,
+        "upper": 0.000177079708356992
+      },
+      "post_correction_distribution": {
+        "p0": 0.999849,
+        "p1": 0.000151
+      },
+      "qubit": "q1",
+      "raw_distribution": {
+        "p0": 0.975651,
+        "p1": 0.024349
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_x": {
+        "p0": 0.49988,
+        "p1": 0.50012
+      },
+      "q0_z": {
+        "p0": 0.500022,
+        "p1": 0.499978
+      },
+      "q1_x": {
+        "p0": 0.5001070000000001,
+        "p1": 0.499893
+      },
+      "q1_z": {
+        "p0": 0.5001180000000001,
+        "p1": 0.499882
+      }
+    },
+    "two_qubit_correlations": {}
+  }
+}

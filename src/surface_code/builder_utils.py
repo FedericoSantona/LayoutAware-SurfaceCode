@@ -1,9 +1,13 @@
 """Utility functions for Stim circuit builders."""
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import stim
+
+if TYPE_CHECKING:  # Import only for typing to avoid circular deps at runtime
+    from .layout import Layout
+    from .pauli_tracker import PauliOperator
 
 
 GateTarget = stim.GateTarget
@@ -51,3 +55,69 @@ def add_temporal_detectors_with_index(
         idx = append_detector_cb([rec_from_abs(circuit, a), rec_from_abs(circuit, b)])
         indices.append(idx)
     return indices
+
+
+# Helper: build physical MPP targets from a PauliOperator (aggregates X/Z->Y collisions).
+def _mpp_targets_from_pauli(
+    op: "PauliOperator",
+    layout: "Layout",
+    idx_to_name: Dict[int, str],
+) -> Tuple[List[stim.GateTarget], Dict[str, List[str]]]:
+    offs = layout.offsets()
+    n_logical = op.n_qubits
+    physical_targets: List[Tuple[int, str]] = []
+    axes_map: Dict[str, List[str]] = {}
+    for qi in range(n_logical):
+        name_i = idx_to_name.get(qi)
+        if name_i is None or name_i not in layout.patches:
+            continue
+        pch = op.get_qubit_pauli(qi)
+        if pch == "I":
+            continue
+        patch = layout.patches[name_i]
+        base = offs[name_i]
+        if pch == "X":
+            axes_map[name_i] = ["X"]
+            s = patch.logical_x
+            for i, ch in enumerate(s):
+                if ch == "X":
+                    physical_targets.append((base + i, "X"))
+        elif pch == "Z":
+            axes_map[name_i] = ["Z"]
+            s = patch.logical_z
+            for i, ch in enumerate(s):
+                if ch == "Z":
+                    physical_targets.append((base + i, "Z"))
+        else:  # Y → emit both and resolve below
+            axes_map[name_i] = ["X", "Z"]
+            sx = patch.logical_x
+            sz = patch.logical_z
+            for i, (cx, cz) in enumerate(zip(sx, sz)):
+                if cx == "X" and cz == "Z":
+                    physical_targets.append((base + i, "Y"))
+                elif cx == "X":
+                    physical_targets.append((base + i, "X"))
+                elif cz == "Z":
+                    physical_targets.append((base + i, "Z"))
+    # Resolve collisions X+Z -> Y
+    qops: Dict[int, set] = {}
+    for gidx, pch in physical_targets:
+        qops.setdefault(gidx, set()).add(pch)
+    final_targets: List[Tuple[int, str]] = []
+    for gidx, opset in qops.items():
+        if opset == {"X", "Z"}:
+            final_targets.append((gidx, "Y"))
+        else:
+            final_targets.append((gidx, next(iter(opset))))
+
+    mpp_targets: List[stim.GateTarget] = []
+    for k, (gidx, pch) in enumerate(final_targets):
+        if k > 0:
+            mpp_targets.append(stim.target_combiner())
+        if pch == "X":
+            mpp_targets.append(stim.target_x(gidx))
+        elif pch == "Z":
+            mpp_targets.append(stim.target_z(gidx))
+        else:
+            mpp_targets.append(stim.target_y(gidx))
+    return mpp_targets, axes_map

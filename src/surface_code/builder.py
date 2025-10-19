@@ -18,7 +18,7 @@ import stim
 from .layout import Layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
 from .configs import PhenomenologicalStimConfig
-from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index
+from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index, _mpp_targets_from_pauli
 from .pauli_tracker import PauliOperator, conjugate_circuit
 
 
@@ -398,66 +398,6 @@ class GlobalStimBuilder:
                 if len(logical_names) >= 2:
                     correlation_pairs.append((logical_names[0], logical_names[1]))
 
-            # Helper: build physical MPP targets from a PauliOperator (aggregates X/Z->Y collisions).
-            def _mpp_targets_from_pauli(op: PauliOperator) -> Tuple[List[stim.GateTarget], Dict[str, List[str]]]:
-                offs = layout.offsets()
-                physical_targets: List[Tuple[int, str]] = []
-                axes_map: Dict[str, List[str]] = {}
-                for qi in range(n_logical):
-                    name_i = idx_to_name.get(qi)
-                    if name_i is None or name_i not in layout.patches:
-                        continue
-                    pch = op.get_qubit_pauli(qi)
-                    if pch == "I":
-                        continue
-                    patch = layout.patches[name_i]
-                    base = offs[name_i]
-                    if pch == "X":
-                        axes_map[name_i] = ["X"]
-                        s = patch.logical_x
-                        for i, ch in enumerate(s):
-                            if ch == "X":
-                                physical_targets.append((base + i, "X"))
-                    elif pch == "Z":
-                        axes_map[name_i] = ["Z"]
-                        s = patch.logical_z
-                        for i, ch in enumerate(s):
-                            if ch == "Z":
-                                physical_targets.append((base + i, "Z"))
-                    else:  # Y → emit both and resolve below
-                        axes_map[name_i] = ["X", "Z"]
-                        sx = patch.logical_x
-                        sz = patch.logical_z
-                        for i, (cx, cz) in enumerate(zip(sx, sz)):
-                            if cx == "X" and cz == "Z":
-                                physical_targets.append((base + i, "Y"))
-                            elif cx == "X":
-                                physical_targets.append((base + i, "X"))
-                            elif cz == "Z":
-                                physical_targets.append((base + i, "Z"))
-                # Resolve collisions X+Z -> Y
-                qops: Dict[int, set] = {}
-                for gidx, pch in physical_targets:
-                    qops.setdefault(gidx, set()).add(pch)
-                final_targets: List[Tuple[int, str]] = []
-                for gidx, opset in qops.items():
-                    if opset == {"X", "Z"}:
-                        final_targets.append((gidx, "Y"))
-                    else:
-                        final_targets.append((gidx, next(iter(opset))))
-
-                mpp_targets: List[stim.GateTarget] = []
-                for k, (gidx, pch) in enumerate(final_targets):
-                    if k > 0:
-                        mpp_targets.append(stim.target_combiner())
-                    if pch == "X":
-                        mpp_targets.append(stim.target_x(gidx))
-                    elif pch == "Z":
-                        mpp_targets.append(stim.target_z(gidx))
-                    else:
-                        mpp_targets.append(stim.target_y(gidx))
-                return mpp_targets, axes_map
-
             # Determine if we should use the combined path.
             requested = {b.upper() for b in demo_bases if isinstance(b, str)}
             use_combined = requested == {"Z", "X"}
@@ -500,7 +440,7 @@ class GlobalStimBuilder:
                     # then map to physical targets.
                     op_xx = PauliOperator.two_qubit_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
                     conj_xx = conjugate_circuit(op_xx, qiskit_circuit)
-                    xx_targets, axes_map_xx = _mpp_targets_from_pauli(conj_xx)
+                    xx_targets, axes_map_xx = _mpp_targets_from_pauli(conj_xx, layout, idx_to_name)
                     circuit.append_operation("MPP", xx_targets)
                     idx_xx = circuit.num_measurements - 1
                     joint_demo_info[f"{q0_name}_{q1_name}_X"] = {
@@ -528,7 +468,7 @@ class GlobalStimBuilder:
                         else:
                             init = PauliOperator.single_qubit_x(n_logical, name_to_idx.get(patch_name, 0))
                         conj = conjugate_circuit(init, qiskit_circuit)
-                        singles_targets, axes_map = _mpp_targets_from_pauli(conj)
+                        singles_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
                         if not singles_targets:
                             continue
                         circuit.append_operation("MPP", singles_targets)
@@ -555,7 +495,7 @@ class GlobalStimBuilder:
                         if basis == "X":
                             op = PauliOperator.two_qubit_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
                             conj = conjugate_circuit(op, qiskit_circuit)
-                            mpp_targets, axes_map = _mpp_targets_from_pauli(conj)
+                            mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
                             if not mpp_targets:
                                 continue
                             circuit.append_operation("MPP", mpp_targets)
@@ -614,7 +554,7 @@ class GlobalStimBuilder:
                             else:
                                 initial_pauli = PauliOperator.single_qubit_x(n_logical, name_to_idx.get(patch_name, 0))
                             conjugated_pauli = conjugate_circuit(initial_pauli, qiskit_circuit)
-                            singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli)
+                            singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli, layout, idx_to_name)
                             if not singles_targets:
                                 continue
                             circuit.append_operation("MPP", singles_targets)
@@ -649,7 +589,7 @@ class GlobalStimBuilder:
                     else:
                         init_op = PauliOperator.single_qubit_x(n_logical, qi)
                     conj_op = conjugate_circuit(init_op, qiskit_circuit)
-                    targets, _ = _mpp_targets_from_pauli(conj_op)
+                    targets, _ = _mpp_targets_from_pauli(conj_op, layout, idx_to_name)
                     if targets:
                         circuit.append_operation("MPP", targets)
                         idx = circuit.num_measurements - 1

@@ -134,31 +134,39 @@ def compile_circuit_to_surgery(
             if not ancilla_created:
                 ancilla_patch = _allocate_ancilla(patches, ancilla_name)
                 layout.add_patch(ancilla_name, ancilla_patch)
-                
-                # Generate ancilla seams (C-A and A-T)
-                ancilla_seams = _auto_generate_seams(
-                    control_name, target_name, ancilla_name, seams, distance
-                )
-                for seam_key, seam_pairs in ancilla_seams.items():
-                    layout.register_seam(seam_key[0], seam_key[1], seam_key[2], seam_pairs)
-                
                 ancilla_created = True
             
+            # Ensure ancilla seams exist for this control/target pair.
+            ancilla_seams = _auto_generate_seams(
+                control_name, target_name, ancilla_name, seams, distance
+            )
+            for seam_key, seam_pairs in ancilla_seams.items():
+                kind, a_name, b_name = seam_key
+                layout.register_seam(kind, a_name, b_name, seam_pairs)
+
             # Expand CNOT into ancilla-mediated surgery sequence:
             # 1. Rough ZZ merge (Control-Ancilla)
-            ops.append(Merge("rough", control_name, ancilla_name, rounds=int(distance)))
+            rough_rounds = max(0, int(distance))
+            ops.append(Merge("rough", control_name, ancilla_name, rounds=rough_rounds))
+            for _ in range(rough_rounds):
+                ops.append(MeasureRound())
             ops.append(Split("rough", control_name, ancilla_name))
             ops.append(ParityReadout("ZZ", "ZZ", control_name, ancilla_name))
+            for _ in range(rough_rounds):
+                ops.append(MeasureRound(measure_z=False, measure_x=True))
             
             # 2. Smooth XX merge (Ancilla-Target)  
-            ops.append(Merge("smooth", ancilla_name, target_name, rounds=int(distance)))
+            smooth_rounds = max(0, int(distance))
+            ops.append(Merge("smooth", ancilla_name, target_name, rounds=smooth_rounds))
+            for _ in range(smooth_rounds):
+                ops.append(MeasureRound())
             ops.append(Split("smooth", ancilla_name, target_name))
             ops.append(ParityReadout("XX", "XX", ancilla_name, target_name))
+            for _ in range(smooth_rounds):
+                ops.append(MeasureRound(measure_z=True, measure_x=False))
             
         else:
             # 1Q gates are tracked in software; no scheduling here.
             continue
 
     return layout, ops
-
-

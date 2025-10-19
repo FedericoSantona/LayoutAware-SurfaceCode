@@ -1,6 +1,7 @@
 """Utility functions for Stim circuit builders."""
 from __future__ import annotations
 
+from itertools import zip_longest
 from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import stim
@@ -45,13 +46,16 @@ def rec_from_abs(circuit: stim.Circuit, idx: int) -> GateTarget:
 
 def add_temporal_detectors_with_index(
     circuit: stim.Circuit,
-    prev: Sequence[int],
-    curr: Sequence[int],
+    prev: Sequence[Optional[int]],
+    curr: Sequence[Optional[int]],
     append_detector_cb,
-) -> List[int]:
+) -> List[Optional[int]]:
     """Add temporal detectors between consecutive rounds and return detector indices."""
-    indices: List[int] = []
-    for a, b in zip(prev, curr):
+    indices: List[Optional[int]] = []
+    for a, b in zip_longest(prev, curr, fillvalue=None):
+        if a is None or b is None or a == b:
+            indices.append(None)
+            continue
         idx = append_detector_cb([rec_from_abs(circuit, a), rec_from_abs(circuit, b)])
         indices.append(idx)
     return indices

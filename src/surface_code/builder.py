@@ -11,7 +11,7 @@ The builder emits a deterministic DEM by:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 import stim
 
@@ -27,8 +27,8 @@ GateTarget = stim.GateTarget
 
 @dataclass
 class _PrevState:
-    z_prev: Dict[str, List[int]]
-    x_prev: Dict[str, List[int]]
+    z_prev: Dict[str, List[Optional[int]]]
+    x_prev: Dict[str, List[Optional[int]]]
     joint_prev: Dict[Tuple[str, str, str], List[int]]  # key=(kind,a,b)
 
 
@@ -49,23 +49,27 @@ class GlobalStimBuilder:
         circuit: stim.Circuit,
         patch_names: Iterable[str],
         basis: str,
-    ) -> Dict[str, List[int]]:
+        skip_indices: Optional[Dict[str, Set[int]]] = None,
+    ) -> Dict[str, List[Optional[int]]]:
         offs = self.layout.offsets()
-        measured: Dict[str, List[int]] = {}
+        measured: Dict[str, List[Optional[int]]] = {}
         for name in patch_names:
             patch = self.layout.patches[name]
             base = offs[name]
             stabs = patch.z_stabs if basis == "Z" else patch.x_stabs
-            indices: List[int] = []
-            for s in stabs:
+            skip = set() if skip_indices is None else skip_indices.get(name, set())
+            indices: List[Optional[int]] = []
+            for idx, s in enumerate(stabs):
+                if skip and any(i in skip for i, c in enumerate(s) if c == basis):
+                    indices.append(None)
+                    continue
                 # Build a global MPP by mapping local characters to global positions
                 positions: List[int] = []
                 for i, c in enumerate(s):
                     if c == basis:
                         positions.append(base + i)
                 idx = mpp_from_positions(circuit, positions, basis)
-                if idx is not None:
-                    indices.append(idx)
+                indices.append(idx)
             measured[name] = indices
         return measured
 
@@ -193,20 +197,60 @@ class GlobalStimBuilder:
                 # One full ZX cycle
                 names = select_patches(op.patch_ids)
 
+                measure_z = getattr(op, "measure_z", True)
+                measure_x = getattr(op, "measure_x", True)
+
+                skip_z_indices: Dict[str, Set[int]] = {}
+                skip_x_indices: Dict[str, Set[int]] = {}
+
+                if active_rough is not None:
+                    a, b, _ = active_rough
+                    pairs = layout.seams.get(("rough", a, b), [])
+                    if pairs:
+                        idx_a = {ia for ia, _ in pairs}
+                        idx_b = {ib for _, ib in pairs}
+                        if idx_a:
+                            skip_x_indices.setdefault(a, set()).update(idx_a)
+                        if idx_b:
+                            skip_x_indices.setdefault(b, set()).update(idx_b)
+
+                if active_smooth is not None:
+                    a, b, _ = active_smooth
+                    pairs = layout.seams.get(("smooth", a, b), [])
+                    if pairs:
+                        idx_a = {ia for ia, _ in pairs}
+                        idx_b = {ib for _, ib in pairs}
+                        if idx_a:
+                            skip_z_indices.setdefault(a, set()).update(idx_a)
+                        if idx_b:
+                            skip_z_indices.setdefault(b, set()).update(idx_b)
+
                 # Z half
                 circuit.append_operation("TICK")
                 if cfg.p_x_error:
                     circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
-                z_curr = self._measure_patch_stabilizers(circuit, names, "Z")
-                for name in names:
-                    add_temporal_detectors_with_index(
+                z_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.z_prev.items()}
+                if measure_z:
+                    meas_z_curr = self._measure_patch_stabilizers(
                         circuit,
-                        prev.z_prev.get(name, []),
-                        z_curr.get(name, []),
-                        append_detector,
+                        names,
+                        "Z",
+                        skip_indices=skip_z_indices,
                     )
+                    for name in names:
+                        add_temporal_detectors_with_index(
+                            circuit,
+                            prev.z_prev.get(name, []),
+                            meas_z_curr.get(name, []),
+                            append_detector,
+                        )
+                        z_curr[name] = list(meas_z_curr.get(name, []))
+                else:
+                    for name in names:
+                        if name not in z_curr:
+                            z_curr[name] = list(prev.z_prev.get(name, []))
                 # Joint checks for rough merge (if active)
-                if active_rough is not None:
+                if measure_z and active_rough is not None:
                     a, b, rem = active_rough
                     joint_curr = self._measure_joint_checks(circuit, "rough", a, b)
                     print(f"DEBUG: Rough merge joint_curr = {joint_curr}")
@@ -229,16 +273,28 @@ class GlobalStimBuilder:
                 circuit.append_operation("TICK")
                 if cfg.p_z_error:
                     circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
-                x_curr = self._measure_patch_stabilizers(circuit, names, "X")
-                for name in names:
-                    add_temporal_detectors_with_index(
+                x_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.x_prev.items()}
+                if measure_x:
+                    meas_x_curr = self._measure_patch_stabilizers(
                         circuit,
-                        prev.x_prev.get(name, []),
-                        x_curr.get(name, []),
-                        append_detector,
+                        names,
+                        "X",
+                        skip_indices=skip_x_indices,
                     )
+                    for name in names:
+                        add_temporal_detectors_with_index(
+                            circuit,
+                            prev.x_prev.get(name, []),
+                            meas_x_curr.get(name, []),
+                            append_detector,
+                        )
+                        x_curr[name] = list(meas_x_curr.get(name, []))
+                else:
+                    for name in names:
+                        if name not in x_curr:
+                            x_curr[name] = list(prev.x_prev.get(name, []))
                 # Joint checks for smooth merge (if active)
-                if active_smooth is not None:
+                if measure_x and active_smooth is not None:
                     a, b, rem = active_smooth
                     joint_curr = self._measure_joint_checks(circuit, "smooth", a, b)
                     print(f"DEBUG: Smooth merge joint_curr = {joint_curr}")
@@ -578,6 +634,9 @@ class GlobalStimBuilder:
                 logical_names = [nm for nm in sorted(bracket_map.keys()) if nm in layout.patches]
                 snapshot_indices = []
                 snapshot_ops = []
+                snapshot_axes = []
+                snapshot_phases = []
+                order_out: List[str] = []
                 
                 for patch_name in logical_names:
                     # Build final-frame operator for this qubit
@@ -594,14 +653,25 @@ class GlobalStimBuilder:
                         circuit.append_operation("MPP", targets)
                         idx = circuit.num_measurements - 1
                         snapshot_indices.append(idx)
-                        snapshot_ops.append(conj_op.to_string())
+                        # Determine single-qubit axis and phase
+                        axis = conj_op.get_qubit_pauli(qi)
+                        phase = conj_op.phase_sign()
+                        op_str = conj_op.to_string()
+                        if phase < 0:
+                            op_str = f"-{op_str}"
+                        snapshot_ops.append(op_str)
+                        snapshot_axes.append(axis if axis in ("Z", "X") else snapshot_basis)
+                        snapshot_phases.append(int(phase))
+                        order_out.append(patch_name)
                 
                 snapshot_info = {
                     "enabled": True,
                     "basis": snapshot_basis,
-                    "order": logical_names,
+                    "order": order_out,
                     "indices": snapshot_indices,
                     "logical_ops": snapshot_ops,
+                    "axes": snapshot_axes,
+                    "phases": snapshot_phases,
                 }
 
         metadata: Dict[str, object] = {

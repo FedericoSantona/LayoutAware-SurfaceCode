@@ -641,6 +641,9 @@ def print_final_state_distribution(
     
     basis = snapshot_meta["basis"]
     order = snapshot_meta["order"]
+    logical_ops = list(snapshot_meta.get("logical_ops", []))
+    axes_meta = list(snapshot_meta.get("axes", []))
+    phases_meta = list(snapshot_meta.get("phases", []))
     k = len(order)
     
     print(f"Basis: {basis}")
@@ -658,8 +661,20 @@ def print_final_state_distribution(
         bits_array[:, i] = col
         
         # Apply frame correction and decoder flip corrections (per shot)
+        # Choose frame bit by the actual final operator axis if available; fallback to printed basis
+        frame_flip_applied = False
         if apply_frame_correction and pauli_frame and qname in pauli_frame:
-            frame_key = "fx" if basis == "Z" else "fz"
+            # Parse final operator axis for this qubit if present (e.g., "Z(q0)" or "X(q0)")
+            axis_for_qubit = None
+            if i < len(axes_meta) and axes_meta[i] in ("Z","X"):
+                axis_for_qubit = axes_meta[i]
+            if i < len(logical_ops) and isinstance(logical_ops[i], str):
+                op_str = logical_ops[i].strip()
+                if op_str.startswith("Z("):
+                    axis_for_qubit = "Z"
+                elif op_str.startswith("X("):
+                    axis_for_qubit = "X"
+            frame_key = "fx" if (axis_for_qubit or basis) == "Z" else "fz"
             flip = pauli_frame[qname].get(frame_key, 0)
             if isinstance(flip, np.ndarray):
                 flip = int(round(float(flip.mean()))) & 1
@@ -667,17 +682,44 @@ def print_final_state_distribution(
                 flip = int(flip) & 1
             if flip:
                 bits_array[:, i] ^= 1
+                frame_flip_applied = True
+        # Apply operator global phase (-1) as a bit flip (maps expectation sign to outcome convention)
+        phase_for_qubit = None
+        if i < len(phases_meta):
+            try:
+                phase_for_qubit = int(phases_meta[i])
+            except Exception:
+                phase_for_qubit = None
+        if phase_for_qubit is None and i < len(logical_ops) and isinstance(logical_ops[i], str):
+            # infer from leading '-' in op string
+            if logical_ops[i].strip().startswith("-"):
+                phase_for_qubit = -1
+        # Avoid double-counting sign: if frame already applied a flip for this axis,
+        # skip the phase-based flip. Otherwise apply phase flip to reflect operator sign.
+        if (phase_for_qubit is not None) and (phase_for_qubit < 0) and (not frame_flip_applied):
+            bits_array[:, i] ^= 1
+        # Apply decoder flips only when the snapshot operator axis matches the printed basis
         if decoder_flips and qname in decoder_flips:
-            flips = decoder_flips[qname]
-            if isinstance(flips, np.ndarray):
-                arr = flips.astype(np.uint8)
-            else:
-                arr = np.asarray(flips, dtype=np.uint8)
-            if arr.ndim == 0:
-                if int(arr) & 1:
-                    bits_array[:, i] ^= 1
-            else:
-                bits_array[:, i] ^= arr
+            axis_for_qubit = None
+            if i < len(axes_meta) and axes_meta[i] in ("Z","X"):
+                axis_for_qubit = axes_meta[i]
+            if i < len(logical_ops) and isinstance(logical_ops[i], str):
+                op_str = logical_ops[i].strip()
+                if op_str.startswith("Z("):
+                    axis_for_qubit = "Z"
+                elif op_str.startswith("X("):
+                    axis_for_qubit = "X"
+            if axis_for_qubit is not None and axis_for_qubit == basis:
+                flips = decoder_flips[qname]
+                if isinstance(flips, np.ndarray):
+                    arr = flips.astype(np.uint8)
+                else:
+                    arr = np.asarray(flips, dtype=np.uint8)
+                if arr.ndim == 0:
+                    if int(arr) & 1:
+                        bits_array[:, i] ^= 1
+                else:
+                    bits_array[:, i] ^= arr
     
     # Assemble bitstrings and count
     from collections import Counter

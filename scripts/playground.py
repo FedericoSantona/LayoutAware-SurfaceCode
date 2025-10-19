@@ -245,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo-basis",
         type=str,
         choices=["auto", "Z", "X", "both", "none"],
-        default="Z",
+        default="X",
         help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
@@ -545,6 +545,35 @@ def main() -> None:
             frame = apply_sequence(LogicalFrame(), seq)
             _, flip = end_basis_and_flip(bracket_basis, frame)
             expected_flips.append(int(flip))
+
+        # Fold virtual single-qubit gates into the Pauli frame using sign-aware
+        # Heisenberg conjugation: compute the sign acquired by Z and X under the
+        # gate sequence, and map signs to fx (for Z) and fz (for X).
+        def _conjugate_axis_and_phase(axis: str, gates: list[str]) -> tuple[str, int]:
+            axis = axis.upper()
+            x = (axis == "X")
+            z = (axis == "Z")
+            phase = +1
+            for g in reversed(gates or []):
+                g = str(g).upper()
+                if g == "H":
+                    x, z = z, x
+                elif g == "X":
+                    if z:
+                        phase *= -1
+                elif g == "Z":
+                    if x:
+                        phase *= -1
+            return ("X" if x else "Z"), phase
+
+        for i in range(qc.num_qubits):
+            qname = f"q{i}"
+            seq = gate_map[qname]
+            # Sign of Z under sequence → fx; sign of X under sequence → fz
+            _, z_phase = _conjugate_axis_and_phase("Z", seq)
+            _, x_phase = _conjugate_axis_and_phase("X", seq)
+            pauli_frame[qname]["fx"] ^= (1 if z_phase < 0 else 0)
+            pauli_frame[qname]["fz"] ^= (1 if x_phase < 0 else 0)
 
         # Extract demo readouts for physics analysis
         demo_z_bits = {}

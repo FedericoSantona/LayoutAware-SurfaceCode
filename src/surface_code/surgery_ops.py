@@ -16,6 +16,8 @@ from typing import List
 @dataclass
 class MeasureRound:
     patch_ids: List[str] | None = None  # None ⇒ all patches
+    measure_z: bool = True
+    measure_x: bool = True
 
 
 @dataclass
@@ -58,5 +60,4 @@ class CNOTOp:
     target: str
     ancilla: str
     rounds: int  # d
-
 

@@ -1,13 +1,19 @@
-"""Pauli conjugation engine for frame-aware demo measurements.
+"""Comprehensive Pauli tracking and frame management.
 
-This module implements a symplectic Pauli tracker that computes U†σU for demo operators,
+This module provides:
+- Low-level symplectic Pauli conjugation engine (PauliOperator, conjugate_circuit)
+- High-level Pauli frame management (PauliFrameManager)
+- Single source of truth for all Pauli tracking logic
+
+It implements a symplectic Pauli tracker that computes U†σU for demo operators,
 where U is the logical circuit. This makes demos reflect the "as-if physical" state
 after virtual gates are applied in the Pauli frame.
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
+import numpy as np
 from qiskit.circuit import QuantumCircuit
 
 
@@ -207,3 +213,104 @@ def conjugate_circuit(initial_pauli: PauliOperator, qiskit_circuit: QuantumCircu
     return pauli
 
 
+class PauliFrameManager:
+    """Manages Pauli frame state and virtual gate tracking for logical qubits.
+
+    frame[qname]["fx"] is the bit used to flip Z-basis singles (or joint ZZ via XOR),
+    frame[qname]["fz"] is the bit used to flip X-basis singles (or joint XX via XOR).
+    """
+
+    def __init__(self, n_qubits: int) -> None:
+        self.n_qubits = int(n_qubits)
+        self.frame: Dict[str, Dict[str, Any]] = {f"q{i}": {"fx": 0, "fz": 0} for i in range(self.n_qubits)}
+        self.virtual_gates: Dict[str, List[str]] = {f"q{i}": [] for i in range(self.n_qubits)}
+
+    # ---------- Virtual gates ----------
+    def add_virtual_gate(self, qubit_index: int, gate: str) -> None:
+        """Add virtual gate and update frame bits."""
+        qname = f"q{int(qubit_index)}"
+        self.virtual_gates[qname].append(gate.upper())
+        self._update_frame_from_virtual_gates(qubit_index)
+
+    def _update_frame_from_virtual_gates(self, qubit_index: int) -> None:
+        """Update frame bits based on virtual gate sequence."""
+        qname = f"q{int(qubit_index)}"
+        seq = self.virtual_gates[qname]
+        # Use the comprehensive conjugation from pauli_tracker
+        _, z_phase = self._conjugate_axis_and_phase("Z", seq)
+        _, x_phase = self._conjugate_axis_and_phase("X", seq)
+        self.frame[qname]["fx"] = (1 if z_phase < 0 else 0)
+        self.frame[qname]["fz"] = (1 if x_phase < 0 else 0)
+
+    @staticmethod
+    def _conjugate_axis_and_phase(axis: str, gates: List[str]) -> Tuple[str, int]:
+        """Heisenberg-conjugate using the comprehensive engine."""
+        # Create a temporary PauliOperator and conjugate through gates
+        n_qubits = 1  # Single qubit for virtual gates
+        if axis.upper() == "Z":
+            pauli = PauliOperator.single_qubit_z(n_qubits, 0)
+        else:
+            pauli = PauliOperator.single_qubit_x(n_qubits, 0)
+        
+        # Apply gates in reverse order (right-to-left)
+        for gate in reversed(gates):
+            gate = gate.upper()
+            if gate == "H":
+                pauli.conjugate_H(0)
+            elif gate == "X":
+                pauli.conjugate_X(0)
+            elif gate == "Z":
+                pauli.conjugate_Z(0)
+        
+        axis_result = pauli.get_qubit_pauli(0)
+        phase_result = pauli.phase_sign()
+        return axis_result, phase_result
+
+    # ---------- CNOT parity updates ----------
+    def apply_cnot_update(self, control: str, target: str, m_zz: np.ndarray, m_xx: np.ndarray) -> None:
+        """Update Pauli frame given CNOT parity bits.
+
+        Contract: fz[target] ^= m_ZZ, fx[control] ^= m_XX.
+        """
+        self.frame[target]["fz"] ^= m_zz
+        self.frame[control]["fx"] ^= m_xx
+
+    # ---------- Queries ----------
+    def get_frame_bit(self, qubit_name: str, basis_axis: str) -> int:
+        """Get frame bit for a qubit and basis."""
+        key = "fx" if basis_axis.upper() == "Z" else "fz"
+        v = self.frame.get(qubit_name, {}).get(key, 0)
+        if isinstance(v, np.ndarray):
+            return int(round(float(v.mean()))) & 1
+        return int(v) & 1
+
+    # ---------- Final operator computation ----------
+    def get_final_operator_info(
+        self,
+        qubit_index: int,
+        initial_basis: str,
+        qiskit_circuit: QuantumCircuit,
+    ) -> Dict[str, Any]:
+        """Return final operator info for single-qubit demo/snapshot.
+
+        initial_basis: 'Z' or 'X' (requested basis for this single-qubit op)
+        Returns: dict with keys: axis ('Z'|'X'), phase (±1), operator_string, pauli_operator
+        """
+        n = qiskit_circuit.num_qubits
+        qi = int(qubit_index)
+        if initial_basis.upper() == "Z":
+            init = PauliOperator.single_qubit_z(n, qi)
+        else:
+            init = PauliOperator.single_qubit_x(n, qi)
+        conj = conjugate_circuit(init, qiskit_circuit)
+        axis = conj.get_qubit_pauli(qi)
+        phase = conj.phase_sign()
+        op_str = conj.to_string()
+        if phase < 0:
+            op_str = f"-{op_str}"
+        return {
+            "axis": axis if axis in ("Z", "X") else initial_basis.upper(),
+            "phase": int(phase),
+            "operator_string": op_str,
+            "pauli_operator": conj,
+        }

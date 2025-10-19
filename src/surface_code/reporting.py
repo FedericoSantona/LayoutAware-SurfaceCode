@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from .utils import wilson_rate_ci, compute_two_qubit_correlations
+from .pauli_tracker import PauliFrameManager
 
 
 
@@ -84,37 +85,6 @@ def _explain_operator_semantics() -> list[str]:
         "    • bit=0 ↔ eigenvalue +1, bit=1 ↔ eigenvalue −1;  ⟨O⟩ = 1 − 2·P(bit=1).",
     ]
 
-# --- Helper for sign-aware Heisenberg conjugation of Pauli axis by virtual gates ---
-def _conjugate_axis_and_phase(axis: str, virtual_gates: List[str]) -> tuple[str, int]:
-    """Heisenberg-conjugate a single-qubit Pauli axis ('Z' or 'X') by a list of virtual gates.
-    Walk gates in reverse order (right-to-left): returns (final_axis, phase) with phase in {+1,-1}.
-    Rules used:
-      H: swaps X<->Z (no sign)
-      X: XZX = -Z,  XXX = +X
-      Z: ZXZ = -X,  ZZZ = +Z
-    """
-    axis = axis.upper()
-    if axis not in ("Z", "X"):
-        raise ValueError(f"axis must be 'Z' or 'X', got {axis}")
-    x = (axis == "X")
-    z = (axis == "Z")
-    phase = +1
-    for g in reversed(virtual_gates or []):
-        g = str(g).upper()
-        if g == "H":
-            x, z = z, x  # swap, no sign
-        elif g == "X":
-            if z:
-                phase *= -1  # XZX = -Z
-            # XXX = +X (no sign)
-        elif g == "Z":
-            if x:
-                phase *= -1  # ZXZ = -X
-            # ZZZ = +Z (no sign)
-        else:
-            # ignore gates we don't model; extend here if needed
-            continue
-    return ("X" if x else "Z"), phase
 
 def _get_virtual_gates_for_qubit(qubit: str, virtual_gates_per_qubit: Optional[Dict[str, List[str]]], demo_meta: Optional[Dict[str, Any]]) -> List[str]:
     """Try several places to find the per-qubit virtual gate list for conjugation.
@@ -401,7 +371,7 @@ def print_physics_demo(
                 # If builder didn't provide a logical_operator/phase, derive via virtual gates.
                 if "logical_operator" not in z_entry or "phase" not in z_entry:
                     vg_list = vg_map_explicit.get(qubit_name, []) or vg_map_meta.get(qubit_name, []) or _get_virtual_gates_for_qubit(qubit_name, virtual_gates_per_qubit, demo_meta)
-                    final_axis, phase_c = _conjugate_axis_and_phase("Z", vg_list)
+                    final_axis, phase_c = PauliFrameManager._conjugate_axis_and_phase("Z", vg_list)
                     z_entry.setdefault("logical_operator", f"{final_axis}({qubit_name})")
                     z_entry["phase"] = int(z_entry.get("phase", +1)) * int(phase_c)
                 z_logical = z_entry.get("logical_operator", f"Z({qubit_name})")
@@ -427,7 +397,7 @@ def print_physics_demo(
                 x_requested = f"X({qubit_name})"
                 if "logical_operator" not in x_entry or "phase" not in x_entry:
                     vg_list = vg_map_explicit.get(qubit_name, []) or vg_map_meta.get(qubit_name, []) or _get_virtual_gates_for_qubit(qubit_name, virtual_gates_per_qubit, demo_meta)
-                    final_axis, phase_c = _conjugate_axis_and_phase("X", vg_list)
+                    final_axis, phase_c = PauliFrameManager._conjugate_axis_and_phase("X", vg_list)
                     x_entry.setdefault("logical_operator", f"{final_axis}({qubit_name})")
                     x_entry["phase"] = int(x_entry.get("phase", +1)) * int(phase_c)
                 x_logical = x_entry.get("logical_operator", f"X({qubit_name})")

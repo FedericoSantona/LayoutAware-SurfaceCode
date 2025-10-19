@@ -18,8 +18,8 @@ class Simple1QXZHBenchmark(BenchmarkCircuit):
         qc = QuantumCircuit(1, name="simple_1q_xzh")
         #qc.z(0)
         #qc.x(0)
-        qc.h(0)
+        #qc.h(0)
         qc.x(0)
-        qc.h(0)
+        #qc.h(0)
 
         return qc

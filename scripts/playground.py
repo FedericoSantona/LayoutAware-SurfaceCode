@@ -67,11 +67,9 @@ from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
 from surface_code.joint_parity import decode_joint_parity
 from surface_code.logical_ops import (
-    LogicalFrame,
-    apply_sequence,
-    end_basis_and_flip,
     parse_init_label,
 )
+from surface_code.pauli_tracker import PauliFrameManager
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo-basis",
         type=str,
         choices=["auto", "Z", "X", "both", "none"],
-        default="X",
+        default="Z",
         help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
@@ -462,8 +460,8 @@ def main() -> None:
             key = (window.get("parity_type"), window.get("a"), window.get("b"), window.get("id"))
             merge_bits[key] = bit
 
-        # Extract CNOT parity bits and update Pauli frame
-        pauli_frame = {f"q{i}": {"fx": 0, "fz": 0} for i in range(qc.num_qubits)}
+        # Extract CNOT parity bits and update Pauli frame (centralized)
+        pfm = PauliFrameManager(qc.num_qubits)
         cnot_metadata = []
         
         for cnot_op in metadata.get("cnot_operations", []):
@@ -482,8 +480,7 @@ def main() -> None:
             m_xx = merge_bits.get(smooth_key, np.zeros(int(args.shots), dtype=np.uint8))
             
             # Update Pauli frame: fz[target] ^= m_ZZ, fx[control] ^= m_XX
-            pauli_frame[target]["fz"] ^= m_zz
-            pauli_frame[control]["fx"] ^= m_xx
+            pfm.apply_cnot_update(control, target, m_zz, m_xx)
             
             # Store CNOT metadata for reporting
             cnot_metadata.append({
@@ -503,18 +500,16 @@ def main() -> None:
             patch_to_obs_idx[patch_name] = i
         
         # Apply Pauli frame corrections
-        for patch_name, frame in pauli_frame.items():
+        for patch_name in sorted(bracket_map.keys()):
             if patch_name in patch_to_obs_idx:
                 obs_idx = patch_to_obs_idx[patch_name]
                 # Check if obs_idx is within bounds
                 if obs_idx < corrected_obs.shape[1]:
                     basis = bracket_map[patch_name]
                     if basis == "Z":
-                        # For Z-basis bracketing, apply fz frame
-                        corrected_obs[:, obs_idx] ^= frame["fz"]
-                    else:  # X-basis bracketing
-                        # For X-basis bracketing, apply fx frame  
-                        corrected_obs[:, obs_idx] ^= frame["fx"]
+                        corrected_obs[:, obs_idx] ^= pfm.frame[patch_name]["fz"]
+                    else:
+                        corrected_obs[:, obs_idx] ^= pfm.frame[patch_name]["fx"]
         
         # Apply decoder predictions to flip outcomes when decoder detects errors
         # The decoder predictions indicate when the logical outcome should be flipped
@@ -529,22 +524,20 @@ def main() -> None:
         if len(basis_labels) > obs_u8.shape[1]:
             basis_labels = basis_labels[:obs_u8.shape[1]]
 
-        # Track virtual single-qubit gates (X,Z,H) to compute expected flips per qubit
-        gate_map = {f"q{i}": [] for i in range(qc.num_qubits)}
+        # Track virtual single-qubit gates centrally
         for ci in qc.data:
             name = ci.operation.name.lower()
             if name in {"x", "z", "h"}:
                 for qb in ci.qubits:
                     qidx = qc.find_bit(qb).index
-                    gate_map[f"q{qidx}"].append(name.upper())
+                    pfm.add_virtual_gate(qidx, name.upper())
         
-        # Derive per-qubit expected flips in the chosen bracket basis
+        # Derive per-qubit expected flips for debug/verbose via centralized helper
         expected_flips = []
         for i in range(qc.num_qubits):
-            seq = gate_map[f"q{i}"]
-            frame = apply_sequence(LogicalFrame(), seq)
-            _, flip = end_basis_and_flip(bracket_basis, frame)
-            expected_flips.append(int(flip))
+            seq = pfm.virtual_gates[f"q{i}"]
+            _, phase = PauliFrameManager._conjugate_axis_and_phase(bracket_basis, seq)
+            expected_flips.append(1 if phase < 0 else 0)
 
         # Fold virtual single-qubit gates into the Pauli frame using sign-aware
         # Heisenberg conjugation: compute the sign acquired by Z and X under the
@@ -566,14 +559,7 @@ def main() -> None:
                         phase *= -1
             return ("X" if x else "Z"), phase
 
-        for i in range(qc.num_qubits):
-            qname = f"q{i}"
-            seq = gate_map[qname]
-            # Sign of Z under sequence → fx; sign of X under sequence → fz
-            _, z_phase = _conjugate_axis_and_phase("Z", seq)
-            _, x_phase = _conjugate_axis_and_phase("X", seq)
-            pauli_frame[qname]["fx"] ^= (1 if z_phase < 0 else 0)
-            pauli_frame[qname]["fz"] ^= (1 if x_phase < 0 else 0)
+        # (Replaced by PauliFrameManager; no additional folding needed here)
 
         # Extract demo readouts for physics analysis
         demo_z_bits = {}
@@ -634,7 +620,7 @@ def main() -> None:
                 }
 
         # Apply Pauli-frame corrections to joint demo bits (flip parity by fx/fz as needed)
-        if joint_demo_bits and pauli_frame:
+        if joint_demo_bits and pfm.frame:
             corrected_joint_demo_bits: Dict[str, Dict[str, object]] = {}
             for joint_key, demo_data in joint_demo_bits.items():
                 bits = demo_data["bits"]
@@ -646,7 +632,7 @@ def main() -> None:
                 # Prefer axes_map from conjugated operator; fallback to final_bases
                 flips = np.zeros_like(bits, dtype=np.uint8)
                 for qubit_name in pair:
-                    frame = pauli_frame.get(qubit_name)
+                    frame = pfm.frame.get(qubit_name)
                     if frame is None:
                         continue
                     axes = axes_map.get(qubit_name)
@@ -729,9 +715,9 @@ def main() -> None:
             demo_x_bits,
             correlation_pairs,
             int(args.shots),
-            pauli_frame,
+            pfm.frame,
             joint_demo_bits,
-            virtual_gates_per_qubit=gate_map,
+            virtual_gates_per_qubit=pfm.virtual_gates,
         )
         decoder_flip_map = {}
         for patch_name, obs_idx in patch_to_obs_idx.items():
@@ -741,12 +727,12 @@ def main() -> None:
         print_final_state_distribution(
             metadata.get("final_snapshot", {}),
             snapshot_bits,
-            pauli_frame,
+            pfm.frame,
             int(args.shots),
             apply_frame_correction=True,
             decoder_flips=decoder_flip_map,
         )
-        print_pauli_frame_audit(gate_map, pauli_frame, cnot_metadata)
+        print_pauli_frame_audit(pfm.virtual_gates, pfm.frame, cnot_metadata)
         
         if args.verbose:
             print_debug_details(args, basis_labels, obs_u8, preds, corrected_obs, expected_flips)
@@ -760,7 +746,7 @@ def main() -> None:
                 args, model, metadata, merge_bits, cnot_metadata,
                 bracket_map, corrected_obs, obs_u8, preds,
                 demo_z_bits, demo_x_bits, correlations,
-                gate_map, pauli_frame, int(args.shots), stim_rounds,
+                pfm.virtual_gates, pfm.frame, int(args.shots), stim_rounds,
                 snapshot_bits
             )
             json_filepath = save_detailed_json(detailed_json, args)

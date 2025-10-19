@@ -23,9 +23,9 @@
     },
     "plot": "plots/threshold/z_only.png",
     "crossings": {
-      "3-5": null,
-      "5-7": null,
-      "7-9": null
+      "3-5": 0.04480748728300022,
+      "5-7": 0.056688098484741566,
+      "7-9": 0.062388906070768635
     },
     "json": "output/threshold/z_only.json"
   },
@@ -53,9 +53,9 @@
     },
     "plot": "plots/threshold/symmetric_Xinit.png",
     "crossings": {
-      "3-5": 0.01564491574744956,
-      "5-7": 0.0010137829089015634,
-      "7-9": 0.010965615295439669
+      "3-5": 0.04457340763040767,
+      "5-7": 0.055083572223483375,
+      "7-9": 0.062137540806044694
     },
     "json": "output/threshold/symmetric_Xinit.json"
   }

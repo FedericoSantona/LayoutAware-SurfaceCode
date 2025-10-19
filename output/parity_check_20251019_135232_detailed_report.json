@@ -1,0 +1,266 @@
+{
+  "final_state_distribution": {
+    "basis": "X",
+    "distribution": {
+      "++++": 0.062572,
+      "+++-": 0.062488,
+      "++-+": 0.062506,
+      "++--": 0.062546,
+      "+-++": 0.062382,
+      "+-+-": 0.062326,
+      "+--+": 0.062506,
+      "+---": 0.062456,
+      "-+++": 0.06296,
+      "-++-": 0.063017,
+      "-+-+": 0.062776,
+      "-+--": 0.062529,
+      "--++": 0.062288,
+      "--+-": 0.062522,
+      "---+": 0.062232,
+      "----": 0.061894
+    },
+    "enabled": true,
+    "order": [
+      "q0",
+      "q1",
+      "q2",
+      "q3"
+    ]
+  },
+  "header": {
+    "cnot_operations": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q1",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q2",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      }
+    ],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 3,
+      "logical_x_weight": 3,
+      "logical_z_weight": 3,
+      "measurement_rounds": 3,
+      "physical_qubits": 9,
+      "x_stabilizers": 4,
+      "z_stabilizers": 2
+    },
+    "noise_config": {
+      "p_x": 0,
+      "p_z": 0,
+      "shots": 1000000
+    },
+    "scenario": "parity_check",
+    "seed": 46,
+    "surgery_timeline": [
+      {
+        "a": "q0",
+        "b": "ancilla_0",
+        "id": 0,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q3",
+        "id": 1,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "XX"
+      },
+      {
+        "a": "q1",
+        "b": "ancilla_0",
+        "id": 2,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q3",
+        "id": 3,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "XX"
+      },
+      {
+        "a": "q2",
+        "b": "ancilla_0",
+        "id": 4,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q3",
+        "id": 5,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "XX"
+      }
+    ],
+    "timestamp": "20251019_135231"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q1",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q2",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q3"
+      }
+    ],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0.0,
+        "fz": 0
+      },
+      "q1": {
+        "fx": 0.0,
+        "fz": 0
+      },
+      "q2": {
+        "fx": 0.0,
+        "fz": 0
+      },
+      "q3": {
+        "fx": 0,
+        "fz": 0.0
+      }
+    },
+    "virtual_gates": {
+      "q0": [],
+      "q1": [],
+      "q2": [],
+      "q3": []
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q1",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q2",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q3",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_x": {
+        "p0": 0.49978199999999995,
+        "p1": 0.500218
+      },
+      "q1_x": {
+        "p0": 0.501394,
+        "p1": 0.498606
+      },
+      "q2_x": {
+        "p0": 0.5005550000000001,
+        "p1": 0.499445
+      },
+      "q3_x": {
+        "p0": 0.5002219999999999,
+        "p1": 0.499778
+      }
+    },
+    "two_qubit_correlations": {}
+  }
+}

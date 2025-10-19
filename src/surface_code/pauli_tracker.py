@@ -20,7 +20,7 @@ class PauliOperator:
     - z[i] = 1 means Z acts on logical qubit i
     """
     
-    def __init__(self, n_qubits: int, x_bits: int = 0, z_bits: int = 0):
+    def __init__(self, n_qubits: int, x_bits: int = 0, z_bits: int = 0, phase: int = +1):
         """Initialize Pauli operator with n qubits.
         
         Args:
@@ -31,20 +31,21 @@ class PauliOperator:
         self.n_qubits = n_qubits
         self.x_bits = x_bits & ((1 << n_qubits) - 1)  # Mask to n_qubits bits
         self.z_bits = z_bits & ((1 << n_qubits) - 1)  # Mask to n_qubits bits
+        self._phase = +1 if phase >= 0 else -1
     
     @classmethod
     def single_qubit_x(cls, n_qubits: int, qubit: int) -> 'PauliOperator':
         """Create single-qubit X operator on specified qubit."""
         if qubit >= n_qubits:
             raise ValueError(f"Qubit {qubit} out of range for {n_qubits} qubits")
-        return cls(n_qubits, x_bits=1 << qubit, z_bits=0)
+        return cls(n_qubits, x_bits=1 << qubit, z_bits=0, phase=+1)
     
     @classmethod
     def single_qubit_z(cls, n_qubits: int, qubit: int) -> 'PauliOperator':
         """Create single-qubit Z operator on specified qubit."""
         if qubit >= n_qubits:
             raise ValueError(f"Qubit {qubit} out of range for {n_qubits} qubits")
-        return cls(n_qubits, x_bits=0, z_bits=1 << qubit)
+        return cls(n_qubits, x_bits=0, z_bits=1 << qubit, phase=+1)
     
     def conjugate_H(self, qubit: int) -> None:
         """Apply H conjugation: swap x[qubit] ↔ z[qubit]."""
@@ -77,12 +78,30 @@ class PauliOperator:
         self.z_bits ^= target_z << control
     
     def conjugate_X(self, qubit: int) -> None:
-        """Apply X conjugation: no-op for operator tracking (phase only)."""
-        pass  # X gates only add byproduct phases, don't change operator structure
+        """Apply X conjugation: toggle phase if operator anticommutes with X on qubit.
+
+        X O X = O if O ∈ {I, X} on this qubit, and = -O if O ∈ {Y, Z} on this qubit.
+        Structure is unchanged for single-qubit rotations in this representation.
+        """
+        if qubit >= self.n_qubits:
+            raise ValueError(f"Qubit {qubit} out of range for {self.n_qubits} qubits")
+        # Anticommutes iff Z acts on this qubit (including Y which has both X and Z)
+        z_bit = (self.z_bits >> qubit) & 1
+        if z_bit:
+            self._phase *= -1
     
     def conjugate_Z(self, qubit: int) -> None:
-        """Apply Z conjugation: no-op for operator tracking (phase only)."""
-        pass  # Z gates only add byproduct phases, don't change operator structure
+        """Apply Z conjugation: toggle phase if operator anticommutes with Z on qubit.
+
+        Z O Z = O if O ∈ {I, Z} on this qubit, and = -O if O ∈ {X, Y} on this qubit.
+        Structure is unchanged for single-qubit rotations in this representation.
+        """
+        if qubit >= self.n_qubits:
+            raise ValueError(f"Qubit {qubit} out of range for {self.n_qubits} qubits")
+        # Anticommutes iff X acts on this qubit (including Y)
+        x_bit = (self.x_bits >> qubit) & 1
+        if x_bit:
+            self._phase *= -1
     
     def to_string(self) -> str:
         """Return symbolic string representation like 'X(q0)*Z(q1)'."""
@@ -139,7 +158,11 @@ class PauliOperator:
     
     def copy(self) -> 'PauliOperator':
         """Return a copy of this Pauli operator."""
-        return PauliOperator(self.n_qubits, self.x_bits, self.z_bits)
+        return PauliOperator(self.n_qubits, self.x_bits, self.z_bits, self._phase)
+
+    def phase_sign(self) -> int:
+        """Return the global phase sign (±1) accumulated during conjugations."""
+        return +1 if self._phase >= 0 else -1
 
 
 def conjugate_circuit(initial_pauli: PauliOperator, qiskit_circuit: QuantumCircuit) -> PauliOperator:
@@ -185,118 +208,3 @@ def conjugate_circuit(initial_pauli: PauliOperator, qiskit_circuit: QuantumCircu
     return pauli
 
 
-def map_logical_to_physical_string(
-    patch: Any,  # Patch object
-    logical_pauli: str, 
-    swap_xz: bool
-) -> str:
-    """Map logical operator to physical string using frame state.
-    
-    Args:
-        patch: Patch object containing logical_x and logical_z strings
-        logical_pauli: 'Z' or 'X' - the logical operator to map
-        swap_xz: True if H has been applied (odd number of times)
-        
-    Returns:
-        The appropriate physical string from patch.logical_x or patch.logical_z
-    """
-    if logical_pauli == "Z":
-        if swap_xz:
-            return patch.logical_x  # Z maps to X_L after H
-        else:
-            return patch.logical_z  # Z maps to Z_L normally
-    elif logical_pauli == "X":
-        if swap_xz:
-            return patch.logical_z  # X maps to Z_L after H
-        else:
-            return patch.logical_x  # X maps to X_L normally
-    else:
-        raise ValueError(f"logical_pauli must be 'Z' or 'X', got '{logical_pauli}'")
-
-
-def pauli_to_physical_mpp(
-    pauli_op: PauliOperator, 
-    layout: Any,  # Layout object
-    bracket_map: Dict[str, str]
-) -> List[Tuple[int, str]]:
-    """Convert logical Pauli operator to physical qubit positions for Stim MPP.
-    
-    Args:
-        pauli_op: The conjugated Pauli operator
-        layout: Layout object containing patch information
-        bracket_map: Mapping from patch names to basis ('Z' or 'X')
-        
-    Returns:
-        List of (global_qubit_idx, pauli_char) tuples for Stim MPP
-    """
-    physical_targets = []
-    
-    # Map logical qubits to patches
-    patch_names = sorted(bracket_map.keys())
-    if len(patch_names) != pauli_op.n_qubits:
-        raise ValueError(f"Mismatch: {len(patch_names)} patches vs {pauli_op.n_qubits} logical qubits")
-    
-    # Get offsets for each patch
-    offsets = layout.offsets()
-    
-    for logical_qubit in range(pauli_op.n_qubits):
-        patch_name = patch_names[logical_qubit]
-        pauli_char = pauli_op.get_qubit_pauli(logical_qubit)
-        
-        if pauli_char == "I":
-            continue  # Skip identity
-        
-        # Get the logical operator string for this patch
-        patch = layout.patches[patch_name]
-        if pauli_char == "X":
-            logical_string = patch.logical_x
-        elif pauli_char == "Z":
-            logical_string = patch.logical_z
-        elif pauli_char == "Y":
-            # For Y, we need both X and Z components
-            # This will be handled by resolving collisions below
-            logical_string_x = patch.logical_x
-            logical_string_z = patch.logical_z
-        else:
-            continue
-        
-        # Map logical string positions to global physical qubits
-        base_offset = offsets[patch_name]
-        
-        if pauli_char == "Y":
-            # Handle Y by combining X and Z components
-            for i, (x_char, z_char) in enumerate(zip(logical_string_x, logical_string_z)):
-                if x_char == "X" and z_char == "Z":
-                    physical_targets.append((base_offset + i, "Y"))
-                elif x_char == "X":
-                    physical_targets.append((base_offset + i, "X"))
-                elif z_char == "Z":
-                    physical_targets.append((base_offset + i, "Z"))
-        else:
-            # Handle X or Z
-            for i, char in enumerate(logical_string):
-                if char == pauli_char:
-                    physical_targets.append((base_offset + i, pauli_char))
-    
-    # Resolve collisions: combine operators on same physical qubit
-    qubit_ops = {}  # global_qubit_idx -> set of pauli_chars
-    
-    for global_idx, pauli_char in physical_targets:
-        if global_idx not in qubit_ops:
-            qubit_ops[global_idx] = set()
-        qubit_ops[global_idx].add(pauli_char)
-    
-    # Resolve collisions per qubit
-    final_targets = []
-    for global_idx, pauli_chars in qubit_ops.items():
-        if len(pauli_chars) == 1:
-            final_targets.append((global_idx, list(pauli_chars)[0]))
-        elif pauli_chars == {"X", "Z"}:
-            final_targets.append((global_idx, "Y"))
-        elif pauli_chars == {"X"}:
-            final_targets.append((global_idx, "X"))
-        elif pauli_chars == {"Z"}:
-            final_targets.append((global_idx, "Z"))
-        # If same Pauli appears twice, it cancels to identity (drop it)
-    
-    return final_targets

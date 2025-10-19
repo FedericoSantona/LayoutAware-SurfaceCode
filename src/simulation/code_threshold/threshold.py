@@ -96,7 +96,9 @@ def run_scenario(
                 p_x_error=p_x,
                 p_z_error=p_z,
                 family=("Z" if isinstance(scenario, XOnlyScenario) else
-                        "X" if isinstance(scenario, ZOnlyScenario) else None)
+                        "X" if isinstance(scenario, ZOnlyScenario) else None),
+                bracket_basis=scenario.track,
+                init_label=scenario.init_label,
             )
             result: SimulationResult = run_logical_error_rate(
                 model,

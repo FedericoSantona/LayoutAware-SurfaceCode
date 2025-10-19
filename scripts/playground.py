@@ -47,8 +47,10 @@ from surface_code.reporting import (
     print_physics_demo,
     print_pauli_frame_audit,
     print_debug_details,
+    _print_demo_preamble,
     generate_detailed_json,
     save_detailed_json,
+    print_final_state_distribution,
 )
 from qiskit import QuantumCircuit
 from qiskit.transpiler import Target
@@ -169,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="parity_check", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -228,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # Simulation options (used when logical encoding branch is enabled)
 
-    parser.add_argument("--distance", type=int, default=5, help="Code distance d for the heavy-hex code")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
     parser.add_argument("--px", type=float, default=0, help="Phenomenological X error probability")
     parser.add_argument("--pz", type=float, default=0, help="Phenomenological Z error probability")
@@ -249,11 +251,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
-    parser.add_argument(
-        "--joint-only",
-        action="store_true",
-        help="Emit only joint product demos at end of circuit (skip singles)",
-    )
     parser.add_argument(
         "--seam-json",
         type=Path,
@@ -351,7 +348,9 @@ def main() -> None:
         model = build_heavy_hex_model(args.distance)
 
         plot_heavy_hex_code(model, args.distance)
-        diagnostic_print(model, args)
+        if args.verbose:
+            diagnostic_print(model, args)
+    
 
         d = int(args.distance)
         stim_rounds = int(args.rounds) if args.rounds is not None else d
@@ -435,7 +434,6 @@ def main() -> None:
             logical_end=None,
             bracket_basis=bracket_basis,
             demo_basis=demo_basis,
-            demo_joint_only=bool(args.joint_only),
         )
 
         gb = GlobalStimBuilder(layout)
@@ -551,13 +549,14 @@ def main() -> None:
         demo_meta = metadata.get("demo", {})
 
         # DEBUG: print tail of circuit operations to ensure joint MPPs are last
-        try:
-            tail_ops = str(circuit).strip().splitlines()[-80:]
-            print("\n[DEBUG] Tail of Stim circuit (last ~80 ops):")
-            for ln in tail_ops:
-                print("  ", ln)
-        except Exception:
-            pass
+        if args.verbose:
+            try:
+                tail_ops = str(circuit).strip().splitlines()[-80:]
+                print("\n[DEBUG] Tail of Stim circuit (last ~80 ops):")
+                for ln in tail_ops:
+                    print("  ", ln)
+            except Exception:
+                pass
 
         # Compile sampler once for both singles and joint demos
         circ_sampler = circuit.compile_sampler(seed=int(args.seed))
@@ -641,6 +640,16 @@ def main() -> None:
                 new_entry["frame_flip"] = flips
                 corrected_joint_demo_bits[joint_key] = new_entry
             joint_demo_bits = corrected_joint_demo_bits
+        
+        # Extract final snapshot bits (if present)
+        snapshot_bits = {}
+        snapshot_meta = metadata.get("final_snapshot", {})
+        if snapshot_meta.get("enabled"):
+            order = snapshot_meta["order"]
+            indices = snapshot_meta["indices"]
+            for qubit_name, idx in zip(order, indices):
+                snapshot_bits[qubit_name] = np.asarray(m_samples[:, idx], dtype=np.uint8)
+        
         correlation_pairs = []
         for cnot_op in metadata.get("cnot_operations", []):
             control = cnot_op["control"]
@@ -679,19 +688,41 @@ def main() -> None:
 
         # Print structured report
         print_header(args, model, dem, metadata, merge_bits, cnot_metadata, stim_rounds, int(args.shots))
+        # ---- Clarifying preamble (requested vs emitted; operator semantics) ----
+        _print_demo_preamble(metadata, stim_cfg)
+    
         print_per_qubit_results(args, bracket_map, corrected_obs, obs_u8, preds, int(args.shots))
-        print_physics_demo(demo_meta, demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots), pauli_frame, joint_demo_bits)
+        print_physics_demo(
+            demo_meta,
+            demo_z_bits,
+            demo_x_bits,
+            correlation_pairs,
+            int(args.shots),
+            pauli_frame,
+            joint_demo_bits,
+            virtual_gates_per_qubit=gate_map,
+        )
+        print_final_state_distribution(
+            metadata.get("final_snapshot", {}),
+            snapshot_bits,
+            pauli_frame,
+            int(args.shots),
+            apply_frame_correction=True,
+        )
         print_pauli_frame_audit(gate_map, pauli_frame, cnot_metadata)
         
         if args.verbose:
             print_debug_details(args, basis_labels, obs_u8, preds, corrected_obs, expected_flips)
 
         # Generate and save detailed JSON report
+        # Add snapshot metadata to args for JSON generation
+        args.snapshot_meta = metadata.get("final_snapshot", {})
         detailed_json = generate_detailed_json(
             args, model, metadata, merge_bits, cnot_metadata,
             bracket_map, corrected_obs, obs_u8, preds,
             demo_z_bits, demo_x_bits, correlations,
-            gate_map, pauli_frame, int(args.shots), stim_rounds
+            gate_map, pauli_frame, int(args.shots), stim_rounds,
+            snapshot_bits
         )
         
         json_filepath = save_detailed_json(detailed_json, args)

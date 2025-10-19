@@ -146,7 +146,10 @@ def run_logical_error_rate(
     
     # Create builder and build circuit
     builder = GlobalStimBuilder(layout)
-    bracket_map = {"q0": "Z"}  # Default bracket basis
+    basis = (stim_config.bracket_basis or "Z").strip().upper()
+    if basis not in {"X", "Z"}:
+        raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
+    bracket_map = {"q0": basis}
     circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map)
     
     return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)

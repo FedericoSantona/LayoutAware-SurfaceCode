@@ -1,0 +1,73 @@
+{
+  "header": {
+    "cnot_operations": [],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 5,
+      "logical_x_weight": 5,
+      "logical_z_weight": 5,
+      "measurement_rounds": 5,
+      "physical_qubits": 25,
+      "x_stabilizers": 12,
+      "z_stabilizers": 4
+    },
+    "noise_config": {
+      "p_x": 0,
+      "p_z": 0,
+      "shots": 1000000
+    },
+    "scenario": "simple_1q_xzh",
+    "seed": 46,
+    "surgery_timeline": [],
+    "timestamp": "20251019_115126"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0,
+        "fz": 0
+      }
+    },
+    "virtual_gates": {
+      "q0": [
+        "H"
+      ]
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_x": {
+        "p0": 0.49995999999999996,
+        "p1": 0.50004
+      },
+      "q0_z": {
+        "p0": 0.5003960000000001,
+        "p1": 0.499604
+      }
+    },
+    "two_qubit_correlations": {}
+  }
+}

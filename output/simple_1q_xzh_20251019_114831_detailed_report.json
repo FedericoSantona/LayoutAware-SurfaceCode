@@ -1,0 +1,117 @@
+{
+  "header": {
+    "cnot_operations": [],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 5,
+      "logical_x_weight": 5,
+      "logical_z_weight": 5,
+      "measurement_rounds": 5,
+      "physical_qubits": 25,
+      "x_stabilizers": 12,
+      "z_stabilizers": 4
+    },
+    "noise_config": {
+      "p_x": 0,
+      "p_z": 0,
+      "shots": 1000000
+    },
+    "scenario": "simple_1q_xzh",
+    "seed": 46,
+    "surgery_timeline": [],
+    "timestamp": "20251019_114831"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0,
+        "fz": 0
+      },
+      "q1": {
+        "fx": 0,
+        "fz": 0
+      }
+    },
+    "virtual_gates": {
+      "q0": [],
+      "q1": [
+        "X"
+      ]
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.0,
+      "logical_error_rate_ci": {
+        "lower": 0.0,
+        "upper": 3.841588931621057e-06
+      },
+      "post_correction_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      },
+      "qubit": "q1",
+      "raw_distribution": {
+        "p0": 1.0,
+        "p1": 0.0
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_x": {
+        "p0": 0.499919,
+        "p1": 0.500081
+      },
+      "q0_z": {
+        "p0": 0.5005310000000001,
+        "p1": 0.499469
+      },
+      "q1_x": {
+        "p0": 0.499826,
+        "p1": 0.500174
+      },
+      "q1_z": {
+        "p0": 0.5005310000000001,
+        "p1": 0.499469
+      }
+    },
+    "two_qubit_correlations": {
+      "q0,q1": {
+        "fidelity_bound": 0.5002770000000001,
+        "xx_ci": {
+          "lower": -0.0014060018274617558,
+          "upper": 0.002513997570985249
+        },
+        "xx_correlator": 0.0005540000000000544,
+        "zz_ci": {
+          "lower": 0.9999923168221367,
+          "upper": 1.0
+        },
+        "zz_correlator": 1.0
+      }
+    }
+  }
+}

@@ -1,0 +1,208 @@
+{
+  "final_state_distribution": {
+    "basis": "Z",
+    "distribution": {
+      "000": 0.157405,
+      "001": 0.092183,
+      "010": 0.092493,
+      "011": 0.157533,
+      "100": 0.157766,
+      "101": 0.092258,
+      "110": 0.092286,
+      "111": 0.158076
+    },
+    "enabled": true,
+    "order": [
+      "q0",
+      "q1",
+      "q2"
+    ]
+  },
+  "header": {
+    "cnot_operations": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q1",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q2"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q1"
+      }
+    ],
+    "dem_summary": {
+      "detectors": "unknown",
+      "observables": "unknown"
+    },
+    "geometry": {
+      "distance": 3,
+      "logical_x_weight": 3,
+      "logical_z_weight": 3,
+      "measurement_rounds": 3,
+      "physical_qubits": 9,
+      "x_stabilizers": 4,
+      "z_stabilizers": 2
+    },
+    "noise_config": {
+      "p_x": 0.1,
+      "p_z": 0.1,
+      "shots": 1000000
+    },
+    "scenario": "teleportation",
+    "seed": 46,
+    "surgery_timeline": [
+      {
+        "a": "q1",
+        "b": "ancilla_0",
+        "id": 0,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q2",
+        "id": 1,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "XX"
+      },
+      {
+        "a": "q0",
+        "b": "ancilla_0",
+        "id": 2,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "ZZ"
+      },
+      {
+        "a": "ancilla_0",
+        "b": "q1",
+        "id": 3,
+        "mean_parity": 0.0,
+        "rounds": 3,
+        "type": "XX"
+      }
+    ],
+    "timestamp": "20251019_150111"
+  },
+  "pauli_frame_audit": {
+    "cnot_parity_bits": [
+      {
+        "ancilla": "ancilla_0",
+        "control": "q1",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q2"
+      },
+      {
+        "ancilla": "ancilla_0",
+        "control": "q0",
+        "m_xx_mean": 0.0,
+        "m_zz_mean": 0.0,
+        "target": "q1"
+      }
+    ],
+    "final_frame_state": {
+      "q0": {
+        "fx": 0.0,
+        "fz": 0
+      },
+      "q1": {
+        "fx": 0.0,
+        "fz": 0.0
+      },
+      "q2": {
+        "fx": 0,
+        "fz": 0.0
+      }
+    },
+    "virtual_gates": {
+      "q0": [
+        "H"
+      ],
+      "q1": [
+        "H"
+      ],
+      "q2": [
+        "Z",
+        "X"
+      ]
+    }
+  },
+  "per_qubit_results": [
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.150184,
+      "logical_error_rate_ci": {
+        "lower": 0.1494851292566233,
+        "upper": 0.15088555843934284
+      },
+      "post_correction_distribution": {
+        "p0": 0.849816,
+        "p1": 0.150184
+      },
+      "qubit": "q0",
+      "raw_distribution": {
+        "p0": 0.755559,
+        "p1": 0.244441
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.149622,
+      "logical_error_rate_ci": {
+        "lower": 0.1489242117026329,
+        "upper": 0.15032248031127501
+      },
+      "post_correction_distribution": {
+        "p0": 0.850378,
+        "p1": 0.149622
+      },
+      "qubit": "q1",
+      "raw_distribution": {
+        "p0": 0.755788,
+        "p1": 0.244212
+      }
+    },
+    {
+      "basis": "Z",
+      "logical_error_rate": 0.149657,
+      "logical_error_rate_ci": {
+        "lower": 0.14895914419110795,
+        "upper": 0.15035754755388903
+      },
+      "post_correction_distribution": {
+        "p0": 0.850343,
+        "p1": 0.149657
+      },
+      "qubit": "q2",
+      "raw_distribution": {
+        "p0": 0.756032,
+        "p1": 0.243968
+      }
+    }
+  ],
+  "physics_demo": {
+    "single_qubit_marginals": {
+      "q0_z": {
+        "p0": 0.499614,
+        "p1": 0.500386
+      },
+      "q1_z": {
+        "p0": 0.49961199999999995,
+        "p1": 0.500388
+      },
+      "q2_z": {
+        "p0": 0.49995,
+        "p1": 0.50005
+      }
+    },
+    "two_qubit_correlations": {}
+  }
+}

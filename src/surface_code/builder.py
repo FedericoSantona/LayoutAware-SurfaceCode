@@ -209,6 +209,7 @@ class GlobalStimBuilder:
                 if active_rough is not None:
                     a, b, rem = active_rough
                     joint_curr = self._measure_joint_checks(circuit, "rough", a, b)
+                    print(f"DEBUG: Rough merge joint_curr = {joint_curr}")
                     joint_det_idxs = add_temporal_detectors_with_index(
                         circuit,
                         prev.joint_prev.get(("rough", a, b), []),
@@ -217,6 +218,7 @@ class GlobalStimBuilder:
                     )
                     prev.joint_prev[("rough", a, b)] = joint_curr
                     if current_window is not None and current_window.get("type") == "rough":
+                        print(f"DEBUG: Adding to rough window: {joint_curr}")
                         current_window["joint_meas_indices"].append(joint_curr)
                         current_window["joint_detector_indices"].append(joint_det_idxs)
                     # countdown managed outside the half
@@ -239,6 +241,7 @@ class GlobalStimBuilder:
                 if active_smooth is not None:
                     a, b, rem = active_smooth
                     joint_curr = self._measure_joint_checks(circuit, "smooth", a, b)
+                    print(f"DEBUG: Smooth merge joint_curr = {joint_curr}")
                     joint_det_idxs = add_temporal_detectors_with_index(
                         circuit,
                         prev.joint_prev.get(("smooth", a, b), []),
@@ -247,6 +250,7 @@ class GlobalStimBuilder:
                     )
                     prev.joint_prev[("smooth", a, b)] = joint_curr
                     if current_window is not None and current_window.get("type") == "smooth":
+                        print(f"DEBUG: Adding to smooth window: {joint_curr}")
                         current_window["joint_meas_indices"].append(joint_curr)
                         current_window["joint_detector_indices"].append(joint_det_idxs)
 

@@ -64,7 +64,7 @@ from surface_code import (
 from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
-from surface_code.joint_parity import decode_joint_parity
+from surface_code.joint_parity import decode_joint_parity, extract_merge_byproduct
 from surface_code.logical_ops import (
     LogicalFrame,
     apply_sequence,
@@ -232,8 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--distance", type=int, default=3, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--px", type=float, default=1e-3, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=1e-3, help="Phenomenological Z error probability")
+    parser.add_argument("--px", type=float, default=1e-1, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=1e-1, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
     parser.add_argument(
         "--bracket-basis",
@@ -451,9 +451,14 @@ def main() -> None:
         if preds.ndim == 1:
             preds = preds.reshape(-1, 1)
 
+        # Sample raw measurements for merge byproduct extraction
+        circ_sampler = circuit.compile_sampler(seed=int(args.seed))
+        m_samples = circ_sampler.sample(shots=int(args.shots))
+
         # Per-window parity bits via temporal MWPM (1D chain XOR)
         merge_bits = {}
         for window in metadata.get("merge_windows", []):
+            # Use decode_joint_parity to get merge byproducts from temporal detectors
             bit = decode_joint_parity(det_samp_u8, window)
             key = (window.get("parity_type"), window.get("a"), window.get("b"), window.get("id"))
             merge_bits[key] = bit
@@ -559,8 +564,7 @@ def main() -> None:
                 pass
 
         # Compile sampler once for both singles and joint demos
-        circ_sampler = circuit.compile_sampler(seed=int(args.seed))
-        m_samples = circ_sampler.sample(shots=int(args.shots))
+        # (circ_sampler and m_samples already created above)
 
         # Singles (if present)
         if demo_meta:

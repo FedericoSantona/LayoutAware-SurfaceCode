@@ -64,3 +64,46 @@ def decode_joint_parity(
     return window_parity.astype(np.uint8)
 
 
+def extract_merge_byproduct(
+    measurement_samples: np.ndarray,
+    window_meta: Dict[str, object],
+) -> np.ndarray:
+    """Extract merge byproduct bits from raw measurement samples.
+    
+    This function extracts the actual merge byproduct (m_ZZ or m_XX) from the raw
+    measurement results, not from temporal detectors. For merge windows, we need
+    the raw measurement results from the joint MPPs, not the temporal differences.
+    
+    Args:
+        measurement_samples: Raw measurement samples from the circuit
+        window_meta: Window metadata containing joint_meas_indices
+        
+    Returns:
+        Array of merge byproduct bits (one per shot)
+    """
+    shots = measurement_samples.shape[0]
+    meas_sets: List[List[int]] = window_meta.get("joint_meas_indices") or []
+    
+    if not meas_sets:
+        return np.zeros((shots,), dtype=np.uint8)
+
+    # Each entry of meas_sets corresponds to one round (list of measurement indices
+    # for each joint check measured that round). We need to XOR across all measurements
+    # in the window to get the merge byproduct.
+    
+    # Flatten all measurement indices across all rounds
+    all_meas_indices: List[int] = []
+    for round_meas in meas_sets:
+        all_meas_indices.extend(round_meas)
+    
+    if not all_meas_indices:
+        return np.zeros((shots,), dtype=np.uint8)
+    
+    # Extract the measurement bits for all indices
+    meas_bits = measurement_samples[:, all_meas_indices]
+    
+    # XOR across all measurements to get the merge byproduct
+    merge_byproduct = np.bitwise_xor.reduce(meas_bits, axis=1)
+    return merge_byproduct.astype(np.uint8)
+
+

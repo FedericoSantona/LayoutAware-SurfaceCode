@@ -642,6 +642,7 @@ def print_final_state_distribution(
     order = snapshot_meta["order"]
     k = len(order)
     
+    print(f"Basis: {basis}")
     print(f"Order (MSB→LSB): {' '.join(order)}")
     print(f"Frame correction: {'ON' if apply_frame_correction else 'OFF'} (using f{'x' if basis=='Z' else 'z'} per qubit)")
     print(f"Measured operators (final-frame): {snapshot_meta.get('logical_ops', [])}")

@@ -29,3 +29,5 @@ class PhenomenologicalStimConfig:
     # NOT used by detectors; it is for physics-based reporting in the end basis.
     # Can be a single basis string ("X" or "Z") or a list of bases ["Z", "X"] for dual-basis measurements.
     demo_basis: Optional[Union[str, List[str]]] = None
+    # Back-compat shim: some callers pass this flag; it is ignored by builders.
+    demo_joint_only: Optional[bool] = False

@@ -228,8 +228,14 @@ def _augmented_durations(qc: QuantumCircuit, target: Target) -> InstructionDurat
     values (3 * CX for SWAP; 0 for control-flow) so the scheduler can proceed.
     """
 
-    durations = InstructionDurations()
-    durations.update(target.durations())
+    # Provide a dt fallback so conversions 's' <-> 'dt' succeed even on simple Targets
+    target_dt = getattr(target, "dt", None)
+    durations = InstructionDurations(dt=(target_dt if target_dt is not None else 1.0))
+    try:
+        durations.update(target.durations())
+    except Exception:
+        # Some targets may not expose durations(); leave with empty set
+        pass
 
     units = durations.units_used()
     if "dt" in units and len(units) == 1:
@@ -322,6 +328,7 @@ def score(qc: QuantumCircuit, target: Target) -> Dict[str, Any]:
         n_qubits_active = n_qubits_reserved
 
     metrics: Dict[str, Any] = {
+        "n_qubits": qc.num_qubits,
         "n_qubits_reserved": n_qubits_reserved,
         "n_qubits_active": n_qubits_active,
         "depth": int(qc.depth()),

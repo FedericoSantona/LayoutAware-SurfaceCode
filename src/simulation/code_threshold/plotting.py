@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict
 
 import matplotlib.pyplot as plt
 import numpy as np

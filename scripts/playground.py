@@ -420,8 +420,9 @@ def main() -> None:
             warmup_rounds=1, ancilla_strategy=args.cnot_ancilla_strategy
         )
 
-        print("ops")
-        print(ops)
+        if args.verbose:
+            print("ops")
+            print(ops)
 
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
@@ -724,49 +725,18 @@ def main() -> None:
         # Generate and save detailed JSON report
         # Add snapshot metadata to args for JSON generation
         args.snapshot_meta = metadata.get("final_snapshot", {})
-        detailed_json = generate_detailed_json(
-            args, model, metadata, merge_bits, cnot_metadata,
-            bracket_map, corrected_obs, obs_u8, preds,
-            demo_z_bits, demo_x_bits, correlations,
-            gate_map, pauli_frame, int(args.shots), stim_rounds,
-            snapshot_bits
-        )
-        
-        json_filepath = save_detailed_json(detailed_json, args)
-        print(f"\nDetailed report saved to: {json_filepath}")
 
-        # Keep existing JSON dump for backward compatibility
-        json_payloads.append(
-            {
-                "branch": "surgery",
-                "benchmark": args.benchmark,
-                "sequence": gate_seq,
-                "num_qubits": int(qc.num_qubits),
-                "distance": int(d),
-                "rounds": int(stim_rounds),
-                "p_x": float(args.px),
-                "p_z": float(args.pz),
-                "shots": int(args.shots),
-                "detectors": int(dem.num_detectors),
-                "observable_basis": list(basis_labels),
-                "per_qubit_raw_mean": [float(obs_u8[:, i].mean()) for i in range(obs_u8.shape[1])],
-                "per_qubit_decoder_mean": [float(preds[:, i].mean()) for i in range(preds.shape[1])],
-                "per_qubit_corrected_mean": [float(corrected_obs[:, i].mean()) for i in range(corrected_obs.shape[1])],
-                "cnot_operations": cnot_metadata,
-                "merge_windows": [
-                    {
-                        "id": int(w.get("id")),
-                        "type": w.get("type"),
-                        "parity_type": w.get("parity_type"),
-                        "a": w.get("a"),
-                        "b": w.get("b"),
-                        "rounds": int(w.get("rounds", 0)),
-                        "mean": float(merge_bits[(w.get("parity_type"), w.get("a"), w.get("b"), w.get("id"))].mean()) if (w.get("parity_type"), w.get("a"), w.get("b"), w.get("id")) in merge_bits else 0.0,
-                    }
-                    for w in metadata.get("merge_windows", [])
-                ],
-            }
-        )
+        if args.dump_json:
+            detailed_json = generate_detailed_json(
+                args, model, metadata, merge_bits, cnot_metadata,
+                bracket_map, corrected_obs, obs_u8, preds,
+                demo_z_bits, demo_x_bits, correlations,
+                gate_map, pauli_frame, int(args.shots), stim_rounds,
+                snapshot_bits
+            )
+            json_filepath = save_detailed_json(detailed_json, args)
+            print(f"\nDetailed report saved to: {json_filepath}")
+
 
     if run_transpile:
         benchmark = instantiate_benchmark(args.benchmark)
@@ -777,7 +747,7 @@ def main() -> None:
         transpiler = HeavyHexTranspiler(config)
 
         logical_circuit = benchmark.get_circuit()
-        best, best_metrics, leaderboard = transpiler.run_baseline(logical_circuit)
+        _best, best_metrics, leaderboard = transpiler.run_baseline(logical_circuit)
 
         leaderboard_payload = format_leaderboard(leaderboard)
         print(f"Benchmark: {args.benchmark}")

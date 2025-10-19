@@ -8,7 +8,6 @@ after virtual gates are applied in the Pauli frame.
 from __future__ import annotations
 
 from typing import List, Tuple, Dict, Any
-import stim
 from qiskit.circuit import QuantumCircuit
 
 

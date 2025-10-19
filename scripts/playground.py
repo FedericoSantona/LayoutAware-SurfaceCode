@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="simple_1q_xzh", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -477,7 +477,7 @@ def main() -> None:
             m_xx = merge_bits.get(smooth_key, np.zeros(int(args.shots), dtype=np.uint8))
             
             # Update Pauli frame: fz[target] ^= m_ZZ, fx[control] ^= m_XX
-            pfm.apply_cnot_update(control, target, m_zz, m_xx)
+            pfm.update_cnot(control, target, m_zz, m_xx)
             
             # Store CNOT metadata for reporting
             cnot_metadata.append({

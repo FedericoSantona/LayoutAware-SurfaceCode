@@ -51,7 +51,11 @@ def decode_joint_parity(
     for cols in per_check_cols:
         if not cols:
             continue
-        sub = detector_samples[:, cols]
+        # Filter out None values from detector indices
+        valid_cols = [col for col in cols if col is not None]
+        if not valid_cols:
+            continue
+        sub = detector_samples[:, valid_cols]
         # XOR across columns (time) per shot
         chain_parity = np.bitwise_xor.reduce(sub, axis=1)
         chain_bits.append(chain_parity)

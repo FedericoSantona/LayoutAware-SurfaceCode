@@ -106,6 +106,10 @@ class GlobalStimBuilder:
                     break
         if not mask_idxs:
             return set()
+        for idx in mask_idxs:
+            if 0 <= idx < len(arr):
+                arr[idx] = None
+        prev_dict[patch_name] = arr
         return mask_idxs
 
     def _measure_joint_checks(
@@ -228,8 +232,6 @@ class GlobalStimBuilder:
                     conflict_counts[(op.a, "Z")] += 1
                     conflict_counts[(op.b, "Z")] += 1
 
-        episode_masked: Dict[Tuple[str, str], Set[int]] = defaultdict(set)
-        resume_requests: Set[Tuple[str, str]] = set()
 
         # Establish initial references: Z then X for active patches
         prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
@@ -268,6 +270,7 @@ class GlobalStimBuilder:
                 ],
                 "joint_meas_indices": [],
                 "joint_detector_indices": [],
+                "first_joint_round": None,
             }
             window_id += 1
 
@@ -346,16 +349,6 @@ class GlobalStimBuilder:
                             if first_idx is not None:
                                 start_indices[name] = first_idx
                                 pending_start.pop(name, None)
-                        key_z = (name, "Z")
-                        if key_z in resume_requests and conflict_counts.get(key_z, 0) == 0:
-                            anchors = episode_masked.get(key_z, set())
-                            indices = meas_z_curr.get(name, [])
-                            for stab_idx in anchors:
-                                if stab_idx < len(indices) and indices[stab_idx] is not None:
-                                    append_detector([rec_from_abs(circuit, indices[stab_idx])])
-                            if anchors:
-                                episode_masked[key_z].clear()
-                            resume_requests.discard(key_z)
                 else:
                     for name in names:
                         if name not in z_curr:
@@ -364,16 +357,18 @@ class GlobalStimBuilder:
                 if measure_z and active_rough is not None:
                     a, b, rem = active_rough
                     joint_curr = self._measure_joint_checks(circuit, "rough", a, b)
-                    print(f"DEBUG: Rough merge joint_curr = {joint_curr}")
+                    joint_key = ("rough", a, b)
+                    prev_joint = prev.joint_prev.get(joint_key, [])
+                    if current_window is not None and current_window.get("type") == "rough" and current_window.get("first_joint_round") is None and joint_curr:
+                        current_window["first_joint_round"] = list(joint_curr)
                     joint_det_idxs = add_temporal_detectors_with_index(
                         circuit,
-                        prev.joint_prev.get(("rough", a, b), []),
+                        prev_joint,
                         joint_curr,
                         append_detector,
                     )
-                    prev.joint_prev[("rough", a, b)] = joint_curr
+                    prev.joint_prev[joint_key] = joint_curr
                     if current_window is not None and current_window.get("type") == "rough":
-                        print(f"DEBUG: Adding to rough window: {joint_curr}")
                         current_window["joint_meas_indices"].append(joint_curr)
                         current_window["joint_detector_indices"].append(joint_det_idxs)
                     # countdown managed outside the half
@@ -415,16 +410,6 @@ class GlobalStimBuilder:
                             if first_idx is not None:
                                 start_indices[name] = first_idx
                                 pending_start.pop(name, None)
-                        key_x = (name, "X")
-                        if key_x in resume_requests and conflict_counts.get(key_x, 0) == 0:
-                            anchors = episode_masked.get(key_x, set())
-                            indices = meas_x_curr.get(name, [])
-                            for stab_idx in anchors:
-                                if stab_idx < len(indices) and indices[stab_idx] is not None:
-                                    append_detector([rec_from_abs(circuit, indices[stab_idx])])
-                            if anchors:
-                                episode_masked[key_x].clear()
-                            resume_requests.discard(key_x)
                 else:
                     for name in names:
                         if name not in x_curr:
@@ -433,16 +418,18 @@ class GlobalStimBuilder:
                 if measure_x and active_smooth is not None:
                     a, b, rem = active_smooth
                     joint_curr = self._measure_joint_checks(circuit, "smooth", a, b)
-                    print(f"DEBUG: Smooth merge joint_curr = {joint_curr}")
+                    joint_key = ("smooth", a, b)
+                    prev_joint = prev.joint_prev.get(joint_key, [])
+                    if current_window is not None and current_window.get("type") == "smooth" and current_window.get("first_joint_round") is None and joint_curr:
+                        current_window["first_joint_round"] = list(joint_curr)
                     joint_det_idxs = add_temporal_detectors_with_index(
                         circuit,
-                        prev.joint_prev.get(("smooth", a, b), []),
+                        prev_joint,
                         joint_curr,
                         append_detector,
                     )
-                    prev.joint_prev[("smooth", a, b)] = joint_curr
+                    prev.joint_prev[joint_key] = joint_curr
                     if current_window is not None and current_window.get("type") == "smooth":
-                        print(f"DEBUG: Adding to smooth window: {joint_curr}")
                         current_window["joint_meas_indices"].append(joint_curr)
                         current_window["joint_detector_indices"].append(joint_det_idxs)
 
@@ -454,7 +441,6 @@ class GlobalStimBuilder:
                     rem -= 1
                     if rem <= 0:
                         active_rough = None
-                        _end_window()
                     else:
                         active_rough = (a, b, rem)
                 if active_smooth is not None:
@@ -462,7 +448,6 @@ class GlobalStimBuilder:
                     rem -= 1
                     if rem <= 0:
                         active_smooth = None
-                        _end_window()
                     else:
                         active_smooth = (a, b, rem)
 
@@ -476,12 +461,8 @@ class GlobalStimBuilder:
                     seam_pairs = layout.seams.get(("rough", op.a, op.b), [])
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
-                    masked_a = self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
-                    masked_b = self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
-                    if masked_a:
-                        episode_masked[(op.a, "X")].update(masked_a)
-                    if masked_b:
-                        episode_masked[(op.b, "X")].update(masked_b)
+                    self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
+                    self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
                     active_rough = (op.a, op.b, int(op.rounds))
                 else:
                     if active_smooth is not None:
@@ -489,12 +470,8 @@ class GlobalStimBuilder:
                     seam_pairs = layout.seams.get(("smooth", op.a, op.b), [])
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
-                    masked_a = self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
-                    masked_b = self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
-                    if masked_a:
-                        episode_masked[(op.a, "Z")].update(masked_a)
-                    if masked_b:
-                        episode_masked[(op.b, "Z")].update(masked_b)
+                    self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
+                    self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
                     active_smooth = (op.a, op.b, int(op.rounds))
                 # Clear any lingering joint history for this seam
                 prev.joint_prev[(k, op.a, op.b)] = []
@@ -504,6 +481,19 @@ class GlobalStimBuilder:
                 k = op.type.strip().lower()
                 if k not in {"rough", "smooth"}:
                     raise ValueError("Split.type must be 'rough' or 'smooth'")
+                if current_window is not None:
+                    round_meas: List[List[int]] = current_window.get("joint_meas_indices", [])
+                    if len(round_meas) > 1:
+                        first_round = round_meas[0]
+                        last_round = round_meas[-1]
+                        for idx_last, idx_first in zip(last_round, first_round):
+                            if idx_last is not None and idx_first is not None:
+                                append_detector(
+                                    [
+                                        rec_from_abs(circuit, idx_last),
+                                        rec_from_abs(circuit, idx_first),
+                                    ]
+                                )
                 if k == "rough":
                     active_rough = None
                 else:
@@ -516,8 +506,7 @@ class GlobalStimBuilder:
                     key = (patch_name, basis)
                     if conflict_counts.get(key, 0) > 0:
                         conflict_counts[key] -= 1
-                        if conflict_counts[key] == 0 and episode_masked.get(key):
-                            resume_requests.add(key)
+                prev.joint_prev[(k, op.a, op.b)] = []
 
             elif isinstance(op, ParityReadout):
                 # Track CNOT operations by grouping ZZ and XX parity readouts

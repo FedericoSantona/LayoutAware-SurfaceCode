@@ -10,7 +10,7 @@ import numpy as np
 from qiskit_qec.operators.pauli_list import PauliList
 
 if TYPE_CHECKING:  # pragma: no cover - import guard for type checking only
-    from simulation.runner import SimulationResult
+    from simulation.code_threshold.threshold import SimulationResult
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 

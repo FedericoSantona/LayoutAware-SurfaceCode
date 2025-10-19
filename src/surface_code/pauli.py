@@ -278,3 +278,68 @@ def sequence_from_qc(qc: QuantumCircuit, allowed: Optional[Iterable[str]] = None
     return seqs
 
 
+@dataclass
+class BatchPauliFrame:
+    """Batch Pauli-frame tracker built from decoder predictions."""
+
+    bases: Tuple[str, ...]
+    flips: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.flips.ndim != 2:
+            raise ValueError("BatchPauliFrame expects a 2D array of flips")
+        normalized = tuple(self._normalize_basis(b) for b in self.bases)
+        if len(normalized) != self.flips.shape[1]:
+            raise ValueError("Number of bases must match number of columns in flips array")
+        self.bases = normalized
+
+    @staticmethod
+    def _normalize_basis(basis: str) -> str:
+        b = basis.upper()
+        if b not in {"X", "Z"}:
+            raise ValueError("Tracked bases must be 'X' or 'Z'")
+        return b
+
+    def _resolve_index(self, basis: str, column: Optional[int]) -> int:
+        if column is not None:
+            if column < 0 or column >= len(self.bases):
+                raise IndexError(f"Column {column} is out of range for BatchPauliFrame")
+            return column
+        normalized = self._normalize_basis(basis)
+        matches = [idx for idx, label in enumerate(self.bases) if label == normalized]
+        if not matches:
+            raise ValueError(f"No tracked basis '{normalized}' in BatchPauliFrame")
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple tracked observables share basis '{normalized}'. "
+                "Specify 'column' explicitly."
+            )
+        return matches[0]
+
+    def correction_bits(self, basis: str, column: Optional[int] = None) -> np.ndarray:
+        """Return the decoder flip bits for a basis (optionally selecting a column)."""
+        idx = self._resolve_index(basis, column)
+        return self.flips[:, idx]
+
+    def column_for_basis(self, basis: str, column: Optional[int] = None) -> int:
+        """Resolve and return the column index associated with a logical basis."""
+        return self._resolve_index(basis, column)
+
+    def apply(self, samples: np.ndarray, basis: str, column: Optional[int] = None) -> np.ndarray:
+        """Apply the stored Pauli-frame flips to a set of logical samples."""
+        idx = self._resolve_index(basis, column)
+        flips = self.flips[:, idx]
+        column_samples = samples[:, idx]
+        return np.bitwise_xor(column_samples, flips)
+
+    def pauli_frames(self) -> Tuple[Dict[str, int], ...]:
+        """Return a tuple of frame dicts per shot: {basis: bit}."""
+        frames: List[Dict[str, int]] = []
+        for row in self.flips:
+            d: Dict[str, int] = {}
+            for idx, basis in enumerate(self.bases):
+                d[basis] = int(row[idx]) & 1
+            frames.append(d)
+        return tuple(frames)
+
+

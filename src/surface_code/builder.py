@@ -11,6 +11,7 @@ The builder emits a deterministic DEM by:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 import stim
@@ -50,6 +51,7 @@ class GlobalStimBuilder:
         patch_names: Iterable[str],
         basis: str,
         skip_indices: Optional[Dict[str, Set[int]]] = None,
+        prev_map: Optional[Dict[str, List[Optional[int]]]] = None,
     ) -> Dict[str, List[Optional[int]]]:
         offs = self.layout.offsets()
         measured: Dict[str, List[Optional[int]]] = {}
@@ -58,10 +60,14 @@ class GlobalStimBuilder:
             base = offs[name]
             stabs = patch.z_stabs if basis == "Z" else patch.x_stabs
             skip = set() if skip_indices is None else skip_indices.get(name, set())
+            prev_list = []
+            if prev_map is not None:
+                prev_list = list(prev_map.get(name, []))
             indices: List[Optional[int]] = []
             for idx, s in enumerate(stabs):
                 if skip and any(i in skip for i, c in enumerate(s) if c == basis):
-                    indices.append(None)
+                    prev_idx = prev_list[idx] if idx < len(prev_list) else None
+                    indices.append(prev_idx)
                     continue
                 # Build a global MPP by mapping local characters to global positions
                 positions: List[int] = []
@@ -72,6 +78,35 @@ class GlobalStimBuilder:
                 indices.append(idx)
             measured[name] = indices
         return measured
+
+    def _mask_prev_stabilizers(
+        self,
+        prev_dict: Dict[str, List[Optional[int]]],
+        patch_name: str,
+        basis: str,
+        local_indices: Iterable[int],
+    ) -> Set[int]:
+        if patch_name not in prev_dict:
+            return set()
+        arr = list(prev_dict.get(patch_name, []))
+        if not arr:
+            return set()
+        patch = self.layout.patches.get(patch_name)
+        if patch is None:
+            return set()
+        stabs = patch.x_stabs if basis == "X" else patch.z_stabs
+        mask_idxs: Set[int] = set()
+        local_set = set(local_indices)
+        for stab_idx, stab in enumerate(stabs):
+            if stab_idx >= len(arr):
+                break
+            for li in local_set:
+                if li < len(stab) and stab[li] == basis:
+                    mask_idxs.add(stab_idx)
+                    break
+        if not mask_idxs:
+            return set()
+        return mask_idxs
 
     def _measure_joint_checks(
         self,
@@ -126,7 +161,31 @@ class GlobalStimBuilder:
         def select_patches(spec: Optional[List[str]]) -> List[str]:
             return all_patches if spec is None else list(spec)
 
-        # Bracketing: start logicals per patch
+        # Determine merge participation per patch for bracket adjustments
+        rough_merge_patches: Set[str] = set()
+        smooth_merge_patches: Set[str] = set()
+        for op in ops:
+            if isinstance(op, Merge):
+                k = op.type.strip().lower()
+                if k == "rough":
+                    rough_merge_patches.update({op.a, op.b})
+                elif k == "smooth":
+                    smooth_merge_patches.update({op.a, op.b})
+
+        # Effective bracket basis per patch (ensure commutes with merge windows)
+        effective_basis_map: Dict[str, str] = {}
+        for name, req_basis in bracket_map.items():
+            basis = req_basis.upper()
+            if basis not in {"Z", "X"}:
+                raise ValueError("bracket_map values must be 'Z' or 'X'")
+            effective = basis
+            if basis == "Z" and name in smooth_merge_patches:
+                effective = "X"
+            elif basis == "X" and name in rough_merge_patches:
+                effective = "Z"
+            effective_basis_map[name] = effective
+
+        # Bracketing: start logicals per patch (skip if they would anti-commute with merges)
         start_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
 
@@ -136,14 +195,41 @@ class GlobalStimBuilder:
             if name not in layout.patches:
                 continue  # Skip if patch doesn't exist in layout
             basis = bracket_map[name].upper()
-            if basis not in {"Z", "X"}:
-                raise ValueError("bracket_map values must be 'Z' or 'X'")
+            effective = effective_basis_map.get(name, basis)
+            # Skip immediate start if upcoming merges would anti-commute; we'll capture later.
+            if (effective == "Z" and name in smooth_merge_patches) or (
+                effective == "X" and name in rough_merge_patches
+            ):
+                continue
             patch = layout.patches[name]
-            s = patch.logical_z if basis == "Z" else patch.logical_x
+            s = patch.logical_z if effective == "Z" else patch.logical_x
             # Convert local string to global positions with same basis
             offs = layout.offsets()[name]
-            positions = [offs + i for i, c in enumerate(s) if c == basis]
-            start_indices[name] = mpp_from_positions(circuit, positions, basis)
+            positions = [offs + i for i, c in enumerate(s) if c == effective]
+            start_indices[name] = mpp_from_positions(circuit, positions, effective)
+
+        # Pending starts to be captured later once compatible measurements occur
+        pending_start: Dict[str, str] = {
+            name: effective_basis_map[name]
+            for name in effective_basis_map.keys()
+            if start_indices.get(name) is None
+        }
+
+
+        # Track remaining merge windows that conflict with seam stabilizer bases
+        conflict_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+        for op in ops:
+            if isinstance(op, Merge):
+                k = op.type.strip().lower()
+                if k == "rough":
+                    conflict_counts[(op.a, "X")] += 1
+                    conflict_counts[(op.b, "X")] += 1
+                elif k == "smooth":
+                    conflict_counts[(op.a, "Z")] += 1
+                    conflict_counts[(op.b, "Z")] += 1
+
+        episode_masked: Dict[Tuple[str, str], Set[int]] = defaultdict(set)
+        resume_requests: Set[Tuple[str, str]] = set()
 
         # Establish initial references: Z then X for active patches
         prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
@@ -236,6 +322,7 @@ class GlobalStimBuilder:
                         names,
                         "Z",
                         skip_indices=skip_z_indices,
+                        prev_map=prev.z_prev,
                     )
                     for name in names:
                         add_temporal_detectors_with_index(
@@ -245,6 +332,30 @@ class GlobalStimBuilder:
                             append_detector,
                         )
                         z_curr[name] = list(meas_z_curr.get(name, []))
+                        if (
+                            name in pending_start
+                            and pending_start[name] == "Z"
+                            and not (
+                                (active_smooth is not None and name in {active_smooth[0], active_smooth[1]})
+                                or (active_rough is not None and name in {active_rough[0], active_rough[1]})
+                            )
+                            and conflict_counts.get((name, "Z"), 0) == 0
+                        ):
+                            indices = meas_z_curr.get(name, [])
+                            first_idx = next((idx for idx in indices if idx is not None), None)
+                            if first_idx is not None:
+                                start_indices[name] = first_idx
+                                pending_start.pop(name, None)
+                        key_z = (name, "Z")
+                        if key_z in resume_requests and conflict_counts.get(key_z, 0) == 0:
+                            anchors = episode_masked.get(key_z, set())
+                            indices = meas_z_curr.get(name, [])
+                            for stab_idx in anchors:
+                                if stab_idx < len(indices) and indices[stab_idx] is not None:
+                                    append_detector([rec_from_abs(circuit, indices[stab_idx])])
+                            if anchors:
+                                episode_masked[key_z].clear()
+                            resume_requests.discard(key_z)
                 else:
                     for name in names:
                         if name not in z_curr:
@@ -280,6 +391,7 @@ class GlobalStimBuilder:
                         names,
                         "X",
                         skip_indices=skip_x_indices,
+                        prev_map=prev.x_prev,
                     )
                     for name in names:
                         add_temporal_detectors_with_index(
@@ -289,6 +401,30 @@ class GlobalStimBuilder:
                             append_detector,
                         )
                         x_curr[name] = list(meas_x_curr.get(name, []))
+                        if (
+                            name in pending_start
+                            and pending_start[name] == "X"
+                            and not (
+                                (active_smooth is not None and name in {active_smooth[0], active_smooth[1]})
+                                or (active_rough is not None and name in {active_rough[0], active_rough[1]})
+                            )
+                            and conflict_counts.get((name, "X"), 0) == 0
+                        ):
+                            indices = meas_x_curr.get(name, [])
+                            first_idx = next((idx for idx in indices if idx is not None), None)
+                            if first_idx is not None:
+                                start_indices[name] = first_idx
+                                pending_start.pop(name, None)
+                        key_x = (name, "X")
+                        if key_x in resume_requests and conflict_counts.get(key_x, 0) == 0:
+                            anchors = episode_masked.get(key_x, set())
+                            indices = meas_x_curr.get(name, [])
+                            for stab_idx in anchors:
+                                if stab_idx < len(indices) and indices[stab_idx] is not None:
+                                    append_detector([rec_from_abs(circuit, indices[stab_idx])])
+                            if anchors:
+                                episode_masked[key_x].clear()
+                            resume_requests.discard(key_x)
                 else:
                     for name in names:
                         if name not in x_curr:
@@ -337,11 +473,31 @@ class GlobalStimBuilder:
                 if k == "rough":
                     if active_rough is not None:
                         raise RuntimeError("A rough merge is already active")
+                    seam_pairs = layout.seams.get(("rough", op.a, op.b), [])
+                    indices_a = {ia for ia, _ in seam_pairs}
+                    indices_b = {ib for _, ib in seam_pairs}
+                    masked_a = self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
+                    masked_b = self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
+                    if masked_a:
+                        episode_masked[(op.a, "X")].update(masked_a)
+                    if masked_b:
+                        episode_masked[(op.b, "X")].update(masked_b)
                     active_rough = (op.a, op.b, int(op.rounds))
                 else:
                     if active_smooth is not None:
                         raise RuntimeError("A smooth merge is already active")
+                    seam_pairs = layout.seams.get(("smooth", op.a, op.b), [])
+                    indices_a = {ia for ia, _ in seam_pairs}
+                    indices_b = {ib for _, ib in seam_pairs}
+                    masked_a = self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
+                    masked_b = self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
+                    if masked_a:
+                        episode_masked[(op.a, "Z")].update(masked_a)
+                    if masked_b:
+                        episode_masked[(op.b, "Z")].update(masked_b)
                     active_smooth = (op.a, op.b, int(op.rounds))
+                # Clear any lingering joint history for this seam
+                prev.joint_prev[(k, op.a, op.b)] = []
                 _begin_window(k, op.a, op.b, int(op.rounds))
 
             elif isinstance(op, Split):
@@ -353,6 +509,15 @@ class GlobalStimBuilder:
                 else:
                     active_smooth = None
                 _end_window()
+
+                # Decrement remaining conflicting merges for involved patches
+                for patch_name in (op.a, op.b):
+                    basis = "X" if k == "rough" else "Z"
+                    key = (patch_name, basis)
+                    if conflict_counts.get(key, 0) > 0:
+                        conflict_counts[key] -= 1
+                        if conflict_counts[key] == 0 and episode_masked.get(key):
+                            resume_requests.add(key)
 
             elif isinstance(op, ParityReadout):
                 # Track CNOT operations by grouping ZZ and XX parity readouts
@@ -377,6 +542,7 @@ class GlobalStimBuilder:
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
 
+        # Emit boundary anchors after all merges complete
         # Bracketing: end logicals per patch and observable includes
         circuit.append_operation("TICK")
         observable_pairs: List[Tuple[int, int]] = []
@@ -386,12 +552,13 @@ class GlobalStimBuilder:
         for name in bracket_map.keys():
             if name not in layout.patches:
                 continue  # Skip if patch doesn't exist in layout
-            basis = bracket_map[name].upper()
+            requested_basis = bracket_map[name].upper()
+            effective_basis = effective_basis_map.get(name, requested_basis)
             patch = layout.patches[name]
-            s = patch.logical_z if basis == "Z" else patch.logical_x
+            s = patch.logical_z if effective_basis == "Z" else patch.logical_x
             offs = layout.offsets()[name]
-            positions = [offs + i for i, c in enumerate(s) if c == basis]
-            end_idx = mpp_from_positions(circuit, positions, basis)
+            positions = [offs + i for i, c in enumerate(s) if c == effective_basis]
+            end_idx = mpp_from_positions(circuit, positions, effective_basis)
             end_indices[name] = end_idx
             start_idx = start_indices[name]
             targets: List[GateTarget] = []
@@ -402,7 +569,7 @@ class GlobalStimBuilder:
             if targets:
                 circuit.append_operation("OBSERVABLE_INCLUDE", targets, observable_index)
                 observable_pairs.append((start_idx, end_idx))
-                basis_labels.append(basis)
+                basis_labels.append(effective_basis)
                 observable_index += 1
 
         # Optional end-only demo readout with conjugated operators

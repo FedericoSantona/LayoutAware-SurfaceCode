@@ -121,6 +121,8 @@ def compile_circuit_to_surgery(
     ancilla_created = False
     ancilla_name = "ancilla_0"
     
+    seam_episode_end: Dict[Tuple[str, str, str], List[int]] = {}
+
     # Parse gates in order; map CNOTs to ancilla-mediated surgery
     for ci in qc.data:
         name = ci.operation.name.lower()
@@ -152,9 +154,7 @@ def compile_circuit_to_surgery(
                 ops.append(MeasureRound())
             ops.append(Split("rough", control_name, ancilla_name))
             ops.append(ParityReadout("ZZ", "ZZ", control_name, ancilla_name))
-            for _ in range(rough_rounds):
-                ops.append(MeasureRound(measure_z=False, measure_x=True))
-            
+            seam_episode_end.setdefault(("rough", control_name, ancilla_name), []).append(len(ops) - 1)
             # 2. Smooth XX merge (Ancilla-Target)  
             smooth_rounds = max(0, int(distance))
             ops.append(Merge("smooth", ancilla_name, target_name, rounds=smooth_rounds))
@@ -162,11 +162,28 @@ def compile_circuit_to_surgery(
                 ops.append(MeasureRound())
             ops.append(Split("smooth", ancilla_name, target_name))
             ops.append(ParityReadout("XX", "XX", ancilla_name, target_name))
-            for _ in range(smooth_rounds):
-                ops.append(MeasureRound(measure_z=True, measure_x=False))
+            seam_episode_end.setdefault(("smooth", ancilla_name, target_name), []).append(len(ops) - 1)
             
         else:
             # 1Q gates are tracked in software; no scheduling here.
             continue
+
+    if seam_episode_end:
+        enhanced_ops: List[object] = []
+        last_index_to_seam: Dict[int, Tuple[str, str, str]] = {}
+        for seam_key, idxs in seam_episode_end.items():
+            if idxs:
+                last_index_to_seam[idxs[-1]] = seam_key
+
+        for idx, op in enumerate(ops):
+            enhanced_ops.append(op)
+            seam_key = last_index_to_seam.get(idx)
+            if seam_key is not None:
+                kind = seam_key[0]
+                if kind == "rough":
+                    enhanced_ops.append(MeasureRound(measure_z=False, measure_x=True))
+                elif kind == "smooth":
+                    enhanced_ops.append(MeasureRound(measure_z=True, measure_x=False))
+        ops = enhanced_ops
 
     return layout, ops

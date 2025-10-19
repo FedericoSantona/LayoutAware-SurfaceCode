@@ -8,13 +8,14 @@ benchmarks, targets, or analysis steps.
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
 import argparse
 import json
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple, Type
-import importlib
-import os
-import sys
+
 import numpy as np
 import pymatching as pm
 if __name__ == "__main__":
@@ -64,15 +65,13 @@ from surface_code import (
 from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
-from surface_code.joint_parity import decode_joint_parity, extract_merge_byproduct
+from surface_code.joint_parity import decode_joint_parity
 from surface_code.logical_ops import (
     LogicalFrame,
     apply_sequence,
     end_basis_and_flip,
-    circuit_to_gates,
     parse_init_label,
 )
-from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
 
 # ---------------------------------------------------------------------------
@@ -334,15 +333,11 @@ def main() -> None:
 
         # Multi-qubit unified path: gate summary and start/end basis
         init_label = (args.init or "0").strip()
-        start_basis, init_sign = parse_init_label(init_label)
+        start_basis, _ = parse_init_label(init_label)
         gate_seq = [ci.operation.name.upper() for ci in qc.data]
-        # Global end-basis heuristic for demo auto: flip if any H is present
+        # Global end-basis heuristic for demo auto: toggle basis if any H is present
         any_h = any(ci.operation.name.lower() == "h" for ci in qc.data)
         end_basis = ("X" if start_basis == "Z" else "Z") if any_h else start_basis
-        expected_flip = 0
-        # Incorporate the initial eigen-sign into the expected correlation parity.
-        # A '-1' eigenstate contributes a unit flip to the start-vs-end parity definition.
-        expected_flip_total = int(expected_flip) ^ (0 if init_sign == +1 else 1)
 
         # Unified surgery-based path (works for any number of qubits)
         model = build_heavy_hex_model(args.distance)
@@ -424,6 +419,9 @@ def main() -> None:
             qc, patches, seams, distance=d, bracket_map=bracket_map, 
             warmup_rounds=1, ancilla_strategy=args.cnot_ancilla_strategy
         )
+
+        print("ops")
+        print(ops)
 
         stim_cfg = PhenomenologicalStimConfig(
             rounds=stim_rounds,
@@ -540,12 +538,11 @@ def main() -> None:
                     gate_map[f"q{qidx}"].append(name.upper())
         
         # Derive per-qubit expected flips in the chosen bracket basis
-        import surface_code.logical_ops as lo
         expected_flips = []
         for i in range(qc.num_qubits):
             seq = gate_map[f"q{i}"]
-            frame = lo.apply_sequence(lo.LogicalFrame(), seq)
-            end_b, flip = lo.end_basis_and_flip(bracket_basis, frame)
+            frame = apply_sequence(LogicalFrame(), seq)
+            _, flip = end_basis_and_flip(bracket_basis, frame)
             expected_flips.append(int(flip))
 
         # Extract demo readouts for physics analysis
@@ -706,12 +703,18 @@ def main() -> None:
             joint_demo_bits,
             virtual_gates_per_qubit=gate_map,
         )
+        decoder_flip_map = {}
+        for patch_name, obs_idx in patch_to_obs_idx.items():
+            if obs_idx < preds.shape[1]:
+                decoder_flip_map[patch_name] = preds[:, obs_idx]
+
         print_final_state_distribution(
             metadata.get("final_snapshot", {}),
             snapshot_bits,
             pauli_frame,
             int(args.shots),
             apply_frame_correction=True,
+            decoder_flips=decoder_flip_map,
         )
         print_pauli_frame_audit(gate_map, pauli_frame, cnot_metadata)
         

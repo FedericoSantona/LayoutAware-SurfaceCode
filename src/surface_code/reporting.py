@@ -628,6 +628,7 @@ def print_final_state_distribution(
     pauli_frame: Optional[Dict[str, Dict[str, Any]]],
     shots: int,
     apply_frame_correction: bool = True,
+    decoder_flips: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     """Print Section C2: Final logical state distribution (computational basis histogram)."""
     
@@ -656,7 +657,7 @@ def print_final_state_distribution(
             continue
         bits_array[:, i] = col
         
-        # Apply frame correction
+        # Apply frame correction and decoder flip corrections (per shot)
         if apply_frame_correction and pauli_frame and qname in pauli_frame:
             frame_key = "fx" if basis == "Z" else "fz"
             flip = pauli_frame[qname].get(frame_key, 0)
@@ -666,6 +667,17 @@ def print_final_state_distribution(
                 flip = int(flip) & 1
             if flip:
                 bits_array[:, i] ^= 1
+        if decoder_flips and qname in decoder_flips:
+            flips = decoder_flips[qname]
+            if isinstance(flips, np.ndarray):
+                arr = flips.astype(np.uint8)
+            else:
+                arr = np.asarray(flips, dtype=np.uint8)
+            if arr.ndim == 0:
+                if int(arr) & 1:
+                    bits_array[:, i] ^= 1
+            else:
+                bits_array[:, i] ^= arr
     
     # Assemble bitstrings and count
     from collections import Counter

@@ -8,7 +8,7 @@ import stim
 
 if TYPE_CHECKING:  # Import only for typing to avoid circular deps at runtime
     from .layout import Layout
-    from .pauli_tracker import PauliOperator
+    from .pauli import Pauli as PauliOperator
 
 
 GateTarget = stim.GateTarget
@@ -75,7 +75,7 @@ def _mpp_targets_from_pauli(
         name_i = idx_to_name.get(qi)
         if name_i is None or name_i not in layout.patches:
             continue
-        pch = op.get_qubit_pauli(qi)
+        pch = op.get_axis(qi)
         if pch == "I":
             continue
         patch = layout.patches[name_i]

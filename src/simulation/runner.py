@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Dict, List
 
 import numpy as np
 import pymatching as pm
 import stim
 
-from surface_code.logical_ops import PauliFrame, parse_init_label
+from surface_code.pauli import PauliTracker, parse_init_label
 from surface_code import GlobalStimBuilder, PhenomenologicalStimConfig, create_single_patch_layout, MeasureRound
 
 
@@ -66,14 +66,14 @@ class BatchPauliFrame:
         column_samples = samples[:, idx]
         return np.bitwise_xor(column_samples, flips)
 
-    def pauli_frames(self) -> Tuple[PauliFrame, ...]:
-        """Return a tuple of PauliFrame objects, one per shot."""
-        frames = []
+    def pauli_frames(self) -> Tuple[Dict[str, int], ...]:
+        """Return a tuple of frame dicts per shot: {basis: bit}."""
+        frames: List[Dict[str, int]] = []
         for row in self.flips:
-            pf = PauliFrame()
+            d: Dict[str, int] = {}
             for idx, basis in enumerate(self.bases):
-                pf.set_flip(basis, int(row[idx]) & 1)
-            frames.append(pf)
+                d[basis] = int(row[idx]) & 1
+            frames.append(d)
         return tuple(frames)
 
 

@@ -66,10 +66,7 @@ from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
 from surface_code.joint_parity import decode_joint_parity
-from surface_code.logical_ops import (
-    parse_init_label,
-)
-from surface_code.pauli_tracker import PauliFrameManager
+from surface_code.pauli import PauliTracker, parse_init_label, sequence_from_qc
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo-basis",
         type=str,
         choices=["auto", "Z", "X", "both", "none"],
-        default="Z",
+        default="X",
         help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
@@ -461,7 +458,7 @@ def main() -> None:
             merge_bits[key] = bit
 
         # Extract CNOT parity bits and update Pauli frame (centralized)
-        pfm = PauliFrameManager(qc.num_qubits)
+        pfm = PauliTracker(qc.num_qubits)
         cnot_metadata = []
         
         for cnot_op in metadata.get("cnot_operations", []):
@@ -525,18 +522,16 @@ def main() -> None:
             basis_labels = basis_labels[:obs_u8.shape[1]]
 
         # Track virtual single-qubit gates centrally
-        for ci in qc.data:
-            name = ci.operation.name.lower()
-            if name in {"x", "z", "h"}:
-                for qb in ci.qubits:
-                    qidx = qc.find_bit(qb).index
-                    pfm.add_virtual_gate(qidx, name.upper())
+        for qname, gates in sequence_from_qc(qc).items():
+            qidx = int(qname[1:])
+            if gates:
+                pfm.set_sequence(qidx, gates)
         
         # Derive per-qubit expected flips for debug/verbose via centralized helper
         expected_flips = []
         for i in range(qc.num_qubits):
             seq = pfm.virtual_gates[f"q{i}"]
-            _, phase = PauliFrameManager._conjugate_axis_and_phase(bracket_basis, seq)
+            _, phase = PauliTracker.conjugate_axis_by_sequence(bracket_basis, seq)
             expected_flips.append(1 if phase < 0 else 0)
 
         # Fold virtual single-qubit gates into the Pauli frame using sign-aware

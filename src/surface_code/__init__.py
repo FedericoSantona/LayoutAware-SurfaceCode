@@ -5,7 +5,7 @@ from .builder import GlobalStimBuilder
 from .configs import PhenomenologicalStimConfig
 from .layout import Layout, PatchObject, create_single_patch_layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
-from .logical_ops import PauliFrame
+from .pauli import PauliTracker
 
 __all__ = [
     "HeavyHexModel",
@@ -19,5 +19,5 @@ __all__ = [
     "Merge",
     "Split",
     "ParityReadout",
-    "PauliFrame",
+    "PauliTracker",
 ]

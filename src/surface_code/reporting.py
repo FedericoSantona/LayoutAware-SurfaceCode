@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from .utils import wilson_rate_ci, compute_two_qubit_correlations
-from .pauli_tracker import PauliFrameManager
+from .pauli import PauliTracker
 
 
 
@@ -371,7 +371,7 @@ def print_physics_demo(
                 # If builder didn't provide a logical_operator/phase, derive via virtual gates.
                 if "logical_operator" not in z_entry or "phase" not in z_entry:
                     vg_list = vg_map_explicit.get(qubit_name, []) or vg_map_meta.get(qubit_name, []) or _get_virtual_gates_for_qubit(qubit_name, virtual_gates_per_qubit, demo_meta)
-                    final_axis, phase_c = PauliFrameManager._conjugate_axis_and_phase("Z", vg_list)
+                    final_axis, phase_c = PauliTracker.conjugate_axis_by_sequence("Z", vg_list)
                     z_entry.setdefault("logical_operator", f"{final_axis}({qubit_name})")
                     z_entry["phase"] = int(z_entry.get("phase", +1)) * int(phase_c)
                 z_logical = z_entry.get("logical_operator", f"Z({qubit_name})")
@@ -397,7 +397,7 @@ def print_physics_demo(
                 x_requested = f"X({qubit_name})"
                 if "logical_operator" not in x_entry or "phase" not in x_entry:
                     vg_list = vg_map_explicit.get(qubit_name, []) or vg_map_meta.get(qubit_name, []) or _get_virtual_gates_for_qubit(qubit_name, virtual_gates_per_qubit, demo_meta)
-                    final_axis, phase_c = PauliFrameManager._conjugate_axis_and_phase("X", vg_list)
+                    final_axis, phase_c = PauliTracker.conjugate_axis_by_sequence("X", vg_list)
                     x_entry.setdefault("logical_operator", f"{final_axis}({qubit_name})")
                     x_entry["phase"] = int(x_entry.get("phase", +1)) * int(phase_c)
                 x_logical = x_entry.get("logical_operator", f"X({qubit_name})")

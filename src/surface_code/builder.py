@@ -19,7 +19,7 @@ from .layout import Layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
 from .configs import PhenomenologicalStimConfig
 from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index, _mpp_targets_from_pauli
-from .pauli_tracker import PauliOperator, conjugate_circuit
+from .pauli import Pauli, conjugate_through_circuit, PauliTracker
 
 
 GateTarget = stim.GateTarget
@@ -492,10 +492,10 @@ class GlobalStimBuilder:
                         "index": idx_zz,
                     }
 
-                    # Joint XX: build PauliOperator XX on (q0,q1), Heisenberg-conjugate through qc,
+                    # Joint XX: build Pauli XX on (q0,q1), Heisenberg-conjugate through qc,
                     # then map to physical targets.
-                    op_xx = PauliOperator.two_qubit_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                    conj_xx = conjugate_circuit(op_xx, qiskit_circuit)
+                    op_xx = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                    conj_xx = conjugate_through_circuit(op_xx, qiskit_circuit)
                     xx_targets, axes_map_xx = _mpp_targets_from_pauli(conj_xx, layout, idx_to_name)
                     circuit.append_operation("MPP", xx_targets)
                     idx_xx = circuit.num_measurements - 1
@@ -520,10 +520,10 @@ class GlobalStimBuilder:
                     single_basis = next(iter(requested))
                     for patch_name in logical_names:
                         if single_basis == "Z":
-                            init = PauliOperator.single_qubit_z(n_logical, name_to_idx.get(patch_name, 0))
+                            init = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
                         else:
-                            init = PauliOperator.single_qubit_x(n_logical, name_to_idx.get(patch_name, 0))
-                        conj = conjugate_circuit(init, qiskit_circuit)
+                            init = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
+                        conj = conjugate_through_circuit(init, qiskit_circuit)
                         singles_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
                         if not singles_targets:
                             continue
@@ -549,8 +549,8 @@ class GlobalStimBuilder:
                             continue
                         offs = layout.offsets()
                         if basis == "X":
-                            op = PauliOperator.two_qubit_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                            conj = conjugate_circuit(op, qiskit_circuit)
+                            op = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                            conj = conjugate_through_circuit(op, qiskit_circuit)
                             mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
                             if not mpp_targets:
                                 continue
@@ -606,10 +606,10 @@ class GlobalStimBuilder:
                         logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
                         for patch_name in logical_names:
                             if basis == "Z":
-                                initial_pauli = PauliOperator.single_qubit_z(n_logical, name_to_idx.get(patch_name, 0))
+                                initial_pauli = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
                             else:
-                                initial_pauli = PauliOperator.single_qubit_x(n_logical, name_to_idx.get(patch_name, 0))
-                            conjugated_pauli = conjugate_circuit(initial_pauli, qiskit_circuit)
+                                initial_pauli = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
+                            conjugated_pauli = conjugate_through_circuit(initial_pauli, qiskit_circuit)
                             singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli, layout, idx_to_name)
                             if not singles_targets:
                                 continue
@@ -644,24 +644,21 @@ class GlobalStimBuilder:
                     if qi is None:
                         continue
                     if snapshot_basis == "Z":
-                        init_op = PauliOperator.single_qubit_z(n_logical, qi)
+                        init_op = Pauli.single_z(n_logical, qi)
                     else:
-                        init_op = PauliOperator.single_qubit_x(n_logical, qi)
-                    conj_op = conjugate_circuit(init_op, qiskit_circuit)
+                        init_op = Pauli.single_x(n_logical, qi)
+                    conj_op = conjugate_through_circuit(init_op, qiskit_circuit)
                     targets, _ = _mpp_targets_from_pauli(conj_op, layout, idx_to_name)
                     if targets:
                         circuit.append_operation("MPP", targets)
                         idx = circuit.num_measurements - 1
                         snapshot_indices.append(idx)
-                        # Determine single-qubit axis and phase
-                        axis = conj_op.get_qubit_pauli(qi)
-                        phase = conj_op.phase_sign()
-                        op_str = conj_op.to_string()
-                        if phase < 0:
-                            op_str = f"-{op_str}"
-                        snapshot_ops.append(op_str)
-                        snapshot_axes.append(axis if axis in ("Z", "X") else snapshot_basis)
-                        snapshot_phases.append(int(phase))
+                        # Use unified tracker helper to derive axis and phase
+                        tracker = PauliTracker(n_logical)
+                        info = tracker.final_operator_info(qi, snapshot_basis, qiskit_circuit)
+                        snapshot_ops.append(info["operator_string"]) 
+                        snapshot_axes.append(info["axis"]) 
+                        snapshot_phases.append(int(info["phase"]))
                         order_out.append(patch_name)
                 
                 snapshot_info = {

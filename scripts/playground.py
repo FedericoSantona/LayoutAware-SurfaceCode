@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="parity_check", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="teleportation", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -232,8 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--distance", type=int, default=3, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--px", type=float, default=0, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=0, help="Phenomenological Z error probability")
+    parser.add_argument("--px", type=float, default=1e-3, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=1e-3, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
     parser.add_argument(
         "--bracket-basis",

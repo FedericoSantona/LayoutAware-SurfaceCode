@@ -635,7 +635,7 @@ def print_final_state_distribution(
         return
     
     print("\n" + "=" * 80)
-    print("FINAL LOGICAL STATE DISTRIBUTION (computational basis)")
+    print("FINAL LOGICAL STATE DISTRIBUTION")
     print("=" * 80)
     
     basis = snapshot_meta["basis"]

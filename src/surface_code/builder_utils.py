@@ -79,30 +79,29 @@ def _mpp_targets_from_pauli(
         if pch == "I":
             continue
         patch = layout.patches[name_i]
-        base = offs[name_i]
         if pch == "X":
             axes_map[name_i] = ["X"]
-            s = patch.logical_x
-            for i, ch in enumerate(s):
-                if ch == "X":
-                    physical_targets.append((base + i, "X"))
+            positions, _ = layout.globalize_local_pauli_string(name_i, patch.logical_x)
+            for pos in positions:
+                physical_targets.append((pos, "X"))
         elif pch == "Z":
             axes_map[name_i] = ["Z"]
-            s = patch.logical_z
-            for i, ch in enumerate(s):
-                if ch == "Z":
-                    physical_targets.append((base + i, "Z"))
+            positions, _ = layout.globalize_local_pauli_string(name_i, patch.logical_z)
+            for pos in positions:
+                physical_targets.append((pos, "Z"))
         else:  # Y → emit both and resolve below
             axes_map[name_i] = ["X", "Z"]
-            sx = patch.logical_x
-            sz = patch.logical_z
-            for i, (cx, cz) in enumerate(zip(sx, sz)):
-                if cx == "X" and cz == "Z":
-                    physical_targets.append((base + i, "Y"))
-                elif cx == "X":
-                    physical_targets.append((base + i, "X"))
-                elif cz == "Z":
-                    physical_targets.append((base + i, "Z"))
+            x_positions, _ = layout.globalize_local_pauli_string(name_i, patch.logical_x)
+            z_positions, _ = layout.globalize_local_pauli_string(name_i, patch.logical_z)
+            # Handle Y case: if both X and Z are present at same position
+            for pos in x_positions:
+                if pos in z_positions:
+                    physical_targets.append((pos, "Y"))
+                else:
+                    physical_targets.append((pos, "X"))
+            for pos in z_positions:
+                if pos not in x_positions:
+                    physical_targets.append((pos, "Z"))
     # Resolve collisions X+Z -> Y
     qops: Dict[int, set] = {}
     for gidx, pch in physical_targets:

@@ -143,7 +143,7 @@ class PauliTracker:
 
     def __init__(self, n_qubits: int) -> None:
         self.n_qubits = int(n_qubits)
-        self.frame: Dict[str, Dict[str, Any]] = {f"q{i}": {"fx": 0, "fz": 0} for i in range(self.n_qubits)}
+        self.frame: Dict[str, Dict[str, Any]] = {f"q{i}": {"fx": np.zeros(0, dtype=np.uint8), "fz": np.zeros(0, dtype=np.uint8)} for i in range(self.n_qubits)}
         self.virtual_gates: Dict[str, List[str]] = {f"q{i}": [] for i in range(self.n_qubits)}
 
     # Virtual gates
@@ -179,8 +179,15 @@ class PauliTracker:
         seq = self.virtual_gates[qn]
         _, z_phase = self.conjugate_axis_by_sequence("Z", seq)
         _, x_phase = self.conjugate_axis_by_sequence("X", seq)
-        self.frame[qn]["fx"] = 1 if z_phase < 0 else 0
-        self.frame[qn]["fz"] = 1 if x_phase < 0 else 0
+        # Initialize frame bits as single-element arrays if not already set
+        if self.frame[qn]["fx"].size == 0:
+            self.frame[qn]["fx"] = np.array([1 if z_phase < 0 else 0], dtype=np.uint8)
+        else:
+            self.frame[qn]["fx"] = np.array([1 if z_phase < 0 else 0], dtype=np.uint8)
+        if self.frame[qn]["fz"].size == 0:
+            self.frame[qn]["fz"] = np.array([1 if x_phase < 0 else 0], dtype=np.uint8)
+        else:
+            self.frame[qn]["fz"] = np.array([1 if x_phase < 0 else 0], dtype=np.uint8)
 
     # Frame updates
     def update_cnot(self, control: str, target: str, m_zz: np.ndarray, m_xx: np.ndarray) -> None:

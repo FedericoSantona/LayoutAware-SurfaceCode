@@ -57,8 +57,8 @@ class GlobalStimBuilder:
         measured: Dict[str, List[Optional[int]]] = {}
         for name in patch_names:
             patch = self.layout.patches[name]
-            base = offs[name]
             stabs = patch.z_stabs if basis == "Z" else patch.x_stabs
+            #During a merge, stabilizers that conflict with seam checks are temporarily suppressed
             skip = set() if skip_indices is None else skip_indices.get(name, set())
             prev_list = []
             if prev_map is not None:
@@ -73,7 +73,7 @@ class GlobalStimBuilder:
                 positions: List[int] = []
                 for i, c in enumerate(s):
                     if c == basis:
-                        positions.append(base + i)
+                        positions.append(self.layout.globalize_local_index(name, i))
                 idx = mpp_from_positions(circuit, positions, basis)
                 indices.append(idx)
             measured[name] = indices
@@ -128,13 +128,12 @@ class GlobalStimBuilder:
         pairs = self.layout.seams.get(key, [])
         if not pairs:
             return []
-        offs = self.layout.offsets()
-        base_a = offs[a]
-        base_b = offs[b]
         pauli = "Z" if kind == "rough" else "X"
         indices: List[int] = []
         for ia, ib in pairs:
-            idx = mpp_from_positions(circuit, [base_a + ia, base_b + ib], pauli)
+            global_a = self.layout.globalize_local_index(a, ia)
+            global_b = self.layout.globalize_local_index(b, ib)
+            idx = mpp_from_positions(circuit, [global_a, global_b], pauli)
             if idx is not None:
                 indices.append(idx)
         return indices
@@ -264,13 +263,6 @@ class GlobalStimBuilder:
                 "a": a,
                 "b": b,
                 "rounds": int(rounds),
-                "seam_pairs_global": [
-                    (layout.offsets()[a] + ia, layout.offsets()[b] + ib)
-                    for ia, ib in layout.seams.get((kind, a, b), [])
-                ],
-                "joint_meas_indices": [],
-                "joint_detector_indices": [],
-                "first_joint_round": None,
             }
             window_id += 1
 
@@ -289,31 +281,6 @@ class GlobalStimBuilder:
                 measure_z = getattr(op, "measure_z", True)
                 measure_x = getattr(op, "measure_x", True)
 
-                skip_z_indices: Dict[str, Set[int]] = {}
-                skip_x_indices: Dict[str, Set[int]] = {}
-
-                if active_rough is not None:
-                    a, b, _ = active_rough
-                    pairs = layout.seams.get(("rough", a, b), [])
-                    if pairs:
-                        idx_a = {ia for ia, _ in pairs}
-                        idx_b = {ib for _, ib in pairs}
-                        if idx_a:
-                            skip_x_indices.setdefault(a, set()).update(idx_a)
-                        if idx_b:
-                            skip_x_indices.setdefault(b, set()).update(idx_b)
-
-                if active_smooth is not None:
-                    a, b, _ = active_smooth
-                    pairs = layout.seams.get(("smooth", a, b), [])
-                    if pairs:
-                        idx_a = {ia for ia, _ in pairs}
-                        idx_b = {ib for _, ib in pairs}
-                        if idx_a:
-                            skip_z_indices.setdefault(a, set()).update(idx_a)
-                        if idx_b:
-                            skip_z_indices.setdefault(b, set()).update(idx_b)
-
                 # Z half
                 circuit.append_operation("TICK")
                 if cfg.p_x_error:
@@ -324,8 +291,6 @@ class GlobalStimBuilder:
                         circuit,
                         names,
                         "Z",
-                        skip_indices=skip_z_indices,
-                        prev_map=prev.z_prev,
                     )
                     for name in names:
                         add_temporal_detectors_with_index(
@@ -353,25 +318,20 @@ class GlobalStimBuilder:
                     for name in names:
                         if name not in z_curr:
                             z_curr[name] = list(prev.z_prev.get(name, []))
-                # Joint checks for rough merge (if active)
+
                 if measure_z and active_rough is not None:
-                    a, b, rem = active_rough
-                    joint_curr = self._measure_joint_checks(circuit, "rough", a, b)
-                    joint_key = ("rough", a, b)
-                    prev_joint = prev.joint_prev.get(joint_key, [])
-                    if current_window is not None and current_window.get("type") == "rough" and current_window.get("first_joint_round") is None and joint_curr:
-                        current_window["first_joint_round"] = list(joint_curr)
-                    joint_det_idxs = add_temporal_detectors_with_index(
+                    # Measure rough seam ZZ checks when the merge is active.
+                    seam_a, seam_b, _ = active_rough
+                    key = ("rough", seam_a, seam_b)
+                    prev_joint = prev.joint_prev.get(key, [])
+                    joint_curr = self._measure_joint_checks(circuit, "rough", seam_a, seam_b)
+                    add_temporal_detectors_with_index(
                         circuit,
                         prev_joint,
                         joint_curr,
                         append_detector,
                     )
-                    prev.joint_prev[joint_key] = joint_curr
-                    if current_window is not None and current_window.get("type") == "rough":
-                        current_window["joint_meas_indices"].append(joint_curr)
-                        current_window["joint_detector_indices"].append(joint_det_idxs)
-                    # countdown managed outside the half
+                    prev.joint_prev[key] = list(joint_curr)
 
                 prev.z_prev = z_curr
 
@@ -385,8 +345,6 @@ class GlobalStimBuilder:
                         circuit,
                         names,
                         "X",
-                        skip_indices=skip_x_indices,
-                        prev_map=prev.x_prev,
                     )
                     for name in names:
                         add_temporal_detectors_with_index(
@@ -414,24 +372,20 @@ class GlobalStimBuilder:
                     for name in names:
                         if name not in x_curr:
                             x_curr[name] = list(prev.x_prev.get(name, []))
-                # Joint checks for smooth merge (if active)
+
                 if measure_x and active_smooth is not None:
-                    a, b, rem = active_smooth
-                    joint_curr = self._measure_joint_checks(circuit, "smooth", a, b)
-                    joint_key = ("smooth", a, b)
-                    prev_joint = prev.joint_prev.get(joint_key, [])
-                    if current_window is not None and current_window.get("type") == "smooth" and current_window.get("first_joint_round") is None and joint_curr:
-                        current_window["first_joint_round"] = list(joint_curr)
-                    joint_det_idxs = add_temporal_detectors_with_index(
+                    # Measure smooth seam XX checks when the merge is active.
+                    seam_a, seam_b, _ = active_smooth
+                    key = ("smooth", seam_a, seam_b)
+                    prev_joint = prev.joint_prev.get(key, [])
+                    joint_curr = self._measure_joint_checks(circuit, "smooth", seam_a, seam_b)
+                    add_temporal_detectors_with_index(
                         circuit,
                         prev_joint,
                         joint_curr,
                         append_detector,
                     )
-                    prev.joint_prev[joint_key] = joint_curr
-                    if current_window is not None and current_window.get("type") == "smooth":
-                        current_window["joint_meas_indices"].append(joint_curr)
-                        current_window["joint_detector_indices"].append(joint_det_idxs)
+                    prev.joint_prev[key] = list(joint_curr)
 
                 prev.x_prev = x_curr
 
@@ -481,19 +435,6 @@ class GlobalStimBuilder:
                 k = op.type.strip().lower()
                 if k not in {"rough", "smooth"}:
                     raise ValueError("Split.type must be 'rough' or 'smooth'")
-                if current_window is not None:
-                    round_meas: List[List[int]] = current_window.get("joint_meas_indices", [])
-                    if len(round_meas) > 1:
-                        first_round = round_meas[0]
-                        last_round = round_meas[-1]
-                        for idx_last, idx_first in zip(last_round, first_round):
-                            if idx_last is not None and idx_first is not None:
-                                append_detector(
-                                    [
-                                        rec_from_abs(circuit, idx_last),
-                                        rec_from_abs(circuit, idx_first),
-                                    ]
-                                )
                 if k == "rough":
                     active_rough = None
                 else:
@@ -509,24 +450,102 @@ class GlobalStimBuilder:
                 prev.joint_prev[(k, op.a, op.b)] = []
 
             elif isinstance(op, ParityReadout):
-                # Track CNOT operations by grouping ZZ and XX parity readouts
+                # Emit single-shot MPP for merge byproduct extraction
                 if op.type == "ZZ":
-                    # Start of a CNOT operation (rough merge completed)
-                    current_cnot = {
-                        "control": op.a,
-                        "target": op.b,  # This will be updated to actual target when XX comes
-                        "ancilla": op.b,  # For ZZ, b is the ancilla
-                        "rough_window_id": window_id - 1 if current_window is None else window_id,
-                        "smooth_window_id": None,
-                        "m_zz": None,  # Will be filled in post-processing
-                        "m_xx": None,  # Will be filled in post-processing
-                    }
-                elif op.type == "XX" and current_cnot is not None:
+                    # Emit Z_L(a) ⊗ Z_L(b) MPP
+                    patch_a = layout.patches[op.a]
+                    patch_b = layout.patches[op.b]
+                    base_a = layout.offsets()[op.a]
+                    base_b = layout.offsets()[op.b]
+                    
+                    zz_targets: List[stim.GateTarget] = []
+                    first = True
+                    # Add Z targets from patch a
+                    for i, ch in enumerate(patch_a.logical_z):
+                        if ch == "Z":
+                            if not first:
+                                zz_targets.append(stim.target_combiner())
+                            zz_targets.append(stim.target_z(base_a + i))
+                            first = False
+                    # Add Z targets from patch b
+                    for i, ch in enumerate(patch_b.logical_z):
+                        if ch == "Z":
+                            if not first:
+                                zz_targets.append(stim.target_combiner())
+                            zz_targets.append(stim.target_z(base_b + i))
+                            first = False
+                    
+                    circuit.append_operation("MPP", zz_targets)
+                    m_zz_mpp_idx = circuit.num_measurements - 1
+                    
+                    # Track CNOT operations by grouping ZZ and XX parity readouts
+                    if current_cnot is not None:
+                        current_cnot["m_zz_mpp_idx"] = m_zz_mpp_idx
+                    else:
+                        # Start of a CNOT operation (rough merge completed)
+                        current_cnot = {
+                            "control": op.a,
+                            "target": op.b,  # This will be updated to actual target when XX comes
+                            "ancilla": op.b,  # For ZZ, b is the ancilla
+                            "rough_window_id": window_id - 1 if current_window is None else window_id,
+                            "smooth_window_id": None,
+                            "m_zz_mpp_idx": m_zz_mpp_idx,
+                            "m_xx_mpp_idx": None,
+                        }
+                        
+                elif op.type == "XX":
+                    # Emit X_L(a) ⊗ X_L(b) MPP using Pauli conjugation
+                    if qiskit_circuit is not None:
+                        # Use existing Pauli→targets helper for final-frame XX
+                        n_logical = qiskit_circuit.num_qubits
+                        name_to_idx = {f"q{i}": i for i in range(n_logical)}
+                        idx_to_name = {i: f"q{i}" for i in range(n_logical)}
+                        
+                        # Find logical indices for patches a and b
+                        idx_a = name_to_idx.get(op.a, 0)
+                        idx_b = name_to_idx.get(op.b, 0)
+                        
+                        # Create XX Pauli and conjugate through circuit
+                        op_xx = Pauli.two_xx(n_logical, idx_a, idx_b)
+                        conj_xx = conjugate_through_circuit(op_xx, qiskit_circuit)
+                        xx_targets, _ = _mpp_targets_from_pauli(conj_xx, layout, idx_to_name)
+                        
+                        circuit.append_operation("MPP", xx_targets)
+                        m_xx_mpp_idx = circuit.num_measurements - 1
+                    else:
+                        # Fallback: direct XX measurement (shouldn't happen in normal usage)
+                        patch_a = layout.patches[op.a]
+                        patch_b = layout.patches[op.b]
+                        base_a = layout.offsets()[op.a]
+                        base_b = layout.offsets()[op.b]
+                        
+                        xx_targets: List[stim.GateTarget] = []
+                        first = True
+                        # Add X targets from patch a
+                        for i, ch in enumerate(patch_a.logical_x):
+                            if ch == "X":
+                                if not first:
+                                    xx_targets.append(stim.target_combiner())
+                                xx_targets.append(stim.target_x(base_a + i))
+                                first = False
+                        # Add X targets from patch b
+                        for i, ch in enumerate(patch_b.logical_x):
+                            if ch == "X":
+                                if not first:
+                                    xx_targets.append(stim.target_combiner())
+                                xx_targets.append(stim.target_x(base_b + i))
+                                first = False
+                        
+                        circuit.append_operation("MPP", xx_targets)
+                        m_xx_mpp_idx = circuit.num_measurements - 1
+                    
                     # Complete the CNOT operation (smooth merge completed)
-                    current_cnot["target"] = op.b  # Update target (for XX, b is the target)
-                    current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
-                    cnot_operations.append(current_cnot)
-                    current_cnot = None
+                    if current_cnot is not None:
+                        current_cnot["target"] = op.b  # Update target (for XX, b is the target)
+                        current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
+                        current_cnot["m_xx_mpp_idx"] = m_xx_mpp_idx
+                        cnot_operations.append(current_cnot)
+                        current_cnot = None
 
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
@@ -545,8 +564,7 @@ class GlobalStimBuilder:
             effective_basis = effective_basis_map.get(name, requested_basis)
             patch = layout.patches[name]
             s = patch.logical_z if effective_basis == "Z" else patch.logical_x
-            offs = layout.offsets()[name]
-            positions = [offs + i for i, c in enumerate(s) if c == effective_basis]
+            positions, _ = layout.globalize_local_pauli_string(name, s)
             end_idx = mpp_from_positions(circuit, positions, effective_basis)
             end_indices[name] = end_idx
             start_idx = start_indices[name]
@@ -619,32 +637,19 @@ class GlobalStimBuilder:
                 circuit.append_operation("TICK")
 
                 for (q0_name, q1_name) in correlation_pairs:
-                    # Joint ZZ as final-frame product: Z_L(q0) ⊗ Z_L(q1)
-                    p0 = layout.patches[q0_name]
-                    p1 = layout.patches[q1_name]
-                    base0 = layout.offsets()[q0_name]
-                    base1 = layout.offsets()[q1_name]
-                    zz_targets: List[stim.GateTarget] = []
-                    # Concatenate Z strings
-                    first = True
-                    for i, ch in enumerate(p0.logical_z):
-                        if ch == "Z":
-                            if not first:
-                                zz_targets.append(stim.target_combiner())
-                            zz_targets.append(stim.target_z(base0 + i))
-                            first = False
-                    for i, ch in enumerate(p1.logical_z):
-                        if ch == "Z":
-                            if not first:
-                                zz_targets.append(stim.target_combiner())
-                            zz_targets.append(stim.target_z(base1 + i))
-                            first = False
+                    # Joint ZZ: build Pauli ZZ on (q0,q1), Heisenberg-conjugate through qc,
+                    # then map to physical targets.
+                    op_zz = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                    conj_zz = conjugate_through_circuit(op_zz, qiskit_circuit)
+                    zz_targets, axes_map_zz = _mpp_targets_from_pauli(conj_zz, layout, idx_to_name)
                     circuit.append_operation("MPP", zz_targets)
                     idx_zz = circuit.num_measurements - 1
                     joint_demo_info[f"{q0_name}_{q1_name}_Z"] = {
                         "pair": [q0_name, q1_name],
                         "logical_operator": f"Z_L({q0_name})⊗Z_L({q1_name})",
+                        "physical_realization": conj_zz.to_string(),
                         "basis": "Z",
+                        "axes": axes_map_zz,
                         "index": idx_zz,
                     }
 
@@ -722,33 +727,21 @@ class GlobalStimBuilder:
                                 "index": joint_idx,
                             }
                         else:
-                            # ZZ
-                            patch0 = layout.patches[q0_name]
-                            patch1 = layout.patches[q1_name]
-                            base0 = offs[q0_name]
-                            base1 = offs[q1_name]
-                            physical_targets: List[Tuple[int, str]] = []
-                            for i, cch in enumerate(patch0.logical_z):
-                                if cch == "Z":
-                                    physical_targets.append((base0 + i, "Z"))
-                            for i, cch in enumerate(patch1.logical_z):
-                                if cch == "Z":
-                                    physical_targets.append((base1 + i, "Z"))
-                            if not physical_targets:
+                            # ZZ: build Pauli ZZ, Heisenberg-conjugate through qc, then map to physical targets
+                            op = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                            conj = conjugate_through_circuit(op, qiskit_circuit)
+                            mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
+                            if not mpp_targets:
                                 continue
-                            mpp_targets: List[stim.GateTarget] = []
-                            for k, (gidx, pch) in enumerate(physical_targets):
-                                if k > 0:
-                                    mpp_targets.append(stim.target_combiner())
-                                mpp_targets.append(stim.target_z(gidx))
                             circuit.append_operation("MPP", mpp_targets)
                             joint_idx = circuit.num_measurements - 1
                             joint_key = f"{q0_name}_{q1_name}_{basis}"
                             joint_demo_info[joint_key] = {
                                 "pair": [q0_name, q1_name],
                                 "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
-                                "physical_realization": f"via Z_L({q0_name})⊗Z_L({q1_name})",
+                                "physical_realization": conj.to_string(),
                                 "basis": basis,
+                                "axes": axes_map,
                                 "index": joint_idx,
                             }
                     circuit.append_operation("TICK")

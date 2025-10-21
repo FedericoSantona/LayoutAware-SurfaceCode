@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="simple_1q_xzh", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -226,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--distance", type=int, default=3, help="Code distance d for the heavy-hex code")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
+    parser.add_argument("--warmup-rounds", type=int, default=1, help="Number of warmup rounds (default: 1)")
+    parser.add_argument("--ancilla-buffer", type=float, default=1.0, help="Buffer spacing between ancilla and template patch (default: 1.0)")
     parser.add_argument("--px", type=float, default=1e-3, help="Phenomenological X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
@@ -344,6 +346,7 @@ def main() -> None:
 
         d = int(args.distance)
         stim_rounds = int(args.rounds) if args.rounds is not None else d
+        warmup_rounds = int(args.warmup_rounds)
 
         # Resolve bracket basis for all patches
         if (args.bracket_basis or "auto").lower() == "auto":
@@ -372,28 +375,17 @@ def main() -> None:
 
         # Build one PatchObject per qubit
         def build_patch() -> PatchObject:
-            return PatchObject(
-                n=model.code.n,
-                z_stabs=model.z_stabilizers,
-                x_stabs=model.x_stabilizers,
-                logical_z=model.logical_z,
-                logical_x=model.logical_x,
-                coords={i: (float(i), 0.0) for i in range(model.code.n)},
-            )
+            return PatchObject.from_code_model(model)
 
-        patches = {f"q{i}": build_patch() for i in range(qc.num_qubits)}
+        # Create patches with spatial offsets to avoid overlap
+        patches = {}
+        for i in range(qc.num_qubits):
+            patch = build_patch()
+            # Offset each patch horizontally to prevent overlap
+            patches[f"q{i}"] = patch.with_offset(0, i * 3.0, 0.0)
 
-        # Default seams: for each CNOT pair, use (i,i) for i in [0..d-1]
-        default_pairs = [(i, i) for i in range(d)]
+        # Start with empty seams - let _auto_generate_seams() handle everything
         seams = {}
-        for ci in qc.data:
-            name = ci.operation.name.lower()
-            if name in {"cx", "cz", "cnot"}:
-                qa, qb = ci.qubits[0], ci.qubits[1]
-                a = f"q{qc.find_bit(qa).index}"
-                b = f"q{qc.find_bit(qb).index}"
-                seams[("rough", a, b)] = list(default_pairs)
-                seams[("smooth", a, b)] = list(default_pairs)
 
         # Optional seam JSON override
         if args.seam_json is not None:
@@ -412,7 +404,14 @@ def main() -> None:
         bracket_map = {f"q{i}": bracket_basis for i in range(qc.num_qubits)}
         layout, ops = compile_circuit_to_surgery(
             qc, patches, seams, distance=d, bracket_map=bracket_map, 
-            warmup_rounds=1, ancilla_strategy=args.cnot_ancilla_strategy
+            warmup_rounds=warmup_rounds, ancilla_strategy=args.cnot_ancilla_strategy, ancilla_buffer=args.ancilla_buffer
+        )
+
+        layout.plot(
+            annotate=False,         # set True to label global qubit indices
+            seams=True,             # draw rough/smooth seam edges
+            title=f"Layout for {args.benchmark} (d={d})",
+            save_path=PROJECT_ROOT / f"plots/layout_{args.benchmark}_d{d}.png",
         )
 
         if args.verbose:
@@ -438,7 +437,6 @@ def main() -> None:
         matcher = pm.Matching.from_detector_error_model(dem)
         dem_sampler = dem.compile_sampler(seed=int(args.seed))
         det_samp, obs_samp, _ = dem_sampler.sample(int(args.shots))
-        det_samp_u8 = np.asarray(det_samp, dtype=np.uint8)
         obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((int(args.shots), len(observable_pairs)), dtype=np.uint8)
         preds = matcher.decode_batch(det_samp.astype(bool))
         preds = np.asarray(preds, dtype=np.uint8)
@@ -449,32 +447,41 @@ def main() -> None:
         circ_sampler = circuit.compile_sampler(seed=int(args.seed))
         m_samples = circ_sampler.sample(shots=int(args.shots))
 
-        # Per-window parity bits via temporal MWPM (1D chain XOR)
-        merge_bits = {}
-        for window in metadata.get("merge_windows", []):
-            # Use decode_joint_parity to get merge byproducts from temporal detectors
-            bit = decode_joint_parity(det_samp_u8, window)
-            key = (window.get("parity_type"), window.get("a"), window.get("b"), window.get("id"))
-            merge_bits[key] = bit
-
-        # Extract CNOT parity bits and update Pauli frame (centralized)
+        # Extract CNOT parity bits directly from single-shot MPPs and update Pauli frame
         pfm = PauliTracker(qc.num_qubits)
+        # Initialize frame bits with correct shots dimension
+        shots_count = int(args.shots)
+        for i in range(qc.num_qubits):
+            qname = f"q{i}"
+            pfm.frame[qname]["fx"] = np.zeros(shots_count, dtype=np.uint8)
+            pfm.frame[qname]["fz"] = np.zeros(shots_count, dtype=np.uint8)
         cnot_metadata = []
         
+        # Determine which byproducts to enable for this run
+        run_bases = set()
+        snap_basis = (metadata.get("final_snapshot", {}) or {}).get("basis", None)
+        if isinstance(snap_basis, str):
+            run_bases.add(snap_basis.upper())
+        arg_demo = (args.demo_basis or "Z").strip().upper()
+        if arg_demo == "BOTH":
+            run_bases.update(["Z", "X"])
+        elif arg_demo in ("Z", "X"):
+            run_bases.add(arg_demo)
+        # Enable m_ZZ only if Z is present; enable m_XX only if X is present
+        enable_mzz = ("Z" in run_bases)
+        enable_mxx = ("X" in run_bases)
+
         for cnot_op in metadata.get("cnot_operations", []):
             control = cnot_op["control"]
             target = cnot_op["target"]
             ancilla = cnot_op["ancilla"]
-            rough_window_id = cnot_op["rough_window_id"]
-            smooth_window_id = cnot_op["smooth_window_id"]
             
-            # Extract m_ZZ from rough merge window (Control-Ancilla)
-            rough_key = ("ZZ", control, ancilla, rough_window_id)
-            m_zz = merge_bits.get(rough_key, np.zeros(int(args.shots), dtype=np.uint8))
+            # Extract m_ZZ and m_XX directly from single-shot MPP indices
+            m_zz_mpp_idx = cnot_op.get("m_zz_mpp_idx")
+            m_xx_mpp_idx = cnot_op.get("m_xx_mpp_idx")
             
-            # Extract m_XX from smooth merge window (Ancilla-Target)  
-            smooth_key = ("XX", ancilla, target, smooth_window_id)
-            m_xx = merge_bits.get(smooth_key, np.zeros(int(args.shots), dtype=np.uint8))
+            m_zz = m_samples[:, m_zz_mpp_idx] if (enable_mzz and m_zz_mpp_idx is not None) else np.zeros(int(args.shots), dtype=np.uint8)
+            m_xx = m_samples[:, m_xx_mpp_idx] if (enable_mxx and m_xx_mpp_idx is not None) else np.zeros(int(args.shots), dtype=np.uint8)
             
             # Update Pauli frame: fz[target] ^= m_ZZ, fx[control] ^= m_XX
             pfm.update_cnot(control, target, m_zz, m_xx)
@@ -484,8 +491,8 @@ def main() -> None:
                 "control": control,
                 "target": target,
                 "ancilla": ancilla,
-                "m_zz_mean": float(m_zz.mean()),
-                "m_xx_mean": float(m_xx.mean()),
+                "m_zz_mean": float(m_zz.mean()) if enable_mzz else 0.0,
+                "m_xx_mean": float(m_xx.mean()) if enable_mxx else 0.0,
             })
         
         # Apply Pauli frame and decoder corrections to logical observables
@@ -533,28 +540,6 @@ def main() -> None:
             seq = pfm.virtual_gates[f"q{i}"]
             _, phase = PauliTracker.conjugate_axis_by_sequence(bracket_basis, seq)
             expected_flips.append(1 if phase < 0 else 0)
-
-        # Fold virtual single-qubit gates into the Pauli frame using sign-aware
-        # Heisenberg conjugation: compute the sign acquired by Z and X under the
-        # gate sequence, and map signs to fx (for Z) and fz (for X).
-        def _conjugate_axis_and_phase(axis: str, gates: list[str]) -> tuple[str, int]:
-            axis = axis.upper()
-            x = (axis == "X")
-            z = (axis == "Z")
-            phase = +1
-            for g in reversed(gates or []):
-                g = str(g).upper()
-                if g == "H":
-                    x, z = z, x
-                elif g == "X":
-                    if z:
-                        phase *= -1
-                elif g == "Z":
-                    if x:
-                        phase *= -1
-            return ("X" if x else "Z"), phase
-
-        # (Replaced by PauliFrameManager; no additional folding needed here)
 
         # Extract demo readouts for physics analysis
         demo_z_bits = {}
@@ -691,15 +676,53 @@ def main() -> None:
             per_qubit_ler_ci.append(ler_ci)
 
         # Compute two-qubit correlations using joint demos
+        # Compute joint correlations with byproduct corrections
         correlations = {}
         if joint_demo_bits:
-            correlations = compute_joint_correlations(joint_demo_bits, int(args.shots))
+            # Apply byproduct corrections to joint demo bits before computing correlations
+            corrected_joint_demo_bits = {}
+            for joint_key, demo_data in joint_demo_bits.items():
+                corrected_data = demo_data.copy()
+                pair = demo_data["pair"]
+                basis = demo_data["basis"]
+                
+                # Find corresponding CNOT operation for this pair
+                byproduct_correction = np.zeros(int(args.shots), dtype=np.uint8)
+                for cnot_op in metadata.get("cnot_operations", []):
+                    control = cnot_op["control"]
+                    target = cnot_op["target"]
+                    
+                    # Check if this joint measurement involves the CNOT control-target pair
+                    if ((pair[0] == control and pair[1] == target) or 
+                        (pair[0] == target and pair[1] == control)):
+                        
+                        if basis == "Z":
+                            # For ZZ correlations, flip by m_ZZ byproduct
+                            m_zz_mpp_idx = cnot_op.get("m_zz_mpp_idx")
+                            if m_zz_mpp_idx is not None:
+                                byproduct_correction = m_samples[:, m_zz_mpp_idx]
+                                print(f"[DEBUG] Joint {joint_key}: applying m_ZZ correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
+                        elif basis == "X":
+                            # For XX correlations, flip by m_XX byproduct
+                            m_xx_mpp_idx = cnot_op.get("m_xx_mpp_idx")
+                            if m_xx_mpp_idx is not None:
+                                byproduct_correction = m_samples[:, m_xx_mpp_idx]
+                                print(f"[DEBUG] Joint {joint_key}: applying m_XX correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
+                        break
+                
+                # Apply byproduct correction: flip bits where byproduct is 1
+                corrected_bits = demo_data["bits"] ^ byproduct_correction
+                corrected_data["bits"] = corrected_bits
+                corrected_data["raw_bits"] = demo_data["bits"]  # Keep original for comparison
+                corrected_joint_demo_bits[joint_key] = corrected_data
+            
+            correlations = compute_joint_correlations(corrected_joint_demo_bits, int(args.shots))
         elif correlation_pairs and demo_z_bits and demo_x_bits:
             # Fallback to old method if no joint demos available
             correlations = compute_two_qubit_correlations(demo_z_bits, demo_x_bits, correlation_pairs, int(args.shots))
 
         # Print structured report
-        print_header(args, model, dem, metadata, merge_bits, cnot_metadata, stim_rounds, int(args.shots))
+        print_header(args, model, dem, metadata, {}, cnot_metadata, stim_rounds, int(args.shots))
         # ---- Clarifying preamble (requested vs emitted; operator semantics) ----
         _print_demo_preamble(metadata, stim_cfg)
     
@@ -738,7 +761,7 @@ def main() -> None:
 
         if args.dump_json:
             detailed_json = generate_detailed_json(
-                args, model, metadata, merge_bits, cnot_metadata,
+                args, model, metadata, cnot_metadata,
                 bracket_map, corrected_obs, obs_u8, preds,
                 demo_z_bits, demo_x_bits, correlations,
                 pfm.virtual_gates, pfm.frame, int(args.shots), stim_rounds,

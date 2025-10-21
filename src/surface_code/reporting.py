@@ -440,41 +440,52 @@ def print_physics_demo(
             if zz_data is not None:
                 zz_bits = zz_data["bits"]
                 qa, qb = zz_data.get("pair", ("?","?"))
-                # If corrected bits provided (raw_bits+frame_flip), avoid re-applying frame here
-                if "raw_bits" in zz_data and "frame_flip" in zz_data:
-                    p1_raw = float(np.asarray(zz_data["raw_bits"], dtype=np.uint8).mean())
-                    p1_frame = float(np.asarray(zz_bits, dtype=np.uint8).mean())
-                    phase = int(zz_data.get("phase", +1))
-                    phase = +1 if phase >= 0 else -1
-                    ff_val = zz_data.get("frame_flip", 0)
-                    if isinstance(ff_val, np.ndarray):
-                        frame_flip = int(round(float(ff_val.mean()))) & 1
-                    else:
-                        frame_flip = int(ff_val) & 1
-                    stats = {
-                        "p1_raw": p1_raw,
-                        "p1_frame": p1_frame,
-                        "phase": phase,
-                        "frame_flip": frame_flip,
-                        "expect_final": phase * (1.0 - 2.0 * p1_frame),
-                    }
+                
+                # Check if we have both raw and corrected bits (byproduct correction applied)
+                if "raw_bits" in zz_data:
+                    # Show both raw and corrected correlations
+                    raw_bits = zz_data["raw_bits"]
+                    corrected_bits = zz_bits
+                    
+                    p1_raw = float(np.asarray(raw_bits, dtype=np.uint8).mean())
+                    p1_corrected = float(np.asarray(corrected_bits, dtype=np.uint8).mean())
+                    
+                    expect_raw = 1.0 - 2.0 * p1_raw
+                    expect_corrected = 1.0 - 2.0 * p1_corrected
+                    
+                    zz_operator = zz_data.get("logical_operator", "Z⊗Z")
+                    zz_physical = zz_data.get("physical_realization") or "unknown"
+                    zz_requested = f"Z({qa})⊗Z({qb})"
+                    
+                    print(f"    [Basis Z] ⟨Z⊗Z⟩ = {expect_corrected:+.3f} (corrected from raw {expect_raw:+.3f})")
+                    print(f"       requested: {zz_requested}")
+                    print(f"       measured (final-frame): {zz_operator}")
+                    print(f"       physical targets: {zz_physical}")
+                    print(f"       bit=1 ↔ eigenvalue −1")
+                    print(f"       P(bit=1): raw={p1_raw:.3f}, corrected={p1_corrected:.3f}")
+                    # CI on expectation derived from corrected p1
+                    p1_count = int(round(p1_corrected * shots))
+                    ci = wilson_rate_ci(p1_count, shots)
+                    expect_ci = (1.0 - 2.0 * ci[1], 1.0 - 2.0 * ci[0])
+                    print(f"       CI on ⟨O⟩: [{expect_ci[0]:+.3f}, {expect_ci[1]:+.3f}]")
                 else:
+                    # Original logic for backward compatibility
                     stats = _apply_phase_and_frame_joint(zz_bits, qa, qb, "Z", zz_data, pauli_frame)
-                zz_operator = zz_data.get("logical_operator", "Z⊗Z")
-                zz_physical = zz_data.get("physical_realization") or "unknown"
-                zz_requested = f"Z({qa})⊗Z({qb})"
-                print(f"    [Basis Z] ⟨Z⊗Z⟩ = {stats['expect_final']:+.3f}")
-                print(f"       requested: {zz_requested}")
-                print(f"       measured (final-frame): {zz_operator}")
-                print(f"       physical targets: {zz_physical}")
-                print(f"       bit=1 ↔ eigenvalue −1")
-                print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fx⊕fx)={stats['frame_flip']}")
-                # CI on expectation derived from frame-corrected p1
-                p1 = stats["p1_frame"]
-                p1_count = int(round(p1 * shots))
-                p1_ci = wilson_rate_ci(p1_count, shots)
-                zz_ci = (1.0 - 2.0 * p1_ci[1], 1.0 - 2.0 * p1_ci[0])
-                print(f"       CI on ⟨O⟩: [{zz_ci[0]:.3f}, {zz_ci[1]:.3f}]")
+                    zz_operator = zz_data.get("logical_operator", "Z⊗Z")
+                    zz_physical = zz_data.get("physical_realization") or "unknown"
+                    zz_requested = f"Z({qa})⊗Z({qb})"
+                    print(f"    [Basis Z] ⟨Z⊗Z⟩ = {stats['expect_final']:+.3f}")
+                    print(f"       requested: {zz_requested}")
+                    print(f"       measured (final-frame): {zz_operator}")
+                    print(f"       physical targets: {zz_physical}")
+                    print(f"       bit=1 ↔ eigenvalue −1")
+                    print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fx⊕fx)={stats['frame_flip']}")
+                    # CI on expectation derived from frame-corrected p1
+                    p1 = stats["p1_frame"]
+                    p1_count = int(round(p1 * shots))
+                    p1_ci = wilson_rate_ci(p1_count, shots)
+                    zz_ci = (1.0 - 2.0 * p1_ci[1], 1.0 - 2.0 * p1_ci[0])
+                    print(f"       CI on ⟨O⟩: [{zz_ci[0]:.3f}, {zz_ci[1]:.3f}]")
 
             if xx_data is not None:
                 xx_bits = xx_data["bits"]

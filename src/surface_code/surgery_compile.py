@@ -18,7 +18,7 @@ from .layout import Layout, PatchObject
 from .surgery_ops import MeasureRound, Merge, ParityReadout, Split, CNOTOp
 
 
-def _allocate_ancilla(patches: Dict[str, PatchObject], ancilla_name: str = "ancilla_0") -> PatchObject:
+def _allocate_ancilla(patches: Dict[str, PatchObject], ancilla_name: str = "ancilla_0", buffer: float = 1.0) -> PatchObject:
     """Create an ancilla patch by copying structure from existing data patches.
     
     The ancilla is virtually initialized in |+⟩_L (X-basis, +1 eigenstate).
@@ -29,9 +29,20 @@ def _allocate_ancilla(patches: Dict[str, PatchObject], ancilla_name: str = "anci
     # Use the first patch as template (all patches should have same structure)
     template = next(iter(patches.values()))
     
+    # Calculate the actual bounding box of the patch
+    x_coords = [x for x, y in template.coords.values()]
+    y_coords = [y for x, y in template.coords.values()]
+    
+    patch_width = max(x_coords) - min(x_coords) if x_coords else 0
+    patch_height = max(y_coords) - min(y_coords) if y_coords else 0
+    
+    # Add buffer spacing to avoid overlap
+    # Use the larger dimension plus buffer to ensure no overlap
+   
+    y_offset = max(patch_width, patch_height) + float(buffer)
+    
     # Create ancilla with same structure but shifted coordinates
-    # Place ancilla at offset (0, 1) relative to template
-    ancilla_coords = {q: (x, y + 1.0) for q, (x, y) in template.coords.items()}
+    ancilla_coords = {q: (x, y + y_offset) for q, (x, y) in template.coords.items()}
     
     return PatchObject(
         n=template.n,
@@ -87,6 +98,7 @@ def compile_circuit_to_surgery(
     bracket_map: Dict[str, str],
     warmup_rounds: int = 1,
     ancilla_strategy: str = "serialize",
+    ancilla_buffer: float = 1.0,
 ) -> Tuple[Layout, List[object]]:
     """Return a `Layout` and ops timeline for surgery execution.
 
@@ -99,6 +111,7 @@ def compile_circuit_to_surgery(
     bracket_map: per-patch bracket basis ('Z'|'X') used by the DEM
     warmup_rounds: initial `MeasureRound` cycles to establish references
     ancilla_strategy: 'serialize' (reuse one ancilla) or 'parallelize' (multiple ancillas)
+    ancilla_buffer: buffer spacing between ancilla and template patch
     """
     layout = Layout()
     # Insert patches in wire order
@@ -132,7 +145,7 @@ def compile_circuit_to_surgery(
             
             # Create ancilla patch on first CNOT if not already created
             if not ancilla_created:
-                ancilla_patch = _allocate_ancilla(patches, ancilla_name)
+                ancilla_patch = _allocate_ancilla(patches, ancilla_name, ancilla_buffer)
                 layout.add_patch(ancilla_name, ancilla_patch)
                 ancilla_created = True
             

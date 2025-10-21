@@ -36,6 +36,67 @@ class PatchObject:
     # Optional boundary labeling; e.g., {"rough": {local_q...}, "smooth": {...}}
     boundaries: Optional[Dict[str, set[int]]] = None
 
+    @classmethod
+    def from_code_model(cls, model, *, name: str = "q0") -> "PatchObject":
+        """Create a PatchObject from a heavy-hex code model.
+        
+        Args:
+            model: HeavyHexModel with code attribute
+            name: Name for the patch (unused but kept for compatibility)
+            
+        Returns:
+            PatchObject with proper 2D coordinates extracted from geometry
+        """
+        # Extract actual 2D coordinates from heavy-hex geometry
+        try:
+            raw_coords = cls._extract_qubit_coordinates(model.code)
+            # Convert numpy arrays to tuples for compatibility
+            coords = {i: tuple(pos) for i, pos in raw_coords.items()}
+        except RuntimeError:
+            # Fallback: generate a reasonable 2D grid if geometry not available
+            raise RuntimeError("Failed to extract qubit coordinates from heavy-hex geometry")
+        return cls(n=model.code.n, z_stabs=list(model.z_stabilizers), x_stabs=list(model.x_stabilizers), logical_z=model.logical_z, logical_x=model.logical_x, coords=coords)
+
+    @staticmethod
+    def _extract_qubit_coordinates(code):
+        """Extract actual 2D coordinates from heavy-hex code geometry.
+        
+        Args:
+            code: StabSubSystemCode object built via geometry-backed builder
+            
+        Returns:
+            dict: {logical_qubit_index: (x, y)} mapping logical qubit indices to 2D coordinates
+        """
+        import numpy as np
+        
+        # tolerate minor API differences
+        shell = getattr(code, "shell", None) or getattr(code, "_shell", None)
+        qd = getattr(code, "qubit_data", None) or getattr(code, "_qubit_data", None)
+        
+        if shell is None or qd is None:
+            raise RuntimeError("This code object has no geometry. Build it via a geometry-backed builder.")
+        
+        # Get the mapping from physical qubit IDs to logical indices
+        qubit_to_index = getattr(qd, "qubit_to_index", None)
+        if qubit_to_index is None:
+            raise RuntimeError("No qubit_to_index mapping found in qubit_data")
+        
+        coords = {}
+        for v in shell.vertices:
+            physical_qubit_id = qd.qubit[v.id]  # vertex-id -> physical qubit ID
+            logical_index = qubit_to_index[physical_qubit_id]  # physical ID -> logical index
+            
+            # vertices expose a position; some builds use .pos, others .position (property)
+            pos = getattr(v, "pos", None)
+            if pos is None:
+                pos = v.position
+            # first hit wins; vertices sharing a qubit will agree on position
+            coords.setdefault(logical_index, np.array(pos, dtype=float))
+
+        print("the qubit coordinates are: ", coords)
+        
+        return coords  # dict: {logical_index: np.array([x, y])}
+
     def with_offset(self, q_offset: int, x_offset: float, y_offset: float) -> "PatchObject":
         """Return a relocated copy with coordinates shifted by (x_offset, y_offset).
 
@@ -117,17 +178,14 @@ class Layout:
 
     # ----- helpers ---------------------------------------------------------
 
-    def _globalize_local_indices(
-        self, patch_name: str, locals_list: Iterable[int]
-    ) -> List[int]:
-        offs = self.offsets()
-        base = offs[patch_name]
-        return [base + i for i in locals_list]
-
-    def _globalize_local_pauli_string(
+    def globalize_local_pauli_string(
         self, patch_name: str, local_str: str
     ) -> Tuple[List[int], List[str]]:
-        """Return positions and chars for non-identity entries at global indices."""
+        """Convert local Pauli string to global positions and characters.
+        
+        Returns:
+            Tuple of (global_positions, pauli_chars) for non-identity entries
+        """
         offs = self.offsets()
         base = offs[patch_name]
         positions: List[int] = []
@@ -137,6 +195,12 @@ class Layout:
                 positions.append(base + i)
                 chars.append(c)
         return positions, chars
+
+    def globalize_local_index(self, patch_name: str, local_index: int) -> int:
+        """Convert a single local qubit index to global index."""
+        offs = self.offsets()
+        base = offs[patch_name]
+        return base + local_index
 
     # ----- globalization snapshot -----------------------------------------
 
@@ -150,12 +214,11 @@ class Layout:
             for name in self._order:
                 patch = self.patches[name]
                 locals_list = patch.z_stabs if kind == "Z" else patch.x_stabs
-                base = offs[name]
                 for s in locals_list:
                     chars = ["I"] * total_n
-                    for i, c in enumerate(s):
-                        if c != "I":
-                            chars[base + i] = c
+                    positions, pauli_chars = self.globalize_local_pauli_string(name, s)
+                    for pos, char in zip(positions, pauli_chars):
+                        chars[pos] = char
                     out.append("".join(chars))
             return out
 
@@ -167,12 +230,148 @@ class Layout:
             "offsets": offs,
         }
 
+    def plot(
+    self,
+    *,
+    annotate: bool = False,
+    seams: bool = True,
+    figsize: Tuple[float, float] = (7, 7),
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    ax=None,
+    seam_markers: bool = True,
+    seam_labels: bool = False,
+    label_fontsize: int = 8,
+    ) -> None:
+        """Visualize the global qubit layout and (optionally) seam connections.
+
+        Args:
+            annotate: If True, label global qubit indices.
+            seams: If True, draw rough/smooth seam connections between patches.
+            figsize: Matplotlib figure size when creating a new figure.
+            title: Optional title for the plot.
+            save_path: If provided, saves the figure to this path.
+            ax: Optional matplotlib axis to draw on. If None, creates a new figure.
+            seam_markers: If True, draw markers at seam endpoints (square for rough, triangle for smooth).
+            seam_labels: If True, label each seam at its midpoint with an index and type (e.g., R0, S3).
+            label_fontsize: Font size for annotations and seam labels.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.lines as mlines
+        except Exception as exc:
+            raise RuntimeError(
+                "matplotlib is required for layout visualization. Please install it."
+            ) from exc
+
+        created_fig = False
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+            created_fig = True
+
+        coords = self.global_coords()
+        offs = self.offsets()
+
+        # Map global index -> patch name
+        global_to_patch: Dict[int, str] = {}
+        for name in self._order:
+            base = offs[name]
+            nloc = self.patches[name].n
+            for i in range(nloc):
+                global_to_patch[base + i] = name
+
+        # Collect per-patch point clouds
+        per_patch_points: Dict[str, List[Tuple[float, float, int]]] = {
+            name: [] for name in self._order
+        }
+        for g_idx, (x, y) in coords.items():
+            pname = global_to_patch.get(g_idx, "?")
+            per_patch_points[pname].append((x, y, g_idx))
+
+        # Prepare to collect patch handles for legend
+        patch_handles = []
+        # Scatter per patch
+        for pname in self._order:
+            pts = per_patch_points[pname]
+            if not pts:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            h = ax.scatter(xs, ys, label=f"patch: {pname}")
+            patch_handles.append(h)
+            if annotate:
+                for x, y, g in pts:
+                    ax.text(x, y, str(g), fontsize=label_fontsize, ha="center", va="center")
+
+        # Draw seams
+        if seams and self.seams:
+            kinds_present = set()
+            pair_counters = {"rough": 0, "smooth": 0}
+            for (kind, a, b), pairs in self.seams.items():
+                kinds_present.add(kind)
+                color = "tab:red" if kind == "rough" else "tab:blue"
+                ls = "--" if kind == "rough" else "-"
+                marker = "s" if kind == "rough" else "^"  # square vs triangle
+                a_off = offs[a]
+                b_off = offs[b]
+                for (i_local, j_local) in pairs:
+                    gi = a_off + i_local
+                    gj = b_off + j_local
+                    if gi in coords and gj in coords:
+                        (x1, y1) = coords[gi]
+                        (x2, y2) = coords[gj]
+                        # seam line
+                        ax.plot(
+                            [x1, x2], [y1, y2],
+                            linestyle=ls, color=color, linewidth=2, alpha=0.9, zorder=2
+                        )
+                        # endpoint markers
+                        if seam_markers:
+                            ax.scatter(
+                                [x1, x2], [y1, y2],
+                                marker=marker, s=36,
+                                edgecolors="black", facecolors=color, zorder=3
+                            )
+                        # midpoint label
+                        if seam_labels:
+                            midx = 0.5 * (x1 + x2)
+                            midy = 0.5 * (y1 + y2)
+                            tag = ("R" if kind == "rough" else "S") + str(pair_counters[kind])
+                            ax.text(
+                                midx, midy, tag,
+                                fontsize=label_fontsize, ha="center", va="center",
+                                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.8),
+                                zorder=4,
+                            )
+                        pair_counters[kind] += 1
+
+            # Legend entries listing each seam and its type
+            handles = []
+            for (k_kind, k_a, k_b) in self.seams.keys():
+                color_k = "tab:red" if k_kind == "rough" else "tab:blue"
+                ls_k = "--" if k_kind == "rough" else "-"
+                label_k = f"{k_kind}: {k_a}↔{k_b}"
+                handles.append(mlines.Line2D([], [], color=color_k, linestyle=ls_k, label=label_k))
+            if handles or patch_handles:
+                combined = patch_handles + handles
+                ax.legend(handles=combined, loc="best", title="Patches and seams")
+
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.2)
+        if title:
+            ax.set_title(title)
+
+        if save_path:
+            ax.figure.savefig(save_path, bbox_inches="tight")
+        
+
 
 def create_single_patch_layout(
     model,
     *,
     name: str = "q0",
-    offset: int = 0
 ) -> Layout:
     """Create a single-patch Layout from a code model.
     
@@ -184,18 +383,8 @@ def create_single_patch_layout(
     Returns:
         Layout containing a single patch ready for use with GlobalStimBuilder
     """
-    # Create coordinates for local indices 0..n-1
-    coords = {i: (float(i), 0.0) for i in range(model.code.n)}
-    
-    # Create the patch object
-    patch = PatchObject(
-        n=model.code.n,
-        z_stabs=list(model.z_stabilizers),
-        x_stabs=list(model.x_stabilizers),
-        logical_z=model.logical_z,
-        logical_x=model.logical_x,
-        coords=coords,
-    )
+    # Create the patch object using the class method
+    patch = PatchObject.from_code_model(model, name=name)
     
     # Create layout and add the patch
     layout = Layout()

@@ -237,6 +237,9 @@ class GlobalStimBuilder:
 
         # Establish initial references: Z then X for active patches
         prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
+        # Cache the last joint indices per merge window and accumulate byproduct metadata
+        last_window_joint: Dict[Tuple[str, str, str], List[int]] = {}
+        byproducts: List[Dict[str, object]] = []
 
         # Active merge trackers and metadata for joint windows
         active_rough: Optional[Tuple[str, str, int]] = None  # (a,b,remaining)
@@ -442,132 +445,105 @@ class GlobalStimBuilder:
                     key = (patch_name, basis)
                     if conflict_counts.get(key, 0) > 0:
                         conflict_counts[key] -= 1
+                # Snapshot the last measured joint indices for this window before clearing
+                last_window_joint[(k, op.a, op.b)] = list(prev.joint_prev.get((k, op.a, op.b), []))
                 prev.joint_prev[(k, op.a, op.b)] = []
 
             elif isinstance(op, ParityReadout):
-                # Emit single-shot MPP for merge byproduct extraction
+                # Deterministic DEM handling for byproduct extraction.
+                # Instead of emitting a fresh logical MPP (which can anti-commute with
+                # temporal detectors), derive the byproduct from the *last* round
+                # of joint seam checks measured during the preceding merge window.
                 if op.type == "ZZ":
-                    # Emit Z_L(a) ⊗ Z_L(b) MPP
-                    patch_a = layout.patches[op.a]
-                    patch_b = layout.patches[op.b]
-                    base_a = layout.offsets()[op.a]
-                    base_b = layout.offsets()[op.b]
-                    
-                    zz_targets: List[stim.GateTarget] = []
-                    first = True
-                    # Add Z targets from patch a
-                    for i, ch in enumerate(patch_a.logical_z):
-                        if ch == "Z":
-                            if not first:
-                                zz_targets.append(stim.target_combiner())
-                            zz_targets.append(stim.target_z(base_a + i))
-                            first = False
-                    # Add Z targets from patch b
-                    for i, ch in enumerate(patch_b.logical_z):
-                        if ch == "Z":
-                            if not first:
-                                zz_targets.append(stim.target_combiner())
-                            zz_targets.append(stim.target_z(base_b + i))
-                            first = False
-                    
-                    circuit.append_operation("MPP", zz_targets)
-                    m_zz_mpp_idx = circuit.num_measurements - 1
-                    
-                    # Track CNOT operations by grouping ZZ and XX parity readouts
-                    if current_cnot is not None:
-                        current_cnot["m_zz_mpp_idx"] = m_zz_mpp_idx
-                    else:
-                        # Start of a CNOT operation (rough merge completed)
-                        current_cnot = {
-                            "control": op.a,
-                            "target": op.b,  # This will be updated to actual target when XX comes
-                            "ancilla": op.b,  # For ZZ, b is the ancilla
-                            "rough_window_id": window_id - 1 if current_window is None else window_id,
-                            "smooth_window_id": None,
-                            "m_zz_mpp_idx": m_zz_mpp_idx,
-                            "m_xx_mpp_idx": None,
-                        }
-                        
+                    seam_kind = "rough"
                 elif op.type == "XX":
-                    # Emit X_L(a) ⊗ X_L(b) MPP using Pauli conjugation
-                    if qiskit_circuit is not None:
-                        # Use existing Pauli→targets helper for final-frame XX
-                        n_logical = qiskit_circuit.num_qubits
-                        name_to_idx = {f"q{i}": i for i in range(n_logical)}
-                        idx_to_name = {i: f"q{i}" for i in range(n_logical)}
-                        
-                        # Find logical indices for patches a and b
-                        idx_a = name_to_idx.get(op.a, 0)
-                        idx_b = name_to_idx.get(op.b, 0)
-                        
-                        # Create XX Pauli and conjugate through circuit
-                        op_xx = Pauli.two_xx(n_logical, idx_a, idx_b)
-                        conj_xx = conjugate_through_circuit(op_xx, qiskit_circuit)
-                        xx_targets, _ = _mpp_targets_from_pauli(conj_xx, layout, idx_to_name)
-                        
-                        circuit.append_operation("MPP", xx_targets)
-                        m_xx_mpp_idx = circuit.num_measurements - 1
-                    else:
-                        # Fallback: direct XX measurement (shouldn't happen in normal usage)
-                        patch_a = layout.patches[op.a]
-                        patch_b = layout.patches[op.b]
-                        base_a = layout.offsets()[op.a]
-                        base_b = layout.offsets()[op.b]
-                        
-                        xx_targets: List[stim.GateTarget] = []
-                        first = True
-                        # Add X targets from patch a
-                        for i, ch in enumerate(patch_a.logical_x):
-                            if ch == "X":
-                                if not first:
-                                    xx_targets.append(stim.target_combiner())
-                                xx_targets.append(stim.target_x(base_a + i))
-                                first = False
-                        # Add X targets from patch b
-                        for i, ch in enumerate(patch_b.logical_x):
-                            if ch == "X":
-                                if not first:
-                                    xx_targets.append(stim.target_combiner())
-                                xx_targets.append(stim.target_x(base_b + i))
-                                first = False
-                        
-                        circuit.append_operation("MPP", xx_targets)
-                        m_xx_mpp_idx = circuit.num_measurements - 1
-                    
-                    # Complete the CNOT operation (smooth merge completed)
-                    if current_cnot is not None:
+                    seam_kind = "smooth"
+                else:
+                    raise ValueError("ParityReadout.type must be 'ZZ' or 'XX'")
+
+                key = (seam_kind, op.a, op.b)
+                indices = list(last_window_joint.get(key, []))
+                
+                # Validate that we have joint measurements
+                if not indices:
+                    # Handle case where no joint measurements were made
+                    # This could happen if the merge window had 0 rounds
+                    print(f"Warning: No joint measurements found for {key}")
+
+                # Record byproduct info for post-processing (Pauli frame updates, etc.).
+                byproduct_info = {
+                    "type": op.type,
+                    "a": op.a,
+                    "b": op.b,
+                    "seam_key": key,
+                    "indices": indices,          # absolute measurement indices of the last seam round
+                    "source": "seam_last_round"  # documentation tag
+                }
+                byproducts.append(byproduct_info)
+                
+                # Track CNOT operations by grouping ZZ and XX parity readouts
+                if current_cnot is not None:
+                    if op.type == "ZZ":
+                        current_cnot["m_zz_byproduct"] = byproduct_info
+                    elif op.type == "XX":
+                        current_cnot["m_xx_byproduct"] = byproduct_info
                         current_cnot["target"] = op.b  # Update target (for XX, b is the target)
                         current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
-                        current_cnot["m_xx_mpp_idx"] = m_xx_mpp_idx
                         cnot_operations.append(current_cnot)
                         current_cnot = None
+                else:
+                    # Start of a CNOT operation (rough merge completed)
+                    current_cnot = {
+                        "control": op.a,
+                        "target": op.b,  # This will be updated to actual target when XX comes
+                        "ancilla": op.b,  # For ZZ, b is the ancilla
+                        "rough_window_id": window_id - 1 if current_window is None else window_id,
+                        "smooth_window_id": None,
+                        "m_zz_byproduct": byproduct_info if op.type == "ZZ" else None,
+                        "m_xx_byproduct": None,
+                    }
+                
+                # NOTE: No circuit operations are emitted here to keep the DEM deterministic.
 
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
 
         # Emit boundary anchors after all merges complete
         # Bracketing: end logicals per patch and observable includes
-        circuit.append_operation("TICK")
+        # IMPORTANT: do not emit new MPPs here; reuse the last compatible
+        # stabilizer measurements from the final round to keep DEM deterministic.
         observable_pairs: List[Tuple[int, int]] = []
-        basis_labels: List[str] = []  
+        basis_labels: List[str] = []
         observable_index = 0
+
+        def _last_non_none(idxs: List[Optional[int]]) -> Optional[int]:
+            for k in range(len(idxs) - 1, -1, -1):
+                if idxs[k] is not None:
+                    return idxs[k]
+            return None
+
         # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
         for name in bracket_map.keys():
             if name not in layout.patches:
                 continue  # Skip if patch doesn't exist in layout
             requested_basis = bracket_map[name].upper()
             effective_basis = effective_basis_map.get(name, requested_basis)
-            patch = layout.patches[name]
-            s = patch.logical_z if effective_basis == "Z" else patch.logical_x
-            positions, _ = layout.globalize_local_pauli_string(name, s)
-            end_idx = mpp_from_positions(circuit, positions, effective_basis)
+
+            # Choose end index from the most recent compatible stabilizer layer
+            if effective_basis == "Z":
+                end_idx = _last_non_none(list(prev.z_prev.get(name, [])))
+            else:
+                end_idx = _last_non_none(list(prev.x_prev.get(name, [])))
+
             end_indices[name] = end_idx
             start_idx = start_indices[name]
+
             targets: List[GateTarget] = []
             if start_idx is not None:
                 targets.append(rec_from_abs(circuit, start_idx))
             if end_idx is not None:
                 targets.append(rec_from_abs(circuit, end_idx))
+
             if targets:
                 circuit.append_operation("OBSERVABLE_INCLUDE", targets, observable_index)
                 observable_pairs.append((start_idx, end_idx))
@@ -599,17 +575,24 @@ class GlobalStimBuilder:
         # where the joint ZZ and joint XX correlators are measured back-to-back *within
         # the same TICK*. Then (optionally) emit any single-qubit demos in a later TICK.
         joint_demo_info: Dict[str, object] = {}
-        if demo_bases and qiskit_circuit is not None:
-            # Prepare mapping between logical names and qiskit indices using the
-            # explicit QuantumCircuit qubit order. This implicitly excludes any
-            # ancilla patches that are not part of the original circuit.
-            name_to_idx: Dict[str, int] = {}
-            idx_to_name: Dict[int, str] = {}
+        
+        # Prepare mapping between logical names and qiskit indices using the
+        # explicit QuantumCircuit qubit order. This implicitly excludes any
+        # ancilla patches that are not part of the original circuit.
+        name_to_idx: Dict[str, int] = {}
+        idx_to_name: Dict[int, str] = {}
+        n_logical = 0
+        if qiskit_circuit is not None:
             n_logical = qiskit_circuit.num_qubits
             for qi in range(n_logical):
                 name = f"q{qi}"
                 name_to_idx[name] = qi
                 idx_to_name[qi] = name
+        
+        # Initialize snapshot_info outside conditional blocks
+        snapshot_info = {"enabled": False}
+        
+        if demo_bases and qiskit_circuit is not None:
 
             # Correlation pairs from compiled CNOT operations (fallback to first two logicals).
             correlation_pairs: List[Tuple[str, str]] = []
@@ -671,7 +654,6 @@ class GlobalStimBuilder:
                         }
                 
                 # No singles or snapshot in combined mode
-                snapshot_info = {"enabled": False}
             else:
                 # ---------- Single basis mode: per-basis emission with singles and snapshot ----------
                 for basis in demo_bases:
@@ -718,8 +700,7 @@ class GlobalStimBuilder:
                     circuit.append_operation("TICK")
 
                 # ----- Final computational-basis snapshot (single basis mode only) -----
-                snapshot_info = {"enabled": False}
-                if qiskit_circuit is not None:
+                if qiskit_circuit is not None and demo_bases:
                     snapshot_basis = demo_bases[0].upper()
                     circuit.append_operation("TICK")
                     logical_names = [nm for nm in sorted(bracket_map.keys()) if nm in layout.patches]
@@ -769,6 +750,7 @@ class GlobalStimBuilder:
             "joint_demos": joint_demo_info,
             "cnot_operations": cnot_operations,
             "final_snapshot": snapshot_info,
+            "byproducts": byproducts,
         }
 
         return circuit, observable_pairs, metadata

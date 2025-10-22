@@ -174,7 +174,8 @@ def compile_circuit_to_surgery(
             ops.append(ParityReadout("XX", "XX", ancilla_name, target_name))
             
         else:
-            # 1Q gates are tracked in software; no scheduling here.
-            continue
+            # Ignore 1Q gates, but still add d rounds of error correction measurements
+            for _ in range(distance):
+                ops.append(MeasureRound())
 
     return layout, ops

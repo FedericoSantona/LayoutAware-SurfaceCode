@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="simple_1q_xzh", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo-basis",
         type=str,
         choices=["auto", "Z", "X", "both", "none"],
-        default="X",
+        default="Z",
         help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")

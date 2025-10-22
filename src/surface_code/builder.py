@@ -151,6 +151,7 @@ class GlobalStimBuilder:
         # Coordinates
         self._emit_qubit_coords(circuit)
 
+
         # Detector index appender (tracks DEM column indices)
         def append_detector(targets: List[GateTarget]) -> int:
             idx = self._detector_count
@@ -163,6 +164,7 @@ class GlobalStimBuilder:
 
         def select_patches(spec: Optional[List[str]]) -> List[str]:
             return all_patches if spec is None else list(spec)
+
 
         # Determine merge participation per patch for bracket adjustments
         rough_merge_patches: Set[str] = set()
@@ -219,6 +221,7 @@ class GlobalStimBuilder:
         }
 
 
+
         # Track remaining merge windows that conflict with seam stabilizer bases
         conflict_counts: Dict[Tuple[str, str], int] = defaultdict(int)
         for op in ops:
@@ -234,14 +237,6 @@ class GlobalStimBuilder:
 
         # Establish initial references: Z then X for active patches
         prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
-        # Z refs
-        circuit.append_operation("TICK")
-        z_meas = self._measure_patch_stabilizers(circuit, all_patches, "Z")
-        prev.z_prev = z_meas
-        # X refs
-        circuit.append_operation("TICK")
-        x_meas = self._measure_patch_stabilizers(circuit, all_patches, "X")
-        prev.x_prev = x_meas
 
         # Active merge trackers and metadata for joint windows
         active_rough: Optional[Tuple[str, str, int]] = None  # (a,b,remaining)
@@ -632,193 +627,140 @@ class GlobalStimBuilder:
             requested = {b.upper() for b in demo_bases if isinstance(b, str)}
             use_combined = requested == {"Z", "X"}
 
+            # Helper to emit a joint correlator (ZZ or XX) for a logical pair
+            def _emit_joint_for_pair(basis: str, q0_name: str, q1_name: str):
+                if basis == "X":
+                    op = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                else:
+                    op = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
+                conj = conjugate_through_circuit(op, qiskit_circuit)
+                mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
+                if not mpp_targets:
+                    return None, None, None
+                circuit.append_operation("MPP", mpp_targets)
+                joint_idx = circuit.num_measurements - 1
+                return joint_idx, axes_map, conj
+
             if use_combined and correlation_pairs:
                 # ---------- Combined final layer: joint ZZ and joint XX within the SAME TICK ----------
                 circuit.append_operation("TICK")
 
                 for (q0_name, q1_name) in correlation_pairs:
-                    # Joint ZZ: build Pauli ZZ on (q0,q1), Heisenberg-conjugate through qc,
-                    # then map to physical targets.
-                    op_zz = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                    conj_zz = conjugate_through_circuit(op_zz, qiskit_circuit)
-                    zz_targets, axes_map_zz = _mpp_targets_from_pauli(conj_zz, layout, idx_to_name)
-                    circuit.append_operation("MPP", zz_targets)
-                    idx_zz = circuit.num_measurements - 1
-                    joint_demo_info[f"{q0_name}_{q1_name}_Z"] = {
-                        "pair": [q0_name, q1_name],
-                        "logical_operator": f"Z_L({q0_name})⊗Z_L({q1_name})",
-                        "physical_realization": conj_zz.to_string(),
-                        "basis": "Z",
-                        "axes": axes_map_zz,
-                        "index": idx_zz,
-                    }
-
-                    # Joint XX: build Pauli XX on (q0,q1), Heisenberg-conjugate through qc,
-                    # then map to physical targets.
-                    op_xx = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                    conj_xx = conjugate_through_circuit(op_xx, qiskit_circuit)
-                    xx_targets, axes_map_xx = _mpp_targets_from_pauli(conj_xx, layout, idx_to_name)
-                    circuit.append_operation("MPP", xx_targets)
-                    idx_xx = circuit.num_measurements - 1
-                    joint_demo_info[f"{q0_name}_{q1_name}_X"] = {
-                        "pair": [q0_name, q1_name],
-                        "logical_operator": f"X_L({q0_name})⊗X_L({q1_name})",
-                        "physical_realization": conj_xx.to_string(),
-                        "basis": "X",
-                        "axes": axes_map_xx,
-                        "index": idx_xx,
-                    }
-
-                # New contract: if both Z and X are requested, emit only joint correlators (ZZ and XX)
-                # If only one basis is requested, emit singles for that basis only
-                emit_singles = len(requested) == 1
-                
-                if emit_singles:
-                    # Optional singles in a *later* TICK (won't disturb joint bits already measured).
-                    circuit.append_operation("TICK")
-                    logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
-                    # Emit singles only for the single requested basis
-                    single_basis = next(iter(requested))
-                    for patch_name in logical_names:
-                        if single_basis == "Z":
-                            init = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
-                        else:
-                            init = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
-                        conj = conjugate_through_circuit(init, qiskit_circuit)
-                        singles_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
-                        if not singles_targets:
-                            continue
-                        circuit.append_operation("MPP", singles_targets)
-                        demo_idx = circuit.num_measurements - 1
-                        key = f"{patch_name}_{single_basis}"
-                        demo_info[key] = {
-                            "basis": single_basis,
-                            "index": demo_idx,
-                            "patch": patch_name,
-                            "logical_operator": conj.to_string(),
-                            "phase": conj.phase_sign(),
+                    # Joint ZZ
+                    idx_zz, axes_map_zz, conj_zz = _emit_joint_for_pair("Z", q0_name, q1_name)
+                    if idx_zz is not None:
+                        joint_demo_info[f"{q0_name}_{q1_name}_Z"] = {
+                            "pair": [q0_name, q1_name],
+                            "logical_operator": f"Z_L({q0_name})⊗Z_L({q1_name})",
+                            "physical_realization": conj_zz.to_string(),
+                            "basis": "Z",
+                            "axes": axes_map_zz,
+                            "index": idx_zz,
                         }
-                    circuit.append_operation("TICK")
-                    # Do not append any further detectors or observables after this point.
+
+                    # Joint XX
+                    idx_xx, axes_map_xx, conj_xx = _emit_joint_for_pair("X", q0_name, q1_name)
+                    if idx_xx is not None:
+                        joint_demo_info[f"{q0_name}_{q1_name}_X"] = {
+                            "pair": [q0_name, q1_name],
+                            "logical_operator": f"X_L({q0_name})⊗X_L({q1_name})",
+                            "physical_realization": conj_xx.to_string(),
+                            "basis": "X",
+                            "axes": axes_map_xx,
+                            "index": idx_xx,
+                        }
+                
+                # No singles or snapshot in combined mode
+                snapshot_info = {"enabled": False}
             else:
-                # ---------- Fallback: per-basis emission (legacy path) ----------
+                # ---------- Single basis mode: per-basis emission with singles and snapshot ----------
                 for basis in demo_bases:
                     # ----- Joint product first for this basis -----
                     circuit.append_operation("TICK")
                     for (q0_name, q1_name) in correlation_pairs:
                         if q0_name not in layout.patches or q1_name not in layout.patches:
                             continue
-                        offs = layout.offsets()
-                        if basis == "X":
-                            op = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                            conj = conjugate_through_circuit(op, qiskit_circuit)
-                            mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
-                            if not mpp_targets:
-                                continue
-                            circuit.append_operation("MPP", mpp_targets)
-                            joint_idx = circuit.num_measurements - 1
-                            joint_key = f"{q0_name}_{q1_name}_{basis}"
-                            joint_demo_info[joint_key] = {
-                                "pair": [q0_name, q1_name],
-                                "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
-                                "physical_realization": conj.to_string(),
-                                "basis": basis,
-                                "axes": axes_map,
-                                "index": joint_idx,
-                            }
-                        else:
-                            # ZZ: build Pauli ZZ, Heisenberg-conjugate through qc, then map to physical targets
-                            op = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                            conj = conjugate_through_circuit(op, qiskit_circuit)
-                            mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
-                            if not mpp_targets:
-                                continue
-                            circuit.append_operation("MPP", mpp_targets)
-                            joint_idx = circuit.num_measurements - 1
-                            joint_key = f"{q0_name}_{q1_name}_{basis}"
-                            joint_demo_info[joint_key] = {
-                                "pair": [q0_name, q1_name],
-                                "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
-                                "physical_realization": conj.to_string(),
-                                "basis": basis,
-                                "axes": axes_map,
-                                "index": joint_idx,
-                            }
+                        idx_joint, axes_map, conj = _emit_joint_for_pair(basis, q0_name, q1_name)
+                        if idx_joint is None:
+                            continue
+                        joint_key = f"{q0_name}_{q1_name}_{basis}"
+                        joint_demo_info[joint_key] = {
+                            "pair": [q0_name, q1_name],
+                            "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
+                            "physical_realization": conj.to_string(),
+                            "basis": basis,
+                            "axes": axes_map,
+                            "index": idx_joint,
+                        }
                     circuit.append_operation("TICK")
 
                     # ----- Then single-qubit demos for this basis -----
-                    # New contract: emit singles only for single-basis requests
-                    # Skip singles if both Z and X are requested (joint-only mode)
-                    emit_singles_for_basis = len(demo_bases) == 1
-                    
-                    if emit_singles_for_basis:
-                        logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
-                        for patch_name in logical_names:
-                            if basis == "Z":
-                                initial_pauli = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
-                            else:
-                                initial_pauli = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
-                            conjugated_pauli = conjugate_through_circuit(initial_pauli, qiskit_circuit)
-                            singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli, layout, idx_to_name)
-                            if not singles_targets:
-                                continue
-                            circuit.append_operation("MPP", singles_targets)
-                            demo_idx = circuit.num_measurements - 1
-                            key = f"{patch_name}_{basis}"
-                            demo_info[key] = {
-                                "basis": basis,
-                                "index": demo_idx,
-                                "patch": patch_name,
-                                "logical_operator": conjugated_pauli.to_string(),
-                                "phase": conjugated_pauli.phase_sign(),
-                            }
-                        circuit.append_operation("TICK")
+                    logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
+                    for patch_name in logical_names:
+                        if basis == "Z":
+                            initial_pauli = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
+                        else:
+                            initial_pauli = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
+                        conjugated_pauli = conjugate_through_circuit(initial_pauli, qiskit_circuit)
+                        singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli, layout, idx_to_name)
+                        if not singles_targets:
+                            continue
+                        circuit.append_operation("MPP", singles_targets)
+                        demo_idx = circuit.num_measurements - 1
+                        key = f"{patch_name}_{basis}"
+                        demo_info[key] = {
+                            "basis": basis,
+                            "index": demo_idx,
+                            "patch": patch_name,
+                            "logical_operator": conjugated_pauli.to_string(),
+                            "phase": conjugated_pauli.phase_sign(),
+                        }
+                    circuit.append_operation("TICK")
 
-        # Final computational-basis snapshot (only if single basis requested)
-        snapshot_info = {"enabled": False}
-        if len(demo_bases) == 1 and qiskit_circuit is not None:
-            snapshot_basis = demo_bases[0].upper()
-            if snapshot_basis in ("Z", "X"):
-                circuit.append_operation("TICK")
-                logical_names = [nm for nm in sorted(bracket_map.keys()) if nm in layout.patches]
-                snapshot_indices = []
-                snapshot_ops = []
-                snapshot_axes = []
-                snapshot_phases = []
-                order_out: List[str] = []
-                
-                for patch_name in logical_names:
-                    # Build final-frame operator for this qubit
-                    qi = name_to_idx.get(patch_name)
-                    if qi is None:
-                        continue
-                    if snapshot_basis == "Z":
-                        init_op = Pauli.single_z(n_logical, qi)
-                    else:
-                        init_op = Pauli.single_x(n_logical, qi)
-                    conj_op = conjugate_through_circuit(init_op, qiskit_circuit)
-                    targets, _ = _mpp_targets_from_pauli(conj_op, layout, idx_to_name)
-                    if targets:
-                        circuit.append_operation("MPP", targets)
-                        idx = circuit.num_measurements - 1
-                        snapshot_indices.append(idx)
-                        # Use unified tracker helper to derive axis and phase
-                        tracker = PauliTracker(n_logical)
-                        info = tracker.final_operator_info(qi, snapshot_basis, qiskit_circuit)
-                        snapshot_ops.append(info["operator_string"]) 
-                        snapshot_axes.append(info["axis"]) 
-                        snapshot_phases.append(int(info["phase"]))
-                        order_out.append(patch_name)
-                
-                snapshot_info = {
-                    "enabled": True,
-                    "basis": snapshot_basis,
-                    "order": order_out,
-                    "indices": snapshot_indices,
-                    "logical_ops": snapshot_ops,
-                    "axes": snapshot_axes,
-                    "phases": snapshot_phases,
-                }
+                # ----- Final computational-basis snapshot (single basis mode only) -----
+                snapshot_info = {"enabled": False}
+                if qiskit_circuit is not None:
+                    snapshot_basis = demo_bases[0].upper()
+                    circuit.append_operation("TICK")
+                    logical_names = [nm for nm in sorted(bracket_map.keys()) if nm in layout.patches]
+                    snapshot_indices = []
+                    snapshot_ops = []
+                    snapshot_axes = []
+                    snapshot_phases = []
+                    order_out: List[str] = []
+                    
+                    for patch_name in logical_names:
+                        # Build final-frame operator for this qubit
+                        qi = name_to_idx.get(patch_name)
+                        if qi is None:
+                            continue
+                        if snapshot_basis == "Z":
+                            init_op = Pauli.single_z(n_logical, qi)
+                        else:
+                            init_op = Pauli.single_x(n_logical, qi)
+                        conj_op = conjugate_through_circuit(init_op, qiskit_circuit)
+                        targets, _ = _mpp_targets_from_pauli(conj_op, layout, idx_to_name)
+                        if targets:
+                            circuit.append_operation("MPP", targets)
+                            idx = circuit.num_measurements - 1
+                            snapshot_indices.append(idx)
+                            # Use unified tracker helper to derive axis and phase
+                            tracker = PauliTracker(n_logical)
+                            info = tracker.final_operator_info(qi, snapshot_basis, qiskit_circuit)
+                            snapshot_ops.append(info["operator_string"]) 
+                            snapshot_axes.append(info["axis"]) 
+                            snapshot_phases.append(int(info["phase"]))
+                            order_out.append(patch_name)
+                    
+                    snapshot_info = {
+                        "enabled": True,
+                        "basis": snapshot_basis,
+                        "order": order_out,
+                        "indices": snapshot_indices,
+                        "logical_ops": snapshot_ops,
+                        "axes": snapshot_axes,
+                        "phases": snapshot_phases,
+                    }
 
         metadata: Dict[str, object] = {
             "merge_windows": merge_windows,

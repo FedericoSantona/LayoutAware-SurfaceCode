@@ -92,8 +92,6 @@ class PatchObject:
                 pos = v.position
             # first hit wins; vertices sharing a qubit will agree on position
             coords.setdefault(logical_index, np.array(pos, dtype=float))
-
-        print("the qubit coordinates are: ", coords)
         
         return coords  # dict: {logical_index: np.array([x, y])}
 

@@ -516,12 +516,6 @@ class GlobalStimBuilder:
         basis_labels: List[str] = []
         observable_index = 0
 
-        def _last_non_none(idxs: List[Optional[int]]) -> Optional[int]:
-            for k in range(len(idxs) - 1, -1, -1):
-                if idxs[k] is not None:
-                    return idxs[k]
-            return None
-
         # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
         for name in bracket_map.keys():
             if name not in layout.patches:
@@ -529,11 +523,10 @@ class GlobalStimBuilder:
             requested_basis = bracket_map[name].upper()
             effective_basis = effective_basis_map.get(name, requested_basis)
 
-            # Choose end index from the most recent compatible stabilizer layer
-            if effective_basis == "Z":
-                end_idx = _last_non_none(list(prev.z_prev.get(name, [])))
-            else:
-                end_idx = _last_non_none(list(prev.x_prev.get(name, [])))
+            patch = layout.patches[name]
+            s = patch.logical_z if effective_basis == "Z" else patch.logical_x
+            positions, _ = layout.globalize_local_pauli_string(name, s)
+            end_idx = mpp_from_positions(circuit, positions, effective_basis)
 
             end_indices[name] = end_idx
             start_idx = start_indices[name]

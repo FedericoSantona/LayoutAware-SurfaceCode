@@ -161,15 +161,15 @@ def compile_circuit_to_surgery(
             # 1. Rough ZZ merge (Control-Ancilla)
             rough_rounds = max(0, int(distance))
             ops.append(Merge("rough", control_name, ancilla_name, rounds=rough_rounds))
-            for _ in range(rough_rounds):
-                ops.append(MeasureRound())
+            #for _ in range(rough_rounds):
+            #    ops.append(MeasureRound())
             ops.append(Split("rough", control_name, ancilla_name))
             ops.append(ParityReadout("ZZ", "ZZ", control_name, ancilla_name))
             # 2. Smooth XX merge (Ancilla-Target)  
             smooth_rounds = max(0, int(distance))
             ops.append(Merge("smooth", ancilla_name, target_name, rounds=smooth_rounds))
-            for _ in range(smooth_rounds):
-                ops.append(MeasureRound())
+            #for _ in range(smooth_rounds):
+            #    ops.append(MeasureRound())
             ops.append(Split("smooth", ancilla_name, target_name))
             ops.append(ParityReadout("XX", "XX", ancilla_name, target_name))
             

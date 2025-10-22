@@ -432,6 +432,13 @@ def main() -> None:
         gb = GlobalStimBuilder(layout)
         circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map, qc)
 
+        if args.verbose:
+            try:
+                print("\n[DEBUG] Stim diagram (detslice-with-ops):")
+                print(circuit.diagram('detslice-with-ops', tick=range(0, circuit.num_ticks)))
+            except Exception:
+                pass
+
         # Sample DEM and decode
         dem = circuit.detector_error_model()
         matcher = pm.Matching.from_detector_error_model(dem)
@@ -723,6 +730,21 @@ def main() -> None:
 
         # Print structured report
         print_header(args, model, dem, metadata, {}, cnot_metadata, stim_rounds, int(args.shots))
+        if args.verbose:
+            dbg = metadata.get("mwpm_debug", {}) or {}
+            seam_wraps = dbg.get("seam_wrap_counts", {})
+            row_wraps = dbg.get("row_wraps", {})
+            if seam_wraps:
+                print("[DEBUG] seam wraps:")
+                for k, v in seam_wraps.items():
+                    print(f"  {k} -> {v}")
+            if row_wraps:
+                print("[DEBUG] Z row wraps:")
+                for q, rows in (row_wraps.get("Z", {}) or {}).items():
+                    print(f"  {q}: {rows}")
+                print("[DEBUG] X row wraps:")
+                for q, rows in (row_wraps.get("X", {}) or {}).items():
+                    print(f"  {q}: {rows}")
         # ---- Clarifying preamble (requested vs emitted; operator semantics) ----
         _print_demo_preamble(metadata, stim_cfg)
     

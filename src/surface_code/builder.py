@@ -152,12 +152,14 @@ class GlobalStimBuilder:
         self._emit_qubit_coords(circuit)
 
 
-        # Detector index appender (tracks DEM column indices)
-        def append_detector(targets: List[GateTarget]) -> int:
-            idx = self._detector_count
-            circuit.append_operation("DETECTOR", targets)
-            self._detector_count += 1
-            return idx
+        # Defer DETECTOR appends to the end for determinism.
+        # Collect edges as absolute measurement index lists (len 1 or 2).
+        deferred_detectors: List[List[int]] = []
+
+        def _defer_detector_from_abs(abs_indices: List[int]) -> int:
+            deferred_detectors.append(list(abs_indices))
+            # Return a stable index even though it's not used downstream.
+            return len(deferred_detectors) - 1
 
         # Resolve patch order and selection helpers
         all_patches: List[str] = list(layout.patches.keys())
@@ -177,47 +179,27 @@ class GlobalStimBuilder:
                 elif k == "smooth":
                     smooth_merge_patches.update({op.a, op.b})
 
-        # Effective bracket basis per patch (ensure commutes with merge windows)
+        # Effective bracket basis per patch: DO NOT flip due to merges.
+        # Observables must commute with initial collapse (|0> by default),
+        # so honor the requested bracket basis (e.g., Z) and capture anchors
+        # only at commuting times via the pending-start logic.
         effective_basis_map: Dict[str, str] = {}
         for name, req_basis in bracket_map.items():
             basis = req_basis.upper()
             if basis not in {"Z", "X"}:
                 raise ValueError("bracket_map values must be 'Z' or 'X'")
-            effective = basis
-            if basis == "Z" and name in smooth_merge_patches:
-                effective = "X"
-            elif basis == "X" and name in rough_merge_patches:
-                effective = "Z"
-            effective_basis_map[name] = effective
+            effective_basis_map[name] = basis
 
         # Bracketing: start logicals per patch (skip if they would anti-commute with merges)
         start_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
 
         circuit.append_operation("TICK")
-        # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
-        for name in bracket_map.keys():
-            if name not in layout.patches:
-                continue  # Skip if patch doesn't exist in layout
-            basis = bracket_map[name].upper()
-            effective = effective_basis_map.get(name, basis)
-            # Skip immediate start if upcoming merges would anti-commute; we'll capture later.
-            if (effective == "Z" and name in smooth_merge_patches) or (
-                effective == "X" and name in rough_merge_patches
-            ):
-                continue
-            patch = layout.patches[name]
-            s = patch.logical_z if effective == "Z" else patch.logical_x
-            # Convert local string to global positions with same basis
-            offs = layout.offsets()[name]
-            positions = [offs + i for i, c in enumerate(s) if c == effective]
-            start_indices[name] = mpp_from_positions(circuit, positions, effective)
-
-        # Pending starts to be captured later once compatible measurements occur
+        # Do NOT emit a start logical MPP. Capture starts from the first
+        # compatible stabilizer layer measured later in the schedule.
         pending_start: Dict[str, str] = {
             name: effective_basis_map[name]
             for name in effective_basis_map.keys()
-            if start_indices.get(name) is None
         }
 
 
@@ -234,11 +216,77 @@ class GlobalStimBuilder:
                     conflict_counts[(op.a, "Z")] += 1
                     conflict_counts[(op.b, "Z")] += 1
 
+        # Helper: last non-None index in a list
+        def _last_non_none(idxs: List[Optional[int]]) -> Optional[int]:
+            for k in range(len(idxs) - 1, -1, -1):
+                if idxs[k] is not None:
+                    return idxs[k]
+            return None
+
+        # Track first/last measured indices per stabilizer (segment tracking)
+        seg_first: Dict[Tuple[str, str], List[Optional[int]]] = {}  # key=(patch,basis)
+        seg_last: Dict[Tuple[str, str], List[Optional[int]]] = {}
+        # Track whether each stabilizer row had any temporal edge within the current open segment
+        seg_had_edge: Dict[Tuple[str, str], List[bool]] = {}
+        # Row wrap summaries for diagnostics
+        z_row_wraps: Dict[str, List[int]] = {}
+        x_row_wraps: Dict[str, List[int]] = {}
+
+        def _ensure_seg_lists(patch_name: str, basis: str, length: int):
+            key = (patch_name, basis)
+            if key not in seg_first:
+                seg_first[key] = [None] * length
+                seg_last[key] = [None] * length
+                seg_had_edge[key] = [False] * length
+            else:
+                # grow if needed
+                if len(seg_first[key]) < length:
+                    seg_first[key].extend([None] * (length - len(seg_first[key])))
+                    seg_last[key].extend([None] * (length - len(seg_last[key])))
+                    seg_had_edge[key].extend([False] * (length - len(seg_had_edge[key])))
+
+        def _wrap_close_segment(patch_name: str, basis: str, stab_indices: Optional[Set[int]] = None):
+            """Add wrap detectors first⊕last for current segment(s), then reset them.
+            If stab_indices is None, apply to all stabilizers of the basis for the patch.
+            """
+            key = (patch_name, basis)
+            first_list = seg_first.get(key, [])
+            last_list = seg_last.get(key, [])
+            had_edge_list = seg_had_edge.get(key, [])
+            if not first_list:
+                return
+            rng = range(len(first_list)) if stab_indices is None else stab_indices
+            for si in rng:
+                if si is None or si >= len(first_list):
+                    continue
+                a = first_list[si]
+                b = last_list[si] if si < len(last_list) else None
+                # Only enforce a wrap if this row actually had any temporal edge within the segment
+                had_edge = False
+                if si < len(had_edge_list):
+                    had_edge = bool(had_edge_list[si])
+                if had_edge:
+                    if a is not None and b is not None and a != b:
+                        _defer_detector_from_abs([a, b])
+                        if basis == "Z":
+                            z_row_wraps.setdefault(patch_name, []).append(si)
+                        else:
+                            x_row_wraps.setdefault(patch_name, []).append(si)
+                # reset segment for these stabilizers so a new segment can start after the gap
+                if si < len(first_list):
+                    first_list[si] = None
+                if si < len(last_list):
+                    last_list[si] = None
+                if si < len(had_edge_list):
+                    had_edge_list[si] = False
+
 
         # Establish initial references: Z then X for active patches
         prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
         # Cache the last joint indices per merge window and accumulate byproduct metadata
         last_window_joint: Dict[Tuple[str, str, str], List[int]] = {}
+        # Track the first joint indices per merge window for wrap-around closure
+        first_window_joint: Dict[Tuple[str, str, str], List[int]] = {}
         byproducts: List[Dict[str, object]] = []
 
         # Active merge trackers and metadata for joint windows
@@ -252,6 +300,12 @@ class GlobalStimBuilder:
         cnot_operations: List[Dict[str, object]] = []
         current_cnot: Optional[Dict[str, object]] = None
 
+        # Track whether we've added a boundary anchor at the start of a window
+        seam_boundary_started: Set[Tuple[str, str, str]] = set()
+        # Track seam round counts and wraps for diagnostics and gating
+        seam_round_counts: Dict[Tuple[str, str, str], int] = {}
+        seam_wrap_counts: Dict[Tuple[str, str, str], int] = {}
+
         def _begin_window(kind: str, a: str, b: str, rounds: int) -> None:
             nonlocal current_window, window_id
             current_window = {
@@ -263,6 +317,7 @@ class GlobalStimBuilder:
                 "rounds": int(rounds),
             }
             window_id += 1
+            seam_round_counts[(kind, a, b)] = 0
 
         def _end_window() -> None:
             nonlocal current_window
@@ -284,19 +339,55 @@ class GlobalStimBuilder:
                 if cfg.p_x_error:
                     circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
                 z_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.z_prev.items()}
+
+                # Pending seam detector emission (emit after patch Z MPPs)
+                pending_rough_key = None
+                pending_rough_prev = None
+                pending_rough_curr = None
+
                 if measure_z:
+                    # During a SMOOTH (XX) window, Z stabilizers that touch the seam anti-commute
+                    # with the joint XX checks. Skip them (reuse previous indices) to keep DEM deterministic.
+                    skip_z: Dict[str, Set[int]] = {}
+                    if active_smooth is not None:
+                        seam_a, seam_b, _ = active_smooth
+                        pairs = self.layout.seams.get(("smooth", seam_a, seam_b), [])
+                        if pairs:
+                            skip_z[seam_a] = {ia for ia, _ in pairs}
+                            skip_z[seam_b] = {ib for _, ib in pairs}
                     meas_z_curr = self._measure_patch_stabilizers(
                         circuit,
                         names,
                         "Z",
+                        skip_indices=skip_z if skip_z else None,
+                        prev_map=prev.z_prev,
                     )
                     for name in names:
-                        add_temporal_detectors_with_index(
-                            circuit,
-                            prev.z_prev.get(name, []),
-                            meas_z_curr.get(name, []),
-                            append_detector,
-                        )
+                        # Segment tracking: remember first and last measured indices per stabilizer
+                        z_list = list(meas_z_curr.get(name, []))
+                        _ensure_seg_lists(name, "Z", len(z_list))
+                        keyZ = (name, "Z")
+                        for si, idx_abs in enumerate(z_list):
+                            if idx_abs is not None:
+                                if seg_first[keyZ][si] is None:
+                                    seg_first[keyZ][si] = idx_abs
+                                seg_last[keyZ][si] = idx_abs
+                                seg_had_edge[keyZ][si] = False # Reset edge flag for new segment
+                        # Suppress Z temporal detectors while this patch is in an active SMOOTH (XX) merge window
+                        emit_z_dets = not (active_smooth is not None and name in {active_smooth[0], active_smooth[1]})
+                        if emit_z_dets:
+                            # Record temporal detector edges (absolute measurement indices)
+                            p_list = list(prev.z_prev.get(name, []))
+                            c_list = list(meas_z_curr.get(name, []))
+                            from itertools import zip_longest as _ziplg
+                            for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
+                                if a is None or b is None or a == b:
+                                    continue
+                                _defer_detector_from_abs([a, b])
+                                keyZ_h = (name, "Z")
+                                _ensure_seg_lists(name, "Z", max(len(p_list), len(c_list)))
+                                if si < len(seg_had_edge[keyZ_h]):
+                                    seg_had_edge[keyZ_h][si] = True
                         z_curr[name] = list(meas_z_curr.get(name, []))
                         if (
                             name in pending_start
@@ -317,19 +408,30 @@ class GlobalStimBuilder:
                         if name not in z_curr:
                             z_curr[name] = list(prev.z_prev.get(name, []))
 
+                # Rough seam: only record for later emission (after patch Z MPPs)
                 if measure_z and active_rough is not None:
-                    # Measure rough seam ZZ checks when the merge is active.
                     seam_a, seam_b, _ = active_rough
-                    key = ("rough", seam_a, seam_b)
-                    prev_joint = prev.joint_prev.get(key, [])
-                    joint_curr = self._measure_joint_checks(circuit, "rough", seam_a, seam_b)
-                    add_temporal_detectors_with_index(
-                        circuit,
-                        prev_joint,
-                        joint_curr,
-                        append_detector,
-                    )
-                    prev.joint_prev[key] = list(joint_curr)
+                    pending_rough_key = ("rough", seam_a, seam_b)
+                    pending_rough_prev = list(prev.joint_prev.get(pending_rough_key, []))
+                    pending_rough_curr = self._measure_joint_checks(circuit, "rough", seam_a, seam_b)
+                    if pending_rough_curr:
+                        seam_round_counts[pending_rough_key] = seam_round_counts.get(pending_rough_key, 0) + 1
+                    # Capture the first joint round indices for wrap-around closure
+                    if pending_rough_prev is None or not pending_rough_prev or all(x is None for x in pending_rough_prev):
+                        if pending_rough_curr:
+                            first_window_joint[pending_rough_key] = list(pending_rough_curr)
+
+                # Emit seam temporal detectors *after* all Z MPPs of this half
+                if pending_rough_key is not None and pending_rough_curr is not None:
+                    if seam_round_counts.get(pending_rough_key, 0) >= 2:
+                        p_list = list(pending_rough_prev if pending_rough_prev is not None else [])
+                        c_list = list(pending_rough_curr)
+                        from itertools import zip_longest as _ziplg
+                        for a, b in _ziplg(p_list, c_list, fillvalue=None):
+                            if a is None or b is None or a == b:
+                                continue
+                            _defer_detector_from_abs([a, b])
+                    prev.joint_prev[pending_rough_key] = list(pending_rough_curr)
 
                 prev.z_prev = z_curr
 
@@ -338,19 +440,51 @@ class GlobalStimBuilder:
                 if cfg.p_z_error:
                     circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
                 x_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.x_prev.items()}
+
+                # Pending seam detector emission (emit after patch X MPPs)
+                pending_smooth_key = None
+                pending_smooth_prev = None
+                pending_smooth_curr = None
+
                 if measure_x:
+                    # During a ROUGH (ZZ) window, X stabilizers that touch the seam anti-commute
+                    # with the joint ZZ checks. Skip them (reuse previous indices) to keep DEM deterministic.
+                    skip_x: Dict[str, Set[int]] = {}
+                    if active_rough is not None:
+                        seam_a, seam_b, _ = active_rough
+                        pairs = self.layout.seams.get(("rough", seam_a, seam_b), [])
+                        if pairs:
+                            skip_x[seam_a] = {ia for ia, _ in pairs}
+                            skip_x[seam_b] = {ib for _, ib in pairs}
                     meas_x_curr = self._measure_patch_stabilizers(
                         circuit,
                         names,
                         "X",
+                        skip_indices=skip_x if skip_x else None,
+                        prev_map=prev.x_prev,
                     )
                     for name in names:
-                        add_temporal_detectors_with_index(
-                            circuit,
-                            prev.x_prev.get(name, []),
-                            meas_x_curr.get(name, []),
-                            append_detector,
-                        )
+                        # Segment tracking for X basis
+                        x_list = list(meas_x_curr.get(name, []))
+                        _ensure_seg_lists(name, "X", len(x_list))
+                        keyX = (name, "X")
+                        for si, idx_abs in enumerate(x_list):
+                            if idx_abs is not None:
+                                if seg_first[keyX][si] is None:
+                                    seg_first[keyX][si] = idx_abs
+                                seg_last[keyX][si] = idx_abs
+                                seg_had_edge[keyX][si] = False # Reset edge flag for new segment
+                        # Suppress X temporal detectors while this patch is in an active ROUGH (ZZ) merge window
+                        emit_x_dets = not (active_rough is not None and name in {active_rough[0], active_rough[1]})
+                        if emit_x_dets:
+                            p_list = list(prev.x_prev.get(name, []))
+                            c_list = list(meas_x_curr.get(name, []))
+                            from itertools import zip_longest as _ziplg
+                            for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
+                                if a is None or b is None or a == b:
+                                    continue
+                                _defer_detector_from_abs([a, b])
+                                seg_had_edge[keyX][si] = True # Mark edge if temporal detector emitted
                         x_curr[name] = list(meas_x_curr.get(name, []))
                         if (
                             name in pending_start
@@ -371,19 +505,30 @@ class GlobalStimBuilder:
                         if name not in x_curr:
                             x_curr[name] = list(prev.x_prev.get(name, []))
 
+                # Smooth seam: only record for later emission (after patch X MPPs)
                 if measure_x and active_smooth is not None:
-                    # Measure smooth seam XX checks when the merge is active.
                     seam_a, seam_b, _ = active_smooth
-                    key = ("smooth", seam_a, seam_b)
-                    prev_joint = prev.joint_prev.get(key, [])
-                    joint_curr = self._measure_joint_checks(circuit, "smooth", seam_a, seam_b)
-                    add_temporal_detectors_with_index(
-                        circuit,
-                        prev_joint,
-                        joint_curr,
-                        append_detector,
-                    )
-                    prev.joint_prev[key] = list(joint_curr)
+                    pending_smooth_key = ("smooth", seam_a, seam_b)
+                    pending_smooth_prev = list(prev.joint_prev.get(pending_smooth_key, []))
+                    pending_smooth_curr = self._measure_joint_checks(circuit, "smooth", seam_a, seam_b)
+                    if pending_smooth_curr:
+                        seam_round_counts[pending_smooth_key] = seam_round_counts.get(pending_smooth_key, 0) + 1
+                    # Capture the first joint round indices for wrap-around closure
+                    if pending_smooth_prev is None or not pending_smooth_prev or all(x is None for x in pending_smooth_prev):
+                        if pending_smooth_curr:
+                            first_window_joint[pending_smooth_key] = list(pending_smooth_curr)
+
+                # Emit seam temporal detectors *after* all X MPPs of this half
+                if pending_smooth_key is not None and pending_smooth_curr is not None:
+                    if seam_round_counts.get(pending_smooth_key, 0) >= 2:
+                        p_list = list(pending_smooth_prev if pending_smooth_prev is not None else [])
+                        c_list = list(pending_smooth_curr)
+                        from itertools import zip_longest as _ziplg
+                        for a, b in _ziplg(p_list, c_list, fillvalue=None):
+                            if a is None or b is None or a == b:
+                                continue
+                            _defer_detector_from_abs([a, b])
+                    prev.joint_prev[pending_smooth_key] = list(pending_smooth_curr)
 
                 prev.x_prev = x_curr
 
@@ -413,8 +558,15 @@ class GlobalStimBuilder:
                     seam_pairs = layout.seams.get(("rough", op.a, op.b), [])
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
-                    self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
-                    self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
+                    # Seal X-basis observables on involved patches if still unset
+                    for pname in (op.a, op.b):
+                        if effective_basis_map.get(pname) == "X" and end_indices.get(pname) is None:
+                            end_indices[pname] = _last_non_none(list(prev.x_prev.get(pname, [])))
+                    mask_a = self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
+                    mask_b = self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
+                    # Close current X segments touching the seam before the gap
+                    _wrap_close_segment(op.a, "X", mask_a)
+                    _wrap_close_segment(op.b, "X", mask_b)
                     active_rough = (op.a, op.b, int(op.rounds))
                 else:
                     if active_smooth is not None:
@@ -422,8 +574,14 @@ class GlobalStimBuilder:
                     seam_pairs = layout.seams.get(("smooth", op.a, op.b), [])
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
-                    self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
-                    self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
+                    # Seal Z-basis observables on involved patches if still unset
+                    for pname in (op.a, op.b):
+                        if effective_basis_map.get(pname) == "Z" and end_indices.get(pname) is None:
+                            end_indices[pname] = _last_non_none(list(prev.z_prev.get(pname, [])))
+                    mask_a = self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
+                    mask_b = self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
+                    _wrap_close_segment(op.a, "Z", mask_a)
+                    _wrap_close_segment(op.b, "Z", mask_b)
                     active_smooth = (op.a, op.b, int(op.rounds))
                 # Clear any lingering joint history for this seam
                 prev.joint_prev[(k, op.a, op.b)] = []
@@ -442,12 +600,30 @@ class GlobalStimBuilder:
                 # Decrement remaining conflicting merges for involved patches
                 for patch_name in (op.a, op.b):
                     basis = "X" if k == "rough" else "Z"
-                    key = (patch_name, basis)
-                    if conflict_counts.get(key, 0) > 0:
-                        conflict_counts[key] -= 1
+                    key2 = (patch_name, basis)
+                    if conflict_counts.get(key2, 0) > 0:
+                        conflict_counts[key2] -= 1
                 # Snapshot the last measured joint indices for this window before clearing
                 last_window_joint[(k, op.a, op.b)] = list(prev.joint_prev.get((k, op.a, op.b), []))
+                # Wrap-close the seam chain by adding a detector between the first and last joint measurements for each pair
+                key = (k, op.a, op.b)
+                first_list = list(first_window_joint.get(key, []))
+                last_list = list(last_window_joint.get(key, []))
+                # Only emit seam wrap if we had at least 2 measured rounds
+                if seam_round_counts.get(key, 0) >= 2:
+                    from itertools import zip_longest as _ziplg
+                    wrap_added = 0
+                    for a_idx, b_idx in _ziplg(first_list, last_list, fillvalue=None):
+                        if a_idx is None or b_idx is None or a_idx == b_idx:
+                            continue
+                        _defer_detector_from_abs([a_idx, b_idx])
+                        wrap_added += 1
+                    if wrap_added:
+                        seam_wrap_counts[key] = seam_wrap_counts.get(key, 0) + wrap_added
+                # Clear stored endpoints for this window
+                first_window_joint.pop(key, None)
                 prev.joint_prev[(k, op.a, op.b)] = []
+                seam_round_counts.pop(key, None)
 
             elif isinstance(op, ParityReadout):
                 # Deterministic DEM handling for byproduct extraction.
@@ -508,6 +684,11 @@ class GlobalStimBuilder:
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
 
+        # Close any still-open stabilizer segments (no later conflicting gaps)
+        for pname in layout.patches.keys():
+            _wrap_close_segment(pname, "Z", None)
+            _wrap_close_segment(pname, "X", None)
+
         # Emit boundary anchors after all merges complete
         # Bracketing: end logicals per patch and observable includes
         # IMPORTANT: do not emit new MPPs here; reuse the last compatible
@@ -515,6 +696,16 @@ class GlobalStimBuilder:
         observable_pairs: List[Tuple[int, int]] = []
         basis_labels: List[str] = []
         observable_index = 0
+        deferred_observables: List[Tuple[Optional[int], Optional[int], int]] = []
+
+        # At the very end, fallback-seal any observables that didn't conflict
+        for pname, basis in effective_basis_map.items():
+            if pname not in end_indices or end_indices[pname] is not None:
+                continue
+            if basis == "Z":
+                end_indices[pname] = _last_non_none(list(prev.z_prev.get(pname, [])))
+            else:
+                end_indices[pname] = _last_non_none(list(prev.x_prev.get(pname, [])))
 
         # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
         for name in bracket_map.keys():
@@ -523,12 +714,14 @@ class GlobalStimBuilder:
             requested_basis = bracket_map[name].upper()
             effective_basis = effective_basis_map.get(name, requested_basis)
 
-            patch = layout.patches[name]
-            s = patch.logical_z if effective_basis == "Z" else patch.logical_x
-            positions, _ = layout.globalize_local_pauli_string(name, s)
-            end_idx = mpp_from_positions(circuit, positions, effective_basis)
-
-            end_indices[name] = end_idx
+            # Prefer a pre-sealed end (set when a conflicting window began)
+            end_idx = end_indices.get(name)
+            if end_idx is None:
+                if effective_basis == "Z":
+                    end_idx = _last_non_none(list(prev.z_prev.get(name, [])))
+                else:
+                    end_idx = _last_non_none(list(prev.x_prev.get(name, [])))
+                end_indices[name] = end_idx
             start_idx = start_indices[name]
 
             targets: List[GateTarget] = []
@@ -538,7 +731,8 @@ class GlobalStimBuilder:
                 targets.append(rec_from_abs(circuit, end_idx))
 
             if targets:
-                circuit.append_operation("OBSERVABLE_INCLUDE", targets, observable_index)
+                # Defer OBSERVABLE_INCLUDE to the very end to avoid later anti-commuting MPPs
+                deferred_observables.append((start_idx, end_idx, observable_index))
                 observable_pairs.append((start_idx, end_idx))
                 basis_labels.append(effective_basis)
                 observable_index += 1
@@ -736,6 +930,28 @@ class GlobalStimBuilder:
                         "phases": snapshot_phases,
                     }
 
+        # Append all deferred detectors at the very end using final measurement count
+        if deferred_detectors:
+            final_m = circuit.num_measurements
+            for abs_list in deferred_detectors:
+                targets: List[GateTarget] = []
+                for k, abs_idx in enumerate(abs_list):
+                    # rec offsets are relative to current #measurements
+                    targets.append(stim.target_rec(abs_idx - final_m))
+                circuit.append_operation("DETECTOR", targets)
+
+        # Append all deferred observables at the very end using final measurement count
+        if deferred_observables:
+            final_m2 = circuit.num_measurements
+            for s_idx, e_idx, obs_k in deferred_observables:
+                obs_targets: List[GateTarget] = []
+                if s_idx is not None:
+                    obs_targets.append(stim.target_rec(s_idx - final_m2))
+                if e_idx is not None:
+                    obs_targets.append(stim.target_rec(e_idx - final_m2))
+                if obs_targets:
+                    circuit.append_operation("OBSERVABLE_INCLUDE", obs_targets, obs_k)
+
         metadata: Dict[str, object] = {
             "merge_windows": merge_windows,
             "observable_basis": tuple(basis_labels),
@@ -744,6 +960,13 @@ class GlobalStimBuilder:
             "cnot_operations": cnot_operations,
             "final_snapshot": snapshot_info,
             "byproducts": byproducts,
+            "mwpm_debug": {
+                "seam_wrap_counts": {str(k): v for k, v in seam_wrap_counts.items()},
+                "row_wraps": {
+                    "Z": {k: list(vs) for k, vs in z_row_wraps.items()},
+                    "X": {k: list(vs) for k, vs in x_row_wraps.items()},
+                },
+            },
         }
 
         return circuit, observable_pairs, metadata

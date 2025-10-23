@@ -16,8 +16,178 @@ import json
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple, Type
 
+# Add the project root to Python path to enable src imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.surface_code.builder import augment_dem_with_boundary_anchors
+
 import numpy as np
 import pymatching as pm
+import stim
+
+# --------------------------
+# MWPM / DEM debug utilities
+# --------------------------
+from collections import defaultdict
+import re
+
+# Parse 'error(...) D# D# L#' lines from a stim.DetectorErrorModel
+_D_TOKEN_RE = re.compile(r"D(\d+)")
+_L_TOKEN_RE = re.compile(r"L(\d+)")
+
+def _parse_dem_errors(dem):
+    """
+    Return a list of elementary faults as dicts:
+        {"detectors":[int,...], "observables":[int,...], "raw": line}
+    """
+    out = []
+    for line in str(dem).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if not s.lower().startswith("error"):
+            continue
+        det_ids = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
+        obs_ids = [int(m.group(1)) for m in _L_TOKEN_RE.finditer(s)]
+        out.append({"detectors": det_ids, "observables": obs_ids, "raw": s})
+    return out
+
+def _build_components_from_dem(dem):
+    """
+    Build detector connected components from the DEM.
+    Link detectors that co-appear in any elementary fault.
+    Also mark if a component 'has boundary' (∃ fault with an odd number of
+    detectors from that component, usually a single D# flip).
+    """
+    n = dem.num_detectors
+    errors = _parse_dem_errors(dem)
+
+    # Union–Find
+    parent = list(range(n))
+    rank = [0] * n
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            parent[ra] = rb
+        elif rank[ra] > rank[rb]:
+            parent[rb] = ra
+        else:
+            parent[rb] = ra
+            rank[ra] += 1
+
+    # Link detectors that appear together in an error
+    for err in errors:
+        ds = err["detectors"]
+        for i in range(len(ds) - 1):
+            union(ds[i], ds[i + 1])
+
+    # Group by root
+    comps_dict = defaultdict(list)
+    for d in range(n):
+        root = find(d)
+        comps_dict[root].append(d)
+    comps = [sorted(vs) for vs in comps_dict.values()]
+
+    # Boundary flag per component: odd intersection with some fault
+    idx_to_comp = {}
+    for ci, comp in enumerate(comps):
+        for d in comp:
+            idx_to_comp[d] = ci
+
+    comp_has_boundary = [False] * len(comps)
+    for err in errors:
+        touched = defaultdict(int)
+        for d in err["detectors"]:
+            ci = idx_to_comp.get(d)
+            if ci is not None:
+                touched[ci] ^= 1
+        for ci, parity in touched.items():
+            if parity & 1:
+                comp_has_boundary[ci] = True
+
+    return comps, comp_has_boundary, errors
+
+def _report_boundaryless_components(dem):
+    comps, comp_has_boundary, _ = _build_components_from_dem(dem)
+    n = len(comps)
+    nob = sum(1 for b in comp_has_boundary if not b)
+    print(f"[DEM-CHECK] components={n}, boundaryless={nob}")
+    if nob:
+        for i, comp in enumerate(comps):
+            if comp_has_boundary[i]:
+                continue
+            head = comp[:24]
+            tail = comp[-8:] if len(comp) > 32 else []
+            print(f"  [COMP#{i}] size={len(comp)} head={head}{' tail='+str(tail) if tail else ''}")
+
+def _scan_boundaryless_odd_shot(dem, det_samp, *, max_scan=512):
+    if det_samp is None or dem.num_detectors == 0:
+        return
+    comps, comp_has_boundary, _ = _build_components_from_dem(dem)
+    comp_sets = [set(c) for c in comps]
+    nscan = min(det_samp.shape[0], int(max_scan))
+    for s in range(nscan):
+        syn = det_samp[s].astype(np.uint8)
+        for ci, comp in enumerate(comps):
+            if not comp or comp_has_boundary[ci]:
+                continue
+            # odd parity in a boundaryless component → infeasible
+            parity = int(np.bitwise_xor.reduce(syn[comp]))
+            if parity & 1:
+                print(f"[DEM-CHECK] offending shot={s} boundaryless COMP#{ci} size={len(comp)} sample={comp[:16]}")
+                print("  detslice filter:", "[" + ", ".join(f"'D{d}'" for d in comp[:12]) + "]")
+                # quick arity histogram for faults touching this comp
+                errs = _parse_dem_errors(dem)
+                hist = {}
+                for e in errs:
+                    k = sum(1 for d in e['detectors'] if d in comp_sets[ci])
+                    if k:
+                        hist[k] = hist.get(k, 0) + 1
+                print("  error-arity histogram:", dict(sorted(hist.items())))
+                # show a few example error lines touching the component (odd and even)
+                odd_examples = []
+                even_examples = []
+                for e in errs:
+                    k = sum(1 for d in e['detectors'] if d in comp_sets[ci])
+                    if k == 0:
+                        continue
+                    (odd_examples if (k % 2 == 1) else even_examples).append(e["raw"])
+                    if len(odd_examples) >= 4 and len(even_examples) >= 4:
+                        break
+                if odd_examples:
+                    print("  example odd-intersection errors:")
+                    for ln in odd_examples[:4]:
+                        print("    ", ln)
+                if even_examples:
+                    print("  example even-intersection errors:")
+                    for ln in even_examples[:4]:
+                        print("    ", ln)
+                return
+
+def harden_dem_add_boundaries(dem, *, epsilon=1e-12):
+     """
+     For each detector connected component that currently has no boundary
+     (no fault with an odd intersection), append an infinitesimal-probability
+     single-detector error to create a boundary hook. This guarantees MWPM
+     feasibility without materially changing statistics.
+     """
+     comps, comp_has_boundary, _ = _build_components_from_dem(dem)
+     added = 0
+     for ci, comp in enumerate(comps):
+         if comp and not comp_has_boundary[ci]:
+             # Hook the first detector in this component
+             d0 = comp[0]
+             dem.append("error", epsilon, [stim.DemTarget.detector(d0)])
+             added += 1
+     return added
 if __name__ == "__main__":
     REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if REPO_ROOT not in sys.path:
@@ -271,7 +441,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Custom correlation pairs in format 'q0,q1;q2,q3' for two-qubit correlation analysis.",
     )
-    
     return parser
 
 
@@ -441,11 +610,95 @@ def main() -> None:
 
         # Sample DEM and decode
         dem = circuit.detector_error_model()
-        matcher = pm.Matching.from_detector_error_model(dem)
+
+        # Harden DEM: add an infinitesimal boundary hook to each boundaryless component
+        # (guarantees MWPM feasibility without changing statistics materially)
+        # -- DEM hardening: inject boundary anchors so every connected component has a boundary
+        try:
+            ba = (metadata.get("boundary_anchors", {}) or {})
+            anchor_ids = list(ba.get("detector_ids", []) or [])
+            eps = float(ba.get("epsilon", 1e-12))
+        except Exception:
+            anchor_ids = []
+            eps = 1e-12
+
+        if anchor_ids and eps > 0:
+            dem = augment_dem_with_boundary_anchors(dem, anchor_ids, eps)
+            if args.verbose:
+                print(f"[DEM-CHECK] added {len(anchor_ids)} boundary anchors (eps={eps:g})")
+        else:
+            if args.verbose:
+                print("[DEM-CHECK] no boundary anchors available to inject")
+
+        # Choose decoder adaptively with fallback: try pairwise MWPM first, then hypergraph
         dem_sampler = dem.compile_sampler(seed=int(args.seed))
         det_samp, obs_samp, _ = dem_sampler.sample(int(args.shots))
         obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((int(args.shots), len(observable_pairs)), dtype=np.uint8)
-        preds = matcher.decode_batch(det_samp.astype(bool))
+
+        use_hyper = False
+        try:
+            # First try pairwise matching
+            matcher = pm.Matching.from_detector_error_model(dem)
+            preds = matcher.decode_batch(det_samp.astype(bool))
+        except Exception as exc_mwpm:
+            if args.verbose:
+                print("[DECODE] Pairwise MWPM failed; falling back to HypergraphMatching:", repr(exc_mwpm))
+            try:
+                matcher = pm.HypergraphMatching.from_detector_error_model(dem)
+                preds = matcher.decode_batch(det_samp.astype(bool))
+                use_hyper = True
+                if args.verbose:
+                    print("[DECODE] HypergraphMatching succeeded.")
+            except Exception as exc_hg:
+                # Keep existing diagnostics only if both decoders fail
+                print("\n[ERROR] MWPM decode failed; printing mwpm_debug summary:")
+                dbg = metadata.get("mwpm_debug", {}) or {}
+                seam_wraps = dbg.get("seam_wrap_counts", {})
+                row_wraps = dbg.get("row_wraps", {})
+                deg_viol = dbg.get("degree_violations", [])
+                odd_details = dbg.get("odd_degree_details", {}) or {}
+                edge_records_count = dbg.get("edge_records_count", 0)
+                print("[DEBUG] seam wraps:")
+                for k, v in seam_wraps.items():
+                    print(f"  {k} -> {v}")
+                print("[DEBUG] Z row wraps:")
+                for q, rows in (row_wraps.get("Z", {}) or {}).items():
+                    print(f"  {q}: {rows}")
+                print("[DEBUG] X row wraps:")
+                for q, rows in (row_wraps.get("X", {}) or {}).items():
+                    print(f"  {q}: {rows}")
+                print(f"[DEBUG] degree violations (abs meas idx with degree!=2): {deg_viol[:200]}")
+                # Provenance summary for odd-degree indices
+                if deg_viol:
+                    from collections import Counter
+                    tag_counter = Counter()
+                    for idx in deg_viol[:200]:
+                        for rec in odd_details.get(idx, [])[:8]:
+                            tag_counter.update([str(rec.get('tag'))])
+                    print(f"[DEBUG] odd-degree provenance tags (top): {tag_counter.most_common(12)}")
+                    shown = 0
+                    for idx in deg_viol[:50]:
+                        recs = odd_details.get(idx, [])
+                        if not recs:
+                            continue
+                        print(f"  [ODD] idx={idx}, examples:")
+                        for rec in recs[:3]:
+                            print(f"    tag={rec.get('tag')}, neighbor={rec.get('neighbor')}, ctx={rec.get('context')}")
+                        shown += 1
+                        if shown >= 6:
+                            break
+                    print(f"[DEBUG] total edge records captured: {edge_records_count}")
+
+                # DEM component-level diagnostics and odd-parity boundaryless scan
+                try:
+                    print("\n[DEM-CHECK] analyzing DEM components & boundaries...")
+                    _report_boundaryless_components(dem)
+                    _scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, int(args.shots)))
+                except Exception as _exc:
+                    print(f"[DEM-CHECK] diagnostics failed: {_exc}")
+
+                print("[DECODE] HypergraphMatching also failed:", repr(exc_hg))
+                raise
         preds = np.asarray(preds, dtype=np.uint8)
         if preds.ndim == 1:
             preds = preds.reshape(-1, 1)

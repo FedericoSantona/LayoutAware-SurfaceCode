@@ -17,7 +17,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 import stim
 
 from .layout import Layout
-from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
+from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, TerminatePatch
 from .configs import PhenomenologicalStimConfig
 from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index, _mpp_targets_from_pauli
 from .pauli import Pauli, conjugate_through_circuit, PauliTracker
@@ -182,9 +182,14 @@ class GlobalStimBuilder:
 
         # Resolve patch order and selection helpers
         all_patches: List[str] = list(layout.patches.keys())
+        
+        # Track patches terminated by mid-circuit measurements
+        terminated_patches: Set[str] = set()
 
         def select_patches(spec: Optional[List[str]]) -> List[str]:
-            return all_patches if spec is None else list(spec)
+            # Filter out terminated patches
+            active = [p for p in all_patches if p not in terminated_patches]
+            return active if spec is None else [p for p in spec if p not in terminated_patches]
 
 
         # Determine merge participation per patch for bracket adjustments
@@ -817,6 +822,38 @@ class GlobalStimBuilder:
                 
                 # NOTE: No circuit operations are emitted here to keep the DEM deterministic.
 
+            elif isinstance(op, TerminatePatch):
+                # Handle mid-circuit measurement: close segments and mark as terminated
+                patch_name = op.patch_id
+                if patch_name not in layout.patches or patch_name in terminated_patches:
+                    continue
+                
+                # Track detector count before closing segments
+                num_detectors_before = len(deferred_detectors)
+                
+                # Close stabilizer segments for this patch - this creates wrap detectors
+                _wrap_close_segment(patch_name, "Z", None)
+                _wrap_close_segment(patch_name, "X", None)
+                
+                # Add boundary anchors for the wrap detectors that were just created
+                if force_boundaries:
+                    num_detectors_after = len(deferred_detectors)
+                    # All detectors added between before and after are wrap detectors from this termination
+                    for det_idx in range(num_detectors_before, num_detectors_after):
+                        anchor_detector_ids.append(det_idx)
+                        boundary_counts_z[patch_name] = boundary_counts_z.get(patch_name, 0) + 1
+                
+                # Seal the end observable for this patch
+                if patch_name in bracket_map:
+                    basis = effective_basis_map.get(patch_name, bracket_map[patch_name]).upper()
+                    if basis == "Z":
+                        end_indices[patch_name] = _last_non_none(list(prev.z_prev.get(patch_name, [])))
+                    else:
+                        end_indices[patch_name] = _last_non_none(list(prev.x_prev.get(patch_name, [])))
+                
+                # Mark as terminated - it won't be measured in future rounds
+                terminated_patches.add(patch_name)
+
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
 
@@ -864,10 +901,10 @@ class GlobalStimBuilder:
             else:
                 end_indices[pname] = _last_non_none(list(prev.x_prev.get(pname, [])))
 
-        # Only bracket patches that are explicitly in bracket_map (excludes ancillas)
+        # Only bracket patches that are explicitly in bracket_map (excludes ancillas and terminated patches)
         for name in bracket_map.keys():
-            if name not in layout.patches:
-                continue  # Skip if patch doesn't exist in layout
+            if name not in layout.patches or name in terminated_patches:
+                continue  # Skip if patch doesn't exist or was terminated
             requested_basis = bracket_map[name].upper()
             effective_basis = effective_basis_map.get(name, requested_basis)
 

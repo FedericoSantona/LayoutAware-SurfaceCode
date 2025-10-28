@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Tuple
 from qiskit import QuantumCircuit
 
 from .layout import Layout, PatchObject
-from .surgery_ops import MeasureRound, Merge, ParityReadout, Split, CNOTOp
+from .surgery_ops import MeasureRound, Merge, ParityReadout, Split, CNOTOp, TerminatePatch
 
 
 def _allocate_ancilla(patches: Dict[str, PatchObject], ancilla_name: str = "ancilla_0", buffer: float = 1.0) -> PatchObject:
@@ -134,9 +134,33 @@ def compile_circuit_to_surgery(
     ancilla_created = False
     ancilla_name = "ancilla_0"
     
+    # Track which qubits have been terminated (measured mid-circuit)
+    terminated_patches = set()
+    
     # Parse gates in order; map CNOTs to ancilla-mediated surgery
     for ci in qc.data:
         name = ci.operation.name.lower()
+        
+        # Handle mid-circuit measurements
+        if name == "measure":
+            qubit_idx = qc.find_bit(ci.qubits[0]).index
+            qubit_name = f"q{qubit_idx}"
+            
+            # Get classical register info if available
+            creg_name = None
+            if hasattr(ci, 'clbits') and ci.clbits:
+                try:
+                    creg_info = qc.find_bit(ci.clbits[0])
+                    creg_name = creg_info.registers[0][0].name if creg_info.registers else None
+                except Exception:
+                    pass
+            
+            # Mark this patch as terminated
+            if qubit_name not in terminated_patches:
+                terminated_patches.add(qubit_name)
+                ops.append(TerminatePatch(qubit_name, creg_name))
+            continue
+            
         if name in {"cx", "cz", "cnot"}:  # treat all as CNOT-style surgery
             control = qc.find_bit(ci.qubits[0]).index
             target = qc.find_bit(ci.qubits[1]).index

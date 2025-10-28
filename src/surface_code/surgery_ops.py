@@ -61,3 +61,14 @@ class CNOTOp:
     ancilla: str
     rounds: int  # d
 
+
+@dataclass
+class TerminatePatch:
+    """Mark a patch as terminated due to mid-circuit measurement.
+    
+    After this operation, the patch will no longer have stabilizers measured.
+    The builder should add appropriate boundary conditions to the DEM at this point.
+    """
+    patch_id: str
+    classical_register: str | None = None  # Optional: classical register storing result
+

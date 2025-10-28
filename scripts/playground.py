@@ -460,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="ghz3", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -540,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'none' disables the demo readout.",
     )
-    parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
+    parser.add_argument("--shots", type=int, default=10**4, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
     parser.add_argument(
         "--seam-json",

@@ -353,6 +353,8 @@ class GlobalStimBuilder:
         boundary_counts_z: Dict[str, int] = {}
         boundary_counts_x: Dict[str, int] = {}
         seam_boundary_counts: Dict[Tuple[str, str, str, int], int] = {}
+        # Track whether we've already anchored a seam wrap for a given pair within a window
+        seam_wrap_anchor_emitted: Set[Tuple[str, str, str, int]] = set()
 
         def _begin_window(kind: str, a: str, b: str, rounds: int) -> None:
             nonlocal current_window, window_id
@@ -737,7 +739,13 @@ class GlobalStimBuilder:
                     for pair_i, (a_idx, b_idx) in enumerate(_ziplg(first_list, last_list, fillvalue=None)):
                         if a_idx is None or b_idx is None or a_idx == b_idx:
                             continue
-                        _defer_detector_from_abs([a_idx, b_idx], f"{k}_wrap", {"seam": key, "pair_idx": pair_i})
+                        det_id = _defer_detector_from_abs([a_idx, b_idx], f"{k}_wrap", {"seam": key, "pair_idx": pair_i})
+                        if force_boundaries:
+                            anchor_key = (k, op.a, op.b, pair_i)
+                            if anchor_key not in seam_wrap_anchor_emitted:
+                                anchor_detector_ids.append(det_id)
+                                seam_wrap_anchor_emitted.add(anchor_key)
+                                seam_boundary_counts[anchor_key] = seam_boundary_counts.get(anchor_key, 0) + 1
                         wrap_added += 1
                     if wrap_added:
                         seam_wrap_counts[key] = seam_wrap_counts.get(key, 0) + wrap_added
@@ -777,13 +785,18 @@ class GlobalStimBuilder:
                     "source": "seam_last_round"  # documentation tag
                 }
                 byproducts.append(byproduct_info)
+
+                # Convenience: primary index (first seam pair) used for Pauli-frame sampling
+                primary_idx = indices[0] if indices else None
                 
                 # Track CNOT operations by grouping ZZ and XX parity readouts
                 if current_cnot is not None:
                     if op.type == "ZZ":
                         current_cnot["m_zz_byproduct"] = byproduct_info
+                        current_cnot["m_zz_mpp_idx"] = primary_idx
                     elif op.type == "XX":
                         current_cnot["m_xx_byproduct"] = byproduct_info
+                        current_cnot["m_xx_mpp_idx"] = primary_idx
                         current_cnot["target"] = op.b  # Update target (for XX, b is the target)
                         current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
                         cnot_operations.append(current_cnot)
@@ -797,7 +810,9 @@ class GlobalStimBuilder:
                         "rough_window_id": window_id - 1 if current_window is None else window_id,
                         "smooth_window_id": None,
                         "m_zz_byproduct": byproduct_info if op.type == "ZZ" else None,
+                        "m_zz_mpp_idx": primary_idx if op.type == "ZZ" else None,
                         "m_xx_byproduct": None,
+                        "m_xx_mpp_idx": None,
                     }
                 
                 # NOTE: No circuit operations are emitted here to keep the DEM deterministic.
@@ -816,7 +831,13 @@ class GlobalStimBuilder:
                     for pair_i, (a_idx, b_idx) in enumerate(_ziplg(first_list, last_list, fillvalue=None)):
                         if a_idx is None or b_idx is None or a_idx == b_idx:
                             continue
-                        _defer_detector_from_abs([a_idx, b_idx], "seam_wrap_finalize", {"seam": key, "pair_idx": pair_i})
+                        det_id = _defer_detector_from_abs([a_idx, b_idx], "seam_wrap_finalize", {"seam": key, "pair_idx": pair_i})
+                        if force_boundaries:
+                            anchor_key = (key[0], key[1], key[2], pair_i)
+                            if anchor_key not in seam_wrap_anchor_emitted:
+                                anchor_detector_ids.append(det_id)
+                                seam_wrap_anchor_emitted.add(anchor_key)
+                                seam_boundary_counts[anchor_key] = seam_boundary_counts.get(anchor_key, 0) + 1
                         wrap_added += 1
                     if wrap_added:
                         seam_wrap_counts[key] = seam_wrap_counts.get(key, 0) + wrap_added
@@ -935,6 +956,7 @@ class GlobalStimBuilder:
 
             # Helper to emit a joint correlator (ZZ or XX) for a logical pair
             def _emit_joint_for_pair(basis: str, q0_name: str, q1_name: str):
+                # Heisenberg-frame: measure U†(ZZ/XX)U at the end
                 if basis == "X":
                     op = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
                 else:
@@ -1051,8 +1073,8 @@ class GlobalStimBuilder:
                             # Use unified tracker helper to derive axis and phase
                             tracker = PauliTracker(n_logical)
                             info = tracker.final_operator_info(qi, snapshot_basis, qiskit_circuit)
-                            snapshot_ops.append(info["operator_string"]) 
-                            snapshot_axes.append(info["axis"]) 
+                            snapshot_ops.append(info["operator_string"])
+                            snapshot_axes.append(info["axis"])
                             snapshot_phases.append(int(info["phase"]))
                             order_out.append(patch_name)
                     

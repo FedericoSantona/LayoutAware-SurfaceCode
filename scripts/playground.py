@@ -53,6 +53,92 @@ def _parse_dem_errors(dem):
         out.append({"detectors": det_ids, "observables": obs_ids, "raw": s})
     return out
 
+def _pm_find_offending_shot(matcher, det_samp, *, max_scan=2048):
+    """Inspect the actual PyMatching graph for boundaryless odd-parity components.
+
+    Prints the first offending shot+component if found. Returns True if an
+    offender was found, else False. Also reports isolated detector nodes.
+    """
+    try:
+        import numpy as _np
+        import networkx as _nx
+    except Exception as _exc:
+        print(f"[PM-CHECK] skipped (imports failed): {_exc}")
+        return False
+
+    try:
+        G = matcher.to_networkx()
+    except Exception as _exc2:
+        print(f"[PM-CHECK] to_networkx failed: {_exc2}")
+        return False
+
+    num_det = getattr(matcher, 'num_detectors', 0)
+    comps = list(_nx.connected_components(G))
+    boundary_nodes = {n for n, d in G.nodes(data=True) if d.get('is_boundary', False)}
+
+    comp_info = []
+    for comp_id, comp in enumerate(comps):
+        det_nodes = sorted([n for n in comp if isinstance(n, int) and n < num_det])
+        has_boundary = any(n in boundary_nodes for n in comp)
+        comp_info.append((comp_id, det_nodes, has_boundary))
+
+    nscan = min(det_samp.shape[0], int(max_scan)) if det_samp is not None else 0
+    for s in range(nscan):
+        syn = det_samp[s].astype(_np.uint8)
+        for comp_id, det_nodes, has_boundary in comp_info:
+            if not det_nodes:
+                continue
+            parity = int(_np.bitwise_xor.reduce(syn[det_nodes])) if det_nodes else 0
+            if (parity & 1) and (not has_boundary):
+                print(f"[PM-CHECK] offending shot={s}, COMP#{comp_id}, has_boundary={has_boundary}, size={len(det_nodes)}")
+                print(f"  first few det nodes: {det_nodes[:16]}")
+                return True
+
+    print("[PM-CHECK] no boundaryless odd-parity component found in scanned shots.")
+    # Check for isolated detector nodes (degree 0) and whether any shot hits them
+    deg = dict(G.degree())
+    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
+    if isolates:
+        print(f"[PM-CHECK] isolated detector nodes (deg 0): {isolates[:16]}")
+        for s in range(nscan):
+            syn = det_samp[s].astype(_np.uint8)
+            if any(int(syn[n]) & 1 for n in isolates if n < len(syn)):
+                print(f"[PM-CHECK] shot {s} has 1s on isolated detectors (impossible without boundary).")
+                break
+    return False
+
+
+def _anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
+    """Ensure every detector in the PyMatching graph has non-zero degree by adding boundary hooks.
+
+    Returns (new_dem, new_matcher, num_added, isolate_ids).
+    """
+    try:
+        import networkx as _nx
+    except Exception:
+        return dem, matcher, 0, []
+
+    try:
+        G = matcher.to_networkx()
+    except Exception:
+        return dem, matcher, 0, []
+
+    num_det = getattr(matcher, "num_detectors", 0)
+    deg = dict(G.degree())
+    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
+    if not isolates:
+        return dem, matcher, 0, []
+
+    dem_text = str(dem)
+    if dem_text and not dem_text.endswith("\n"):
+        dem_text += "\n"
+    p_str = f"{float(epsilon):.12g}"
+    for idx in isolates:
+        dem_text += f"error({p_str}) D{idx}\n"
+    new_dem = stim.DetectorErrorModel(dem_text)
+    new_matcher = pm.Matching.from_detector_error_model(new_dem)
+    return new_dem, new_matcher, len(isolates), isolates
+
 def _build_components_from_dem(dem):
     """
     Build detector connected components from the DEM.
@@ -188,6 +274,43 @@ def harden_dem_add_boundaries(dem, *, epsilon=1e-12):
              dem.append("error", epsilon, [stim.DemTarget.detector(d0)])
              added += 1
      return added
+
+# --------------------------------------------------------
+# Harden DEM for pairwise matching: ensure every component has a singleton
+# --------------------------------------------------------
+def harden_dem_for_pairwise_matching(dem, *, epsilon=1e-12):
+    """
+    Ensure every connected component has at least one *single-detector*
+    error (a real boundary edge for pairwise MWPM).
+    Returns a new DEM and the number of hooks added.
+    """
+    comps, _, errors = _build_components_from_dem(dem)
+
+    # Detectors that already have a 1-detector error
+    singleton_det_ids = set()
+    for e in errors:
+        ds = e["detectors"]
+        if len(ds) == 1:
+            singleton_det_ids.add(ds[0])
+
+    hook_ids = []
+    for comp in comps:
+        # Skip components that already contain a singleton detector error
+        if any(d in singleton_det_ids for d in comp):
+            continue
+        # Need to add a hook for this component
+        d0 = comp[0]
+        hook_ids.append(d0)
+    added = len(hook_ids)
+
+    dem_text = str(dem)
+    if not dem_text.endswith('\n'):
+        dem_text += '\n'
+    p_str = f"{float(epsilon):.12g}"
+    for d0 in hook_ids:
+        dem_text += f"error({p_str}) D{d0}\n"
+    new_dem = stim.DetectorErrorModel(dem_text)
+    return new_dem, added
 if __name__ == "__main__":
     REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if REPO_ROOT not in sys.path:
@@ -222,6 +345,8 @@ from surface_code.reporting import (
     generate_detailed_json,
     save_detailed_json,
     print_final_state_distribution,
+    print_decoded_logical_distribution,
+    print_schrodinger_snapshot_distribution,
 )
 from qiskit import QuantumCircuit
 from qiskit.transpiler import Target
@@ -335,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="ghz3", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -411,9 +536,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--demo-basis",
         type=str,
-        choices=["auto", "Z", "X", "both", "none"],
-        default="Z",
-        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'both' enables both Z and X measurements; 'none' disables the demo readout.",
+        choices=["auto", "Z", "X", "none"],
+        default="auto",
+        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'none' disables the demo readout.",
     )
     parser.add_argument("--shots", type=int, default=10**6, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
@@ -527,20 +652,10 @@ def main() -> None:
             demo_basis = None
         elif db_mode == "auto":
             demo_basis = end_basis if end_basis != bracket_basis else None
-        elif db_mode == "both":
-            demo_basis = ["Z", "X"]
         else:
             # Handle single basis (Z or X) or comma-separated formats like "Z,X"
             demo_str = args.demo_basis.strip().upper()
-            if "," in demo_str:
-                # Parse comma-separated list and normalize to ["Z", "X"]
-                bases = [b.strip() for b in demo_str.split(",")]
-                if set(bases) == {"Z", "X"}:
-                    demo_basis = ["Z", "X"]
-                else:
-                    demo_basis = demo_str  # Fallback to single string
-            else:
-                demo_basis = demo_str
+            demo_basis = demo_str
 
         # Build one PatchObject per qubit
         def build_patch() -> PatchObject:
@@ -611,46 +726,49 @@ def main() -> None:
         # Sample DEM and decode
         dem = circuit.detector_error_model()
 
-        # Harden DEM: add an infinitesimal boundary hook to each boundaryless component
-        # (guarantees MWPM feasibility without changing statistics materially)
-        # -- DEM hardening: inject boundary anchors so every connected component has a boundary
+        # --- NEW: add boundary anchors from builder metadata (if any) ---
         try:
             ba = (metadata.get("boundary_anchors", {}) or {})
             anchor_ids = list(ba.get("detector_ids", []) or [])
-            eps = float(ba.get("epsilon", 1e-12))
-        except Exception:
-            anchor_ids = []
-            eps = 1e-12
-
-        if anchor_ids and eps > 0:
-            dem = augment_dem_with_boundary_anchors(dem, anchor_ids, eps)
+            anchor_eps = float(ba.get("epsilon", 1e-12))
             if args.verbose:
-                print(f"[DEM-CHECK] added {len(anchor_ids)} boundary anchors (eps={eps:g})")
-        else:
+                print(f"[DEM-CHECK] attempting anchor augmentation: ids={len(anchor_ids)}, eps={anchor_eps:g}")
+            dem = augment_dem_with_boundary_anchors(dem, anchor_ids, anchor_eps)
+        except Exception as _exc:
             if args.verbose:
-                print("[DEM-CHECK] no boundary anchors available to inject")
+                print(f"[DEM-CHECK] anchor augmentation skipped due to error: {_exc}")
 
-        # Choose decoder adaptively with fallback: try pairwise MWPM first, then hypergraph
+        # Ensure every connected component has a singleton for pairwise MWPM
+        dem, added_pairwise_hooks = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
+        if args.verbose:
+            print(f"[DEM-CHECK] added {added_pairwise_hooks} pairwise boundary hooks and rebuilt DEM via text")
+
         dem_sampler = dem.compile_sampler(seed=int(args.seed))
         det_samp, obs_samp, _ = dem_sampler.sample(int(args.shots))
         obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((int(args.shots), len(observable_pairs)), dtype=np.uint8)
 
-        use_hyper = False
         try:
-            # First try pairwise matching
+            # Pairwise matching (no correlations; requires true single-detector boundaries)
             matcher = pm.Matching.from_detector_error_model(dem)
+            dem, matcher, iso_added, iso_ids = _anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+            if iso_added and args.verbose:
+                print(f"[DECODE] anchored {iso_added} isolated detectors: {iso_ids[:12]}")
             preds = matcher.decode_batch(det_samp.astype(bool))
         except Exception as exc_mwpm:
             if args.verbose:
-                print("[DECODE] Pairwise MWPM failed; falling back to HypergraphMatching:", repr(exc_mwpm))
+                print("[DECODE] Pairwise MWPM failed; hardening DEM and retrying once:", repr(exc_mwpm))
             try:
-                matcher = pm.HypergraphMatching.from_detector_error_model(dem)
-                preds = matcher.decode_batch(det_samp.astype(bool))
-                use_hyper = True
+                # Harden again (in case the sampler revealed an odd-parity component)
+                dem, added_retry = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
                 if args.verbose:
-                    print("[DECODE] HypergraphMatching succeeded.")
-            except Exception as exc_hg:
-                # Keep existing diagnostics only if both decoders fail
+                    print(f"[DEM-CHECK] added {added_retry} additional pairwise boundary hooks on retry and rebuilt DEM via text")
+                matcher = pm.Matching.from_detector_error_model(dem)
+                dem, matcher, iso_added_retry, iso_ids_retry = _anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+                if iso_added_retry and args.verbose:
+                    print(f"[DECODE] anchored {iso_added_retry} isolated detectors on retry: {iso_ids_retry[:12]}")
+                preds = matcher.decode_batch(det_samp.astype(bool))
+            except Exception as exc_retry:
+                # Keep existing diagnostics only if decoding still fails after retry
                 print("\n[ERROR] MWPM decode failed; printing mwpm_debug summary:")
                 dbg = metadata.get("mwpm_debug", {}) or {}
                 seam_wraps = dbg.get("seam_wrap_counts", {})
@@ -668,7 +786,6 @@ def main() -> None:
                 for q, rows in (row_wraps.get("X", {}) or {}).items():
                     print(f"  {q}: {rows}")
                 print(f"[DEBUG] degree violations (abs meas idx with degree!=2): {deg_viol[:200]}")
-                # Provenance summary for odd-degree indices
                 if deg_viol:
                     from collections import Counter
                     tag_counter = Counter()
@@ -696,8 +813,15 @@ def main() -> None:
                     _scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, int(args.shots)))
                 except Exception as _exc:
                     print(f"[DEM-CHECK] diagnostics failed: {_exc}")
-
-                print("[DECODE] HypergraphMatching also failed:", repr(exc_hg))
+                # PyMatching graph-level parity check on the actual matching graph
+                try:
+                    if 'matcher' in locals():
+                        print("\n[PM-CHECK] analyzing PyMatching graph components & boundaries...")
+                        _pm_find_offending_shot(matcher, det_samp, max_scan=min(2048, int(args.shots)))
+                    else:
+                        print("[PM-CHECK] matcher unavailable; skipping")
+                except Exception as _exc3:
+                    print(f"[PM-CHECK] diagnostics failed: {_exc3}")
                 raise
         preds = np.asarray(preds, dtype=np.uint8)
         if preds.ndim == 1:
@@ -723,9 +847,7 @@ def main() -> None:
         if isinstance(snap_basis, str):
             run_bases.add(snap_basis.upper())
         arg_demo = (args.demo_basis or "Z").strip().upper()
-        if arg_demo == "BOTH":
-            run_bases.update(["Z", "X"])
-        elif arg_demo in ("Z", "X"):
+        if arg_demo in ("Z", "X"):
             run_bases.add(arg_demo)
         # Enable m_ZZ only if Z is present; enable m_XX only if X is present
         enable_mzz = ("Z" in run_bases)
@@ -1012,6 +1134,12 @@ def main() -> None:
             joint_demo_bits,
             virtual_gates_per_qubit=pfm.virtual_gates,
         )
+        try:
+            decoded_order = [name for name in sorted(bracket_map.keys()) if name in bracket_map]
+            print_decoded_logical_distribution(decoded_order, corrected_obs, int(args.shots))
+        except Exception as _exc_dist:
+            if args.verbose:
+                print(f"[DEBUG] decoded logical distribution unavailable: {_exc_dist}")
         decoder_flip_map = {}
         for patch_name, obs_idx in patch_to_obs_idx.items():
             if obs_idx < preds.shape[1]:
@@ -1025,6 +1153,14 @@ def main() -> None:
             apply_frame_correction=True,
             decoder_flips=decoder_flip_map,
         )
+        try:
+            print_schrodinger_snapshot_distribution(
+                metadata.get("final_snapshot", {}),
+                snapshot_bits,
+            )
+        except Exception as _exc_sz:
+            if args.verbose:
+                print(f"[DEBUG] Schrödinger Z snapshot derivation failed: {_exc_sz}")
         print_pauli_frame_audit(pfm.virtual_gates, pfm.frame, cnot_metadata)
         
         if args.verbose:

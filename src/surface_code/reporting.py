@@ -159,6 +159,56 @@ def _apply_phase_and_frame_joint(bits: np.ndarray, qa: str, qb: str, basis_axis:
         "expect_final": expect_final,
     }
 
+
+def print_decoded_logical_distribution(
+    logical_order: List[str],
+    decoded_bits: np.ndarray,
+    shots: int,
+) -> None:
+    """Print the empirical distribution of decoded logical outcomes (post Pauli-frame and decoder).
+
+    Parameters
+    ----------
+    logical_order:
+        Ordered list of logical qubit labels (e.g., ["q0", "q1"]).
+    decoded_bits:
+        Binary numpy array of shape (shots, num_logicals) containing the final
+        logical measurement results after applying Pauli-frame and decoder corrections.
+    shots:
+        Total number of shots (for normalization / sanity checks).
+    """
+
+    if decoded_bits is None or decoded_bits.size == 0:
+        return
+
+    num_cols = decoded_bits.shape[1]
+    if not logical_order:
+        logical_order = [f"q{i}" for i in range(num_cols)]
+
+    # Clamp order length to available columns
+    order = list(logical_order[:num_cols])
+    arr = decoded_bits[:, :len(order)].astype(np.uint8, copy=False)
+
+    from collections import Counter
+
+    bitstrings = [''.join(str(bit) for bit in row) for row in arr]
+    counts = Counter(bitstrings)
+    total = sum(counts.values()) or 1
+
+    print("\n" + "=" * 80)
+    print("DECODED LOGICAL DISTRIBUTION (Z basis)")
+    print("=" * 80)
+    print(f"Order (MSB→LSB): {' '.join(order)}")
+    print(f"Shots: {shots:,}")
+    print(f"Unique states observed: {len(counts)}")
+    print()
+    print(f"{'State':<{len(order)+2}} {'Shots':<12} Prob")
+    print("-" * 40)
+    for state, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        prob = count / total
+        print(f"{state:<{len(order)+2}} {count:<12,} {prob:.4f}")
+
+
 def _print_demo_preamble(metadata: dict, cfg) -> None:
     print("Demo Mode Summary:")
     for line in _demo_mode_summary(metadata, cfg):
@@ -779,6 +829,125 @@ def print_pauli_frame_audit(
     else:
         print("\nCNOT parity bits used for frame updates:")
         print("  (none)")
+
+
+# --- Helpers to derive Schrödinger-frame Z distribution from snapshot ---
+def _parse_pauli_string(op_str: str, qnames: list[str]) -> tuple[list[int], list[int]]:
+    X = [0]*len(qnames)
+    Z = [0]*len(qnames)
+    s = (op_str or "I").strip()
+    if s in ("", "I"):
+        return X, Z
+    parts = [p.strip() for p in s.replace("-", "").split("*")]
+    for p in parts:
+        if not p or "(" not in p or ")" not in p:
+            continue
+        ax = p.split("(",1)[0].upper()
+        qn = p[p.find("(")+1:p.find(")")]
+        if qn not in qnames:
+            continue
+        j = qnames.index(qn)
+        if ax == "X":
+            X[j] ^= 1
+        elif ax == "Z":
+            Z[j] ^= 1
+        elif ax == "Y":
+            X[j] ^= 1; Z[j] ^= 1
+    return X, Z
+
+def _gf2_solve_for_Z(snapshot_ops: list[str], order: list[str]) -> list[list[int]]:
+    import numpy as np
+    n = len(order)
+    if len(snapshot_ops) < n:
+        raise ValueError("Not enough snapshot operators to reconstruct Z basis")
+    X = np.zeros((n, n), dtype=np.uint8)
+    Z = np.zeros((n, n), dtype=np.uint8)
+    for i, op in enumerate(snapshot_ops[:n]):
+        xi, zi = _parse_pauli_string(op, order)
+        X[i, :] = xi
+        Z[i, :] = zi
+    XT = X.T.copy()
+    ZT = Z.T.copy()
+    E = np.zeros((n, n), dtype=np.uint8)
+    for j in range(n):
+        # Solve XT e = 0 and ZT e = e_j (mod 2)
+        # Build augmented system A e = b with A = [XT; ZT]
+        A = np.concatenate([XT, ZT], axis=0)
+        b = np.concatenate([np.zeros(n, dtype=np.uint8), (np.arange(n)==j).astype(np.uint8)], axis=0)
+        # RREF over GF(2)
+        Aaug = np.concatenate([A, b.reshape(-1,1)], axis=1)
+        r = c = 0
+        m, k = Aaug.shape
+        vars_n = n
+        while r < m and c < vars_n:
+            piv = None
+            for rr in range(r, m):
+                if Aaug[rr, c]:
+                    piv = rr; break
+            if piv is None:
+                c += 1; continue
+            if piv != r:
+                Aaug[[r, piv]] = Aaug[[piv, r]]
+            for rr in range(m):
+                if rr != r and Aaug[rr, c]:
+                    Aaug[rr, :] ^= Aaug[r, :]
+            r += 1; c += 1
+        # Read a simple solution by taking pivot rows
+        e = np.zeros((n,), dtype=np.uint8)
+        for col in range(n):
+            one_rows = [rr for rr in range(m) if Aaug[rr, col] == 1 and Aaug[rr, :n].sum() == 1]
+            if one_rows:
+                e[col] = Aaug[one_rows[0], -1]
+        # Verify solution
+        if (XT @ e % 2).any() or ((ZT @ e % 2) != (np.arange(n)==j).astype(np.uint8)).any():
+            raise ValueError("Failed to reconstruct Z basis from snapshot operators")
+        E[:, j] = e
+    return E.tolist()
+
+def print_schrodinger_snapshot_distribution(
+    snapshot_meta: Dict[str, Any],
+    snapshot_bits: Dict[str, np.ndarray],
+) -> None:
+    import numpy as np
+    order = list(snapshot_meta.get("order") or [])
+    ops   = list(snapshot_meta.get("logical_ops") or [])
+    if not order or not ops:
+        return
+    # Build measured matrix B: shots x n
+    cols = []
+    shots = None
+    for qn in order:
+        col = snapshot_bits.get(qn)
+        if col is None:
+            return
+        shots = len(col) if shots is None else shots
+        cols.append(col.astype(np.uint8))
+    B = np.vstack(cols).T  # shots x n
+    # Solve mapping E: n x n (measured -> target Z)
+    E = _gf2_solve_for_Z(ops, order)
+    E = np.array(E, dtype=np.uint8)
+    Zbits = (B.dot(E) % 2).astype(np.uint8)
+    # Print distribution
+    print("\n" + "=" * 80)
+    print("SCHRÖDINGER Z-BASIS DISTRIBUTION (derived from snapshot)")
+    print("=" * 80)
+    print(f"Order (MSB→LSB): {' '.join(order)}")
+    from collections import Counter
+    strs = [''.join(str(b) for b in row) for row in Zbits]
+    counts = Counter(strs)
+    total = sum(counts.values()) or 1
+    print(f"{'State':<{len(order)+2}} {'Shots':<12} Prob")
+    print("-" * 40)
+    for s, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"{s:<{len(order)+2}} {cnt:<12,} {cnt/total:.4f}")
+    # Derived ZZ correlations
+    print("\nDerived ZZ correlations (Schrödinger):")
+    n = len(order)
+    for i in range(n):
+        for j in range(i+1, n):
+            p_odd = float(np.mean(Zbits[:, i] ^ Zbits[:, j]))
+            ezzi = 1.0 - 2.0*p_odd
+            print(f"  <Z({order[i]})⊗Z({order[j]})> = {ezzi:+.3f}")
 
 
 def print_debug_details(

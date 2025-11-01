@@ -8,313 +8,15 @@ benchmarks, targets, or analysis steps.
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
-import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Type
+from typing import Dict, List
 
 # Add the project root to Python path to enable src imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
-
-from src.surface_code.builder import augment_dem_with_boundary_anchors
-
-import numpy as np
-import pymatching as pm
-import stim
-
-# --------------------------
-# MWPM / DEM debug utilities
-# --------------------------
-from collections import defaultdict
-import re
-
-# Parse 'error(...) D# D# L#' lines from a stim.DetectorErrorModel
-_D_TOKEN_RE = re.compile(r"D(\d+)")
-_L_TOKEN_RE = re.compile(r"L(\d+)")
-
-def _parse_dem_errors(dem):
-    """
-    Return a list of elementary faults as dicts:
-        {"detectors":[int,...], "observables":[int,...], "raw": line}
-    """
-    out = []
-    for line in str(dem).splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if not s.lower().startswith("error"):
-            continue
-        det_ids = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
-        obs_ids = [int(m.group(1)) for m in _L_TOKEN_RE.finditer(s)]
-        out.append({"detectors": det_ids, "observables": obs_ids, "raw": s})
-    return out
-
-def _pm_find_offending_shot(matcher, det_samp, *, max_scan=2048):
-    """Inspect the actual PyMatching graph for boundaryless odd-parity components.
-
-    Prints the first offending shot+component if found. Returns True if an
-    offender was found, else False. Also reports isolated detector nodes.
-    """
-    try:
-        import numpy as _np
-        import networkx as _nx
-    except Exception as _exc:
-        print(f"[PM-CHECK] skipped (imports failed): {_exc}")
-        return False
-
-    try:
-        G = matcher.to_networkx()
-    except Exception as _exc2:
-        print(f"[PM-CHECK] to_networkx failed: {_exc2}")
-        return False
-
-    num_det = getattr(matcher, 'num_detectors', 0)
-    comps = list(_nx.connected_components(G))
-    boundary_nodes = {n for n, d in G.nodes(data=True) if d.get('is_boundary', False)}
-
-    comp_info = []
-    for comp_id, comp in enumerate(comps):
-        det_nodes = sorted([n for n in comp if isinstance(n, int) and n < num_det])
-        has_boundary = any(n in boundary_nodes for n in comp)
-        comp_info.append((comp_id, det_nodes, has_boundary))
-
-    nscan = min(det_samp.shape[0], int(max_scan)) if det_samp is not None else 0
-    for s in range(nscan):
-        syn = det_samp[s].astype(_np.uint8)
-        for comp_id, det_nodes, has_boundary in comp_info:
-            if not det_nodes:
-                continue
-            parity = int(_np.bitwise_xor.reduce(syn[det_nodes])) if det_nodes else 0
-            if (parity & 1) and (not has_boundary):
-                print(f"[PM-CHECK] offending shot={s}, COMP#{comp_id}, has_boundary={has_boundary}, size={len(det_nodes)}")
-                print(f"  first few det nodes: {det_nodes[:16]}")
-                return True
-
-    print("[PM-CHECK] no boundaryless odd-parity component found in scanned shots.")
-    # Check for isolated detector nodes (degree 0) and whether any shot hits them
-    deg = dict(G.degree())
-    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
-    if isolates:
-        print(f"[PM-CHECK] isolated detector nodes (deg 0): {isolates[:16]}")
-        for s in range(nscan):
-            syn = det_samp[s].astype(_np.uint8)
-            if any(int(syn[n]) & 1 for n in isolates if n < len(syn)):
-                print(f"[PM-CHECK] shot {s} has 1s on isolated detectors (impossible without boundary).")
-                break
-    return False
-
-
-def _anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
-    """Ensure every detector in the PyMatching graph has non-zero degree by adding boundary hooks.
-
-    Returns (new_dem, new_matcher, num_added, isolate_ids).
-    """
-    try:
-        import networkx as _nx
-    except Exception:
-        return dem, matcher, 0, []
-
-    try:
-        G = matcher.to_networkx()
-    except Exception:
-        return dem, matcher, 0, []
-
-    num_det = getattr(matcher, "num_detectors", 0)
-    deg = dict(G.degree())
-    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
-    if not isolates:
-        return dem, matcher, 0, []
-
-    dem_text = str(dem)
-    if dem_text and not dem_text.endswith("\n"):
-        dem_text += "\n"
-    p_str = f"{float(epsilon):.12g}"
-    for idx in isolates:
-        dem_text += f"error({p_str}) D{idx}\n"
-    new_dem = stim.DetectorErrorModel(dem_text)
-    new_matcher = pm.Matching.from_detector_error_model(new_dem)
-    return new_dem, new_matcher, len(isolates), isolates
-
-def _build_components_from_dem(dem):
-    """
-    Build detector connected components from the DEM.
-    Link detectors that co-appear in any elementary fault.
-    Also mark if a component 'has boundary' (∃ fault with an odd number of
-    detectors from that component, usually a single D# flip).
-    """
-    n = dem.num_detectors
-    errors = _parse_dem_errors(dem)
-
-    # Union–Find
-    parent = list(range(n))
-    rank = [0] * n
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            return
-        if rank[ra] < rank[rb]:
-            parent[ra] = rb
-        elif rank[ra] > rank[rb]:
-            parent[rb] = ra
-        else:
-            parent[rb] = ra
-            rank[ra] += 1
-
-    # Link detectors that appear together in an error
-    for err in errors:
-        ds = err["detectors"]
-        for i in range(len(ds) - 1):
-            union(ds[i], ds[i + 1])
-
-    # Group by root
-    comps_dict = defaultdict(list)
-    for d in range(n):
-        root = find(d)
-        comps_dict[root].append(d)
-    comps = [sorted(vs) for vs in comps_dict.values()]
-
-    # Boundary flag per component: odd intersection with some fault
-    idx_to_comp = {}
-    for ci, comp in enumerate(comps):
-        for d in comp:
-            idx_to_comp[d] = ci
-
-    comp_has_boundary = [False] * len(comps)
-    for err in errors:
-        touched = defaultdict(int)
-        for d in err["detectors"]:
-            ci = idx_to_comp.get(d)
-            if ci is not None:
-                touched[ci] ^= 1
-        for ci, parity in touched.items():
-            if parity & 1:
-                comp_has_boundary[ci] = True
-
-    return comps, comp_has_boundary, errors
-
-def _report_boundaryless_components(dem):
-    comps, comp_has_boundary, _ = _build_components_from_dem(dem)
-    n = len(comps)
-    nob = sum(1 for b in comp_has_boundary if not b)
-    print(f"[DEM-CHECK] components={n}, boundaryless={nob}")
-    if nob:
-        for i, comp in enumerate(comps):
-            if comp_has_boundary[i]:
-                continue
-            head = comp[:24]
-            tail = comp[-8:] if len(comp) > 32 else []
-            print(f"  [COMP#{i}] size={len(comp)} head={head}{' tail='+str(tail) if tail else ''}")
-
-def _scan_boundaryless_odd_shot(dem, det_samp, *, max_scan=512):
-    if det_samp is None or dem.num_detectors == 0:
-        return
-    comps, comp_has_boundary, _ = _build_components_from_dem(dem)
-    comp_sets = [set(c) for c in comps]
-    nscan = min(det_samp.shape[0], int(max_scan))
-    for s in range(nscan):
-        syn = det_samp[s].astype(np.uint8)
-        for ci, comp in enumerate(comps):
-            if not comp or comp_has_boundary[ci]:
-                continue
-            # odd parity in a boundaryless component → infeasible
-            parity = int(np.bitwise_xor.reduce(syn[comp]))
-            if parity & 1:
-                print(f"[DEM-CHECK] offending shot={s} boundaryless COMP#{ci} size={len(comp)} sample={comp[:16]}")
-                print("  detslice filter:", "[" + ", ".join(f"'D{d}'" for d in comp[:12]) + "]")
-                # quick arity histogram for faults touching this comp
-                errs = _parse_dem_errors(dem)
-                hist = {}
-                for e in errs:
-                    k = sum(1 for d in e['detectors'] if d in comp_sets[ci])
-                    if k:
-                        hist[k] = hist.get(k, 0) + 1
-                print("  error-arity histogram:", dict(sorted(hist.items())))
-                # show a few example error lines touching the component (odd and even)
-                odd_examples = []
-                even_examples = []
-                for e in errs:
-                    k = sum(1 for d in e['detectors'] if d in comp_sets[ci])
-                    if k == 0:
-                        continue
-                    (odd_examples if (k % 2 == 1) else even_examples).append(e["raw"])
-                    if len(odd_examples) >= 4 and len(even_examples) >= 4:
-                        break
-                if odd_examples:
-                    print("  example odd-intersection errors:")
-                    for ln in odd_examples[:4]:
-                        print("    ", ln)
-                if even_examples:
-                    print("  example even-intersection errors:")
-                    for ln in even_examples[:4]:
-                        print("    ", ln)
-                return
-
-def harden_dem_add_boundaries(dem, *, epsilon=1e-12):
-     """
-     For each detector connected component that currently has no boundary
-     (no fault with an odd intersection), append an infinitesimal-probability
-     single-detector error to create a boundary hook. This guarantees MWPM
-     feasibility without materially changing statistics.
-     """
-     comps, comp_has_boundary, _ = _build_components_from_dem(dem)
-     added = 0
-     for ci, comp in enumerate(comps):
-         if comp and not comp_has_boundary[ci]:
-             # Hook the first detector in this component
-             d0 = comp[0]
-             dem.append("error", epsilon, [stim.DemTarget.detector(d0)])
-             added += 1
-     return added
-
-# --------------------------------------------------------
-# Harden DEM for pairwise matching: ensure every component has a singleton
-# --------------------------------------------------------
-def harden_dem_for_pairwise_matching(dem, *, epsilon=1e-12):
-    """
-    Ensure every connected component has at least one *single-detector*
-    error (a real boundary edge for pairwise MWPM).
-    Returns a new DEM and the number of hooks added.
-    """
-    comps, _, errors = _build_components_from_dem(dem)
-
-    # Detectors that already have a 1-detector error
-    singleton_det_ids = set()
-    for e in errors:
-        ds = e["detectors"]
-        if len(ds) == 1:
-            singleton_det_ids.add(ds[0])
-
-    hook_ids = []
-    for comp in comps:
-        # Skip components that already contain a singleton detector error
-        if any(d in singleton_det_ids for d in comp):
-            continue
-        # Need to add a hook for this component
-        d0 = comp[0]
-        hook_ids.append(d0)
-    added = len(hook_ids)
-
-    dem_text = str(dem)
-    if not dem_text.endswith('\n'):
-        dem_text += '\n'
-    p_str = f"{float(epsilon):.12g}"
-    for d0 in hook_ids:
-        dem_text += f"error({p_str}) D{d0}\n"
-    new_dem = stim.DetectorErrorModel(dem_text)
-    return new_dem, added
-if __name__ == "__main__":
-    REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
 
 # Ensure the src/ directory is available for imports when executed as a script
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -322,11 +24,24 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+import numpy as np
+import pymatching as pm
+import stim
+
+# Import DEM utilities
+from surface_code.dem_utils import (
+    augment_dem_with_boundary_anchors,
+    harden_dem_for_pairwise_matching,
+    anchor_pm_isolates,
+    report_boundaryless_components,
+    scan_boundaryless_odd_shot,
+    pm_find_offending_shot,
+)
+
+# Import CLI utilities
+from cli import parse_args, instantiate_benchmark, load_target, build_config, format_leaderboard
+
 from benchmarks.BenchmarkCircuit import BenchmarkCircuit
-from benchmarks.circuits.bell import BellStateBenchmark
-from benchmarks.circuits.ghz import GHZ3Benchmark
-from benchmarks.circuits.parity_check import ParityCheckBenchmark
-from benchmarks.circuits.simple import Simple1QXZHBenchmark
 from surface_code.utils import (
     plot_heavy_hex_code,
     diagnostic_print,
@@ -363,249 +78,8 @@ from surface_code.joint_parity import decode_joint_parity
 from surface_code.pauli import PauliTracker, parse_init_label, sequence_from_qc
 
 
-# ---------------------------------------------------------------------------
-# Benchmark registry (extend as you add new logical templates)
-# ---------------------------------------------------------------------------
-
-BENCHMARKS: Dict[str, Type[BenchmarkCircuit]] = {
-    "bell": BellStateBenchmark,
-    "ghz3": GHZ3Benchmark,
-    "parity_check": ParityCheckBenchmark,
-    "simple_1q_xzh": Simple1QXZHBenchmark,
-}
-
-
-def _str2bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "t", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "f", "no", "n", "off"}:
-        return False
-    raise argparse.ArgumentTypeError(f"Expected a boolean value for flag, got '{value}'.")
-
-
-# ---------------------------------------------------------------------------
-# Hardware target helpers
-# ---------------------------------------------------------------------------
-
-def _fake_backend_target(name: str) -> Target:
-    """Load a fake heavy-hex backend from the runtime or legacy fake providers."""
-
-    provider_modules = (
-        "qiskit_ibm_runtime.fake_provider",
-        "qiskit.providers.fake_provider",
-    )
-
-    candidates = {
-        "fake_manila": ["FakeManilaV2", "FakeManila"],
-        "fake_montreal": ["FakeMontrealV2", "FakeMontreal"],
-        "fake_oslo": ["FakeOsloV2", "FakeOslo"],
-        "fake_sherbrooke": ["FakeSherbrookeV2", "FakeSherbrooke"],
-        "fake_ithaca": ["FakeIthacaV2", "FakeIthaca"],
-    }
-
-    if name not in candidates:
-        raise ValueError(f"Unsupported fake backend '{name}'. Choices: {sorted(candidates)}")
-
-    last_error: Exception | None = None
-    for module_name in provider_modules:
-        try:
-            provider = importlib.import_module(module_name)
-        except Exception as exc:  # pragma: no cover - import guard
-            last_error = exc
-            continue
-
-        for attr in candidates[name]:
-            backend_factory = getattr(provider, attr, None)
-            if backend_factory is None:
-                continue
-            backend = backend_factory()
-            target = getattr(backend, "target", None)
-            if target is None:
-                raise RuntimeError(
-                    f"Backend {attr} does not expose a Target; update Qiskit or choose another backend."
-                )
-            return target
-
-    if last_error is not None:
-        raise ImportError(
-            "Unable to import Qiskit's fake providers. Install 'qiskit-ibm-runtime' or base 'qiskit'."
-        ) from last_error
-
-    raise RuntimeError(
-        f"None of the fake backend factories {candidates[name]} are available in the installed Qiskit packages."
-    )
-
-
-TARGET_LOADERS = {
-    "fake_manila": _fake_backend_target,
-    "fake_montreal": _fake_backend_target,
-    "fake_oslo": _fake_backend_target,
-    "fake_sherbrooke": _fake_backend_target,
-    "fake_ithaca": _fake_backend_target,
-}
-
-
-# ---------------------------------------------------------------------------
-# CLI wiring
-# ---------------------------------------------------------------------------
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Transpile logical benchmarks and optionally simulate logical 1Q sequences on the surface code.",
-    )
-    parser.add_argument(
-        "--benchmark",
-        default="bell", # options are bell, ghz3, parity_check, simple_1q_xzh
-        choices=sorted(BENCHMARKS.keys()),
-        help="Logical circuit template (used for transpile or simulation).",
-    )
-    parser.add_argument(
-        "--logical-encoding",
-        type=_str2bool,
-        default=True,
-        help="Run the logical encoding/surface-code simulation branch (true/false).",
-    )
-    parser.add_argument(
-        "--transpilation",
-        type=_str2bool,
-        default=False,
-        help="Run the heavy-hex transpilation branch (true/false).",
-    )
-    parser.add_argument(
-        "--target",
-        default="fake_oslo",
-        choices=sorted(TARGET_LOADERS.keys()),
-        help="Hardware target to load (extend via TARGET_LOADERS).",
-    )
-    parser.add_argument(
-        "--seeds",
-        type=int,
-        default=8,
-        help="How many layout/routing seeds to explore.",
-    )
-    parser.add_argument(
-        "--seed-offset",
-        type=int,
-        default=0,
-        help="Offset applied to the seed stream for reproducibility tweaking.",
-    )
-    parser.add_argument(
-        "--keep-top-k",
-        type=int,
-        default=3,
-        help="How many candidates to keep in the leaderboard.",
-    )
-    parser.add_argument(
-        "--schedule-mode",
-        default="alap",
-        choices=["alap", "asap"],
-        help="Scheduling policy passed to the pipeline.",
-    )
-    parser.add_argument(
-        "--dd-policy",
-        default="none",
-        choices=["none", "XIX", "XYXY"],
-        help="Optional dynamical decoupling sequence.",
-    )
-    parser.add_argument(
-        "--dump-json",
-        type=Path,
-        help="Optional path to dump a JSON snapshot of the results.",
-    )
-    # Simulation options (used when logical encoding branch is enabled)
-
-    parser.add_argument("--distance", type=int, default=3, help="Code distance d for the heavy-hex code")
-    parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--warmup-rounds", type=int, default=1, help="Number of warmup rounds (default: 1)")
-    parser.add_argument("--ancilla-buffer", type=float, default=1.0, help="Buffer spacing between ancilla and template patch (default: 1.0)")
-    parser.add_argument("--px", type=float, default=1e-3, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=1e-3, help="Phenomenological Z error probability")
-    parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-} , always 0, then apply gates")
-    parser.add_argument(
-        "--bracket-basis",
-        type=str,
-        choices=["auto", "Z", "X"],
-        default="auto",
-        help="Choose which logical basis to bracket in the DEM (start/end observable). 'auto' derives from --init (Z for 0/1, X for +/-).",
-    )
-    parser.add_argument(
-        "--demo-basis",
-        type=str,
-        choices=["auto", "Z", "X", "none"],
-        default="auto",
-        help="End-only demo readout basis for reporting. 'auto' uses logical end basis when it differs from the bracket; 'none' disables the demo readout.",
-    )
-    parser.add_argument("--shots", type=int, default=10**4, help="Number of Monte Carlo samples")
-    parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
-    parser.add_argument(
-        "--seam-json",
-        type=Path,
-        default=None,
-        help="Optional JSON path specifying explicit seam pairs per CNOT ((kind,a,b)->pairs).",
-    )
-    parser.add_argument(
-        "--cnot-ancilla-strategy",
-        type=str,
-        choices=["serialize", "parallelize"],
-        default="serialize",
-        help="CNOT ancilla allocation strategy: 'serialize' reuses one ancilla (default), 'parallelize' uses multiple ancillas for concurrent CNOTs.",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose debug output including raw/expected/decoded distributions and detailed diagnostics.",
-    )
-    parser.add_argument(
-        "--corr-pairs",
-        type=str,
-        default=None,
-        help="Custom correlation pairs in format 'q0,q1;q2,q3' for two-qubit correlation analysis.",
-    )
-    return parser
-
-
-def instantiate_benchmark(name: str) -> BenchmarkCircuit:
-    cls = BENCHMARKS[name]
-    return cls()
-
-
-def load_target(name: str) -> Target:
-    loader = TARGET_LOADERS[name]
-    return loader(name)
-
-
-def build_config(target: Target, args: argparse.Namespace) -> TranspileConfig:
-    dd_policy = None if args.dd_policy.lower() == "none" else args.dd_policy
-    return TranspileConfig(
-        target=target,
-        seeds=args.seeds,
-        seed_offset=args.seed_offset,
-        schedule_mode=args.schedule_mode,
-        dd_policy=dd_policy,
-        keep_top_k=args.keep_top_k,
-    )
-
-
-def format_leaderboard(
-    leaderboard: Sequence[Tuple[QuantumCircuit, Dict[str, object]]]
-) -> List[Dict[str, object]]:
-    formatted: List[Dict[str, object]] = []
-    for rank, (qc, metrics) in enumerate(leaderboard, start=1):
-        formatted.append(
-            {
-                "rank": rank,
-                "name": qc.name,
-                "metrics": metrics,
-            }
-        )
-    return formatted
-
-
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_args()
 
     run_logical = bool(args.logical_encoding)
     run_transpile = bool(args.transpilation)
@@ -748,7 +222,7 @@ def main() -> None:
         try:
             # Pairwise matching (no correlations; requires true single-detector boundaries)
             matcher = pm.Matching.from_detector_error_model(dem)
-            dem, matcher, iso_added, iso_ids = _anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+            dem, matcher, iso_added, iso_ids = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
             if iso_added and args.verbose:
                 print(f"[DECODE] anchored {iso_added} isolated detectors: {iso_ids[:12]}")
             preds = matcher.decode_batch(det_samp.astype(bool))
@@ -761,7 +235,7 @@ def main() -> None:
                 if args.verbose:
                     print(f"[DEM-CHECK] added {added_retry} additional pairwise boundary hooks on retry and rebuilt DEM via text")
                 matcher = pm.Matching.from_detector_error_model(dem)
-                dem, matcher, iso_added_retry, iso_ids_retry = _anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+                dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
                 if iso_added_retry and args.verbose:
                     print(f"[DECODE] anchored {iso_added_retry} isolated detectors on retry: {iso_ids_retry[:12]}")
                 preds = matcher.decode_batch(det_samp.astype(bool))
@@ -807,15 +281,15 @@ def main() -> None:
                 # DEM component-level diagnostics and odd-parity boundaryless scan
                 try:
                     print("\n[DEM-CHECK] analyzing DEM components & boundaries...")
-                    _report_boundaryless_components(dem)
-                    _scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, int(args.shots)))
+                    report_boundaryless_components(dem)
+                    scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, int(args.shots)))
                 except Exception as _exc:
                     print(f"[DEM-CHECK] diagnostics failed: {_exc}")
                 # PyMatching graph-level parity check on the actual matching graph
                 try:
                     if 'matcher' in locals():
                         print("\n[PM-CHECK] analyzing PyMatching graph components & boundaries...")
-                        _pm_find_offending_shot(matcher, det_samp, max_scan=min(2048, int(args.shots)))
+                        pm_find_offending_shot(matcher, det_samp, max_scan=min(2048, int(args.shots)))
                     else:
                         print("[PM-CHECK] matcher unavailable; skipping")
                 except Exception as _exc3:

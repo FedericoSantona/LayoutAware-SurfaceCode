@@ -28,6 +28,7 @@ from .merge_manager import MergeManager
 from .measurement_half import MeasurementHalf
 from .observable_manager import ObservableManager
 from .demo_generator import DemoGenerator
+from .dem_utils import augment_dem_with_boundary_anchors
 
 
 GateTarget = stim.GateTarget
@@ -583,35 +584,3 @@ class GlobalStimBuilder:
         return circuit, observable_pairs, metadata
 
 
-def augment_dem_with_boundary_anchors(
-    dem: stim.DetectorErrorModel,
-    anchor_detector_ids: List[int],
-    error_probability: float,
-) -> stim.DetectorErrorModel:
-    """Return a new DEM with boundary edges injected at given detector ids.
-
-    Each anchor id k receives a tiny-probability single-detector error line:
-        error p Dk
-    which creates a boundary edge for MWPM without altering physical noise.
-    """
-    if not anchor_detector_ids or not isinstance(error_probability, (int, float)):
-        return dem
-    if error_probability <= 0:
-        return dem
-    # Deduplicate and keep stable order
-    seen: Set[int] = set()
-    ordered_ids: List[int] = []
-    for k in anchor_detector_ids:
-        if isinstance(k, int) and k >= 0 and k not in seen:
-            seen.add(k)
-            ordered_ids.append(k)
-    if not ordered_ids:
-        return dem
-    # Append lines to DEM text
-    dem_text = str(dem)
-    if dem_text and not dem_text.endswith("\n"):
-        dem_text += "\n"
-    p_str = f"{float(error_probability):.12g}"
-    for k in ordered_ids:
-        dem_text += f"error({p_str}) D{k}\n"
-    return stim.DetectorErrorModel(dem_text)

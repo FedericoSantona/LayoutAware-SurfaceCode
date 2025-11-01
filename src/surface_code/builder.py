@@ -26,6 +26,8 @@ from .detector_manager import DetectorManager
 from .segment_tracker import SegmentTracker
 from .merge_manager import MergeManager
 from .measurement_half import MeasurementHalf
+from .observable_manager import ObservableManager
+from .demo_generator import DemoGenerator
 
 
 GateTarget = stim.GateTarget
@@ -182,6 +184,13 @@ class GlobalStimBuilder:
                 raise ValueError("bracket_map values must be 'Z' or 'X'")
             effective_basis_map[name] = basis
 
+        # Initialize observable and demo managers
+        observable_manager = ObservableManager(self.layout, bracket_map)
+        demo_generator = DemoGenerator(self.layout, self)
+        
+        # Sync effective_basis_map to observable_manager
+        observable_manager.effective_basis_map = effective_basis_map
+
         # Bracketing: start logicals per patch (skip if they would anti-commute with merges)
         start_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
@@ -262,6 +271,7 @@ class GlobalStimBuilder:
                     conflict_counts,
                     start_indices,
                     _rows_touching_local_indices,
+                    observable_manager,
                 )
                 state.prev.z_prev = z_curr
 
@@ -284,6 +294,7 @@ class GlobalStimBuilder:
                     conflict_counts,
                     start_indices,
                     _rows_touching_local_indices,
+                    observable_manager,
                 )
                 state.prev.x_prev = x_curr
 
@@ -319,7 +330,9 @@ class GlobalStimBuilder:
                     # Seal X-basis observables on involved patches if still unset
                     for pname in (op.a, op.b):
                         if effective_basis_map.get(pname) == "X" and end_indices.get(pname) is None:
-                            end_indices[pname] = _last_non_none(list(state.prev.x_prev.get(pname, [])))
+                            end_idx = _last_non_none(list(state.prev.x_prev.get(pname, [])))
+                            observable_manager.seal_end(pname, "X", end_idx)
+                            end_indices[pname] = end_idx
                     mask_a = self._mask_prev_stabilizers(state.prev.x_prev, op.a, "X", indices_a)
                     mask_b = self._mask_prev_stabilizers(state.prev.x_prev, op.b, "X", indices_b)
                     # Close current X segments touching the seam before the gap
@@ -338,7 +351,9 @@ class GlobalStimBuilder:
                     # Seal Z-basis observables on involved patches if still unset
                     for pname in (op.a, op.b):
                         if effective_basis_map.get(pname) == "Z" and end_indices.get(pname) is None:
-                            end_indices[pname] = _last_non_none(list(state.prev.z_prev.get(pname, [])))
+                            end_idx = _last_non_none(list(state.prev.z_prev.get(pname, [])))
+                            observable_manager.seal_end(pname, "Z", end_idx)
+                            end_indices[pname] = end_idx
                     mask_a = self._mask_prev_stabilizers(state.prev.z_prev, op.a, "Z", indices_a)
                     mask_b = self._mask_prev_stabilizers(state.prev.z_prev, op.b, "Z", indices_b)
                     segment_tracker.wrap_close_segment(op.a, "Z", detector_manager, mask_a)
@@ -480,9 +495,13 @@ class GlobalStimBuilder:
                 if patch_name in bracket_map:
                     basis = effective_basis_map.get(patch_name, bracket_map[patch_name]).upper()
                     if basis == "Z":
-                        end_indices[patch_name] = _last_non_none(list(state.prev.z_prev.get(patch_name, [])))
+                        end_idx = _last_non_none(list(state.prev.z_prev.get(patch_name, [])))
+                        observable_manager.seal_end(patch_name, "Z", end_idx)
+                        end_indices[patch_name] = end_idx
                     else:
-                        end_indices[patch_name] = _last_non_none(list(state.prev.x_prev.get(patch_name, [])))
+                        end_idx = _last_non_none(list(state.prev.x_prev.get(patch_name, [])))
+                        observable_manager.seal_end(patch_name, "X", end_idx)
+                        end_indices[patch_name] = end_idx
                 
                 # Mark as terminated - it won't be measured in future rounds
                 state.terminated_patches.add(patch_name)
@@ -520,243 +539,14 @@ class GlobalStimBuilder:
         # Bracketing: end logicals per patch and observable includes
         # IMPORTANT: do not emit new MPPs here; reuse the last compatible
         # stabilizer measurements from the final round to keep DEM deterministic.
-        observable_pairs: List[Tuple[int, int]] = []
-        basis_labels: List[str] = []
-        observable_index = 0
-        deferred_observables: List[Tuple[Optional[int], Optional[int], int]] = []
+        observable_pairs, basis_labels, deferred_observables = observable_manager.finalize_observables(
+            circuit, state, _last_non_none
+        )
 
-        # At the very end, fallback-seal any observables that didn't conflict
-        for pname, basis in effective_basis_map.items():
-            if pname not in end_indices or end_indices[pname] is not None:
-                continue
-            if basis == "Z":
-                end_indices[pname] = _last_non_none(list(state.prev.z_prev.get(pname, [])))
-            else:
-                end_indices[pname] = _last_non_none(list(state.prev.x_prev.get(pname, [])))
-
-        # Only bracket patches that are explicitly in bracket_map (excludes ancillas and terminated patches)
-        for name in bracket_map.keys():
-            if name not in layout.patches or name in state.terminated_patches:
-                continue  # Skip if patch doesn't exist or was terminated
-            requested_basis = bracket_map[name].upper()
-            effective_basis = effective_basis_map.get(name, requested_basis)
-
-            # Prefer a pre-sealed end (set when a conflicting window began)
-            end_idx = end_indices.get(name)
-            if end_idx is None:
-                if effective_basis == "Z":
-                    end_idx = _last_non_none(list(state.prev.z_prev.get(name, [])))
-                else:
-                    end_idx = _last_non_none(list(state.prev.x_prev.get(name, [])))
-                end_indices[name] = end_idx
-            start_idx = start_indices[name]
-
-            targets: List[GateTarget] = []
-            if start_idx is not None:
-                targets.append(rec_from_abs(circuit, start_idx))
-            if end_idx is not None:
-                targets.append(rec_from_abs(circuit, end_idx))
-
-            if targets:
-                # Defer OBSERVABLE_INCLUDE to the very end to avoid later anti-commuting MPPs
-                deferred_observables.append((start_idx, end_idx, observable_index))
-                observable_pairs.append((start_idx, end_idx))
-                basis_labels.append(effective_basis)
-                observable_index += 1
-
-        # Optional end-only demo readout with conjugated operators
-        demo_info: Dict[str, object] = {}
-        
-        # Try to read demo basis from cfg; treat any invalid as disabled
-        demo_basis = None
-        try:
-            db = getattr(cfg, "demo_basis", None)
-            if db is not None:
-                demo_basis = db
-        except Exception:
-            demo_basis = None
-
-        # Normalize demo_basis to list format
-        demo_bases = []
-        if demo_basis is not None:
-            if isinstance(demo_basis, list):
-                demo_bases = demo_basis
-            else:
-                demo_bases = [demo_basis]
-
-        # Emit end-of-circuit demos.
-        # If both Z and X demo bases are requested, emit a single *combined* final layer
-        # where the joint ZZ and joint XX correlators are measured back-to-back *within
-        # the same TICK*. Then (optionally) emit any single-qubit demos in a later TICK.
-        joint_demo_info: Dict[str, object] = {}
-        
-        # Prepare mapping between logical names and qiskit indices using the
-        # explicit QuantumCircuit qubit order. This implicitly excludes any
-        # ancilla patches that are not part of the original circuit.
-        name_to_idx: Dict[str, int] = {}
-        idx_to_name: Dict[int, str] = {}
-        n_logical = 0
-        if qiskit_circuit is not None:
-            n_logical = qiskit_circuit.num_qubits
-            for qi in range(n_logical):
-                name = f"q{qi}"
-                name_to_idx[name] = qi
-                idx_to_name[qi] = name
-        
-        # Initialize snapshot_info outside conditional blocks
-        snapshot_info = {"enabled": False}
-        
-        if demo_bases and qiskit_circuit is not None:
-
-            # Correlation pairs from compiled CNOT operations (fallback to first two logicals).
-            correlation_pairs: List[Tuple[str, str]] = []
-            for cnot_op in state.cnot_operations:
-                control = cnot_op["control"]
-                target = cnot_op["target"]
-                if control in layout.patches and target in layout.patches:
-                    correlation_pairs.append((control, target))
-            if not correlation_pairs:
-                logical_names = [nm for nm in bracket_map.keys() if nm in layout.patches]
-                if len(logical_names) >= 2:
-                    correlation_pairs.append((logical_names[0], logical_names[1]))
-
-            # Determine if we should use the combined path.
-            requested = {b.upper() for b in demo_bases if isinstance(b, str)}
-            use_combined = requested == {"Z", "X"}
-
-            # Helper to emit a joint correlator (ZZ or XX) for a logical pair
-            def _emit_joint_for_pair(basis: str, q0_name: str, q1_name: str):
-                # Heisenberg-frame: measure U†(ZZ/XX)U at the end
-                if basis == "X":
-                    op = Pauli.two_xx(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                else:
-                    op = Pauli.two_zz(n_logical, name_to_idx[q0_name], name_to_idx[q1_name])
-                conj = conjugate_through_circuit(op, qiskit_circuit)
-                mpp_targets, axes_map = _mpp_targets_from_pauli(conj, layout, idx_to_name)
-                if not mpp_targets:
-                    return None, None, None
-                circuit.append_operation("MPP", mpp_targets)
-                joint_idx = circuit.num_measurements - 1
-                return joint_idx, axes_map, conj
-
-            if use_combined and correlation_pairs:
-                # ---------- Combined final layer: joint ZZ and joint XX within the SAME TICK ----------
-                circuit.append_operation("TICK")
-
-                for (q0_name, q1_name) in correlation_pairs:
-                    # Joint ZZ
-                    idx_zz, axes_map_zz, conj_zz = _emit_joint_for_pair("Z", q0_name, q1_name)
-                    if idx_zz is not None:
-                        joint_demo_info[f"{q0_name}_{q1_name}_Z"] = {
-                            "pair": [q0_name, q1_name],
-                            "logical_operator": f"Z_L({q0_name})⊗Z_L({q1_name})",
-                            "physical_realization": conj_zz.to_string(),
-                            "basis": "Z",
-                            "axes": axes_map_zz,
-                            "index": idx_zz,
-                        }
-
-                    # Joint XX
-                    idx_xx, axes_map_xx, conj_xx = _emit_joint_for_pair("X", q0_name, q1_name)
-                    if idx_xx is not None:
-                        joint_demo_info[f"{q0_name}_{q1_name}_X"] = {
-                            "pair": [q0_name, q1_name],
-                            "logical_operator": f"X_L({q0_name})⊗X_L({q1_name})",
-                            "physical_realization": conj_xx.to_string(),
-                            "basis": "X",
-                            "axes": axes_map_xx,
-                            "index": idx_xx,
-                        }
-                
-                # No singles or snapshot in combined mode
-            else:
-                # ---------- Single basis mode: per-basis emission with singles and snapshot ----------
-                for basis in demo_bases:
-                    # ----- Joint product first for this basis -----
-                    circuit.append_operation("TICK")
-                    for (q0_name, q1_name) in correlation_pairs:
-                        if q0_name not in layout.patches or q1_name not in layout.patches:
-                            continue
-                        idx_joint, axes_map, conj = _emit_joint_for_pair(basis, q0_name, q1_name)
-                        if idx_joint is None:
-                            continue
-                        joint_key = f"{q0_name}_{q1_name}_{basis}"
-                        joint_demo_info[joint_key] = {
-                            "pair": [q0_name, q1_name],
-                            "logical_operator": f"{basis}_L({q0_name})⊗{basis}_L({q1_name})",
-                            "physical_realization": conj.to_string(),
-                            "basis": basis,
-                            "axes": axes_map,
-                            "index": idx_joint,
-                        }
-                    circuit.append_operation("TICK")
-
-                    # ----- Then single-qubit demos for this basis -----
-                    logical_names: List[str] = [nm for nm in bracket_map.keys() if nm in layout.patches]
-                    for patch_name in logical_names:
-                        if basis == "Z":
-                            initial_pauli = Pauli.single_z(n_logical, name_to_idx.get(patch_name, 0))
-                        else:
-                            initial_pauli = Pauli.single_x(n_logical, name_to_idx.get(patch_name, 0))
-                        conjugated_pauli = conjugate_through_circuit(initial_pauli, qiskit_circuit)
-                        singles_targets, _ = _mpp_targets_from_pauli(conjugated_pauli, layout, idx_to_name)
-                        if not singles_targets:
-                            continue
-                        circuit.append_operation("MPP", singles_targets)
-                        demo_idx = circuit.num_measurements - 1
-                        key = f"{patch_name}_{basis}"
-                        demo_info[key] = {
-                            "basis": basis,
-                            "index": demo_idx,
-                            "patch": patch_name,
-                            "logical_operator": conjugated_pauli.to_string(),
-                            "phase": conjugated_pauli.phase_sign(),
-                        }
-                    circuit.append_operation("TICK")
-
-                # ----- Final computational-basis snapshot (single basis mode only) -----
-                if qiskit_circuit is not None and demo_bases:
-                    snapshot_basis = demo_bases[0].upper()
-                    circuit.append_operation("TICK")
-                    logical_names = [nm for nm in sorted(bracket_map.keys()) if nm in layout.patches]
-                    snapshot_indices = []
-                    snapshot_ops = []
-                    snapshot_axes = []
-                    snapshot_phases = []
-                    order_out: List[str] = []
-                    
-                    for patch_name in logical_names:
-                        # Build final-frame operator for this qubit
-                        qi = name_to_idx.get(patch_name)
-                        if qi is None:
-                            continue
-                        if snapshot_basis == "Z":
-                            init_op = Pauli.single_z(n_logical, qi)
-                        else:
-                            init_op = Pauli.single_x(n_logical, qi)
-                        conj_op = conjugate_through_circuit(init_op, qiskit_circuit)
-                        targets, _ = _mpp_targets_from_pauli(conj_op, layout, idx_to_name)
-                        if targets:
-                            circuit.append_operation("MPP", targets)
-                            idx = circuit.num_measurements - 1
-                            snapshot_indices.append(idx)
-                            # Use unified tracker helper to derive axis and phase
-                            tracker = PauliTracker(n_logical)
-                            info = tracker.final_operator_info(qi, snapshot_basis, qiskit_circuit)
-                            snapshot_ops.append(info["operator_string"])
-                            snapshot_axes.append(info["axis"])
-                            snapshot_phases.append(int(info["phase"]))
-                            order_out.append(patch_name)
-                    
-                    snapshot_info = {
-                        "enabled": True,
-                        "basis": snapshot_basis,
-                        "order": order_out,
-                        "indices": snapshot_indices,
-                        "logical_ops": snapshot_ops,
-                        "axes": snapshot_axes,
-                        "phases": snapshot_phases,
-                    }
+        # Generate demo measurements
+        demo_info, joint_demo_info, snapshot_info = demo_generator.generate_demos(
+            circuit, cfg, state, bracket_map, qiskit_circuit
+        )
 
         # Append all deferred detectors at the very end using final measurement count
         detector_manager.emit_all_detectors(circuit)
@@ -773,16 +563,7 @@ class GlobalStimBuilder:
         # If degree_violations remains non-empty, the schedule left a dangling endpoint
         # and must be fixed at the source (segment anchoring or seam suppression), not patched.
         # Append all deferred observables at the very end using final measurement count
-        if deferred_observables:
-            final_m2 = circuit.num_measurements
-            for s_idx, e_idx, obs_k in deferred_observables:
-                obs_targets: List[GateTarget] = []
-                if s_idx is not None:
-                    obs_targets.append(stim.target_rec(s_idx - final_m2))
-                if e_idx is not None:
-                    obs_targets.append(stim.target_rec(e_idx - final_m2))
-                if obs_targets:
-                    circuit.append_operation("OBSERVABLE_INCLUDE", obs_targets, obs_k)
+        observable_manager.emit_observables(circuit, deferred_observables)
 
         metadata: Dict[str, object] = {
             "merge_windows": merge_manager.get_windows(),

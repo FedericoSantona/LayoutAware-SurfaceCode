@@ -48,6 +48,7 @@ class MeasurementHalf:
         conflict_counts: Dict[Tuple[str, str], int],
         start_indices: Dict[str, Optional[int]],
         _rows_touching_local_indices,
+        observable_manager=None,  # Optional ObservableManager
     ) -> Dict[str, List[Optional[int]]]:
         """Measure one half (Z or X) of a round.
         
@@ -64,6 +65,7 @@ class MeasurementHalf:
             conflict_counts: Dict tracking merge conflicts
             start_indices: Dict to update with start indices
             _rows_touching_local_indices: Helper function from builder
+            observable_manager: Optional ObservableManager instance
             
         Returns:
             Dictionary mapping patch names to current measurement indices
@@ -176,6 +178,8 @@ class MeasurementHalf:
                     first_idx = next((idx for idx in indices if idx is not None), None)
                     if first_idx is not None:
                         start_indices[name] = first_idx
+                        if observable_manager is not None:
+                            observable_manager.capture_start(name, first_idx)
                         pending_start.pop(name, None)
         else:
             # If not measuring, preserve previous measurements

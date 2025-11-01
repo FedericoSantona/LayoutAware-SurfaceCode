@@ -25,6 +25,7 @@ from .builder_state import BuilderState, _PrevState
 from .detector_manager import DetectorManager
 from .segment_tracker import SegmentTracker
 from .merge_manager import MergeManager
+from .measurement_half import MeasurementHalf
 
 
 GateTarget = stim.GateTarget
@@ -246,260 +247,44 @@ class GlobalStimBuilder:
                 circuit.append_operation("TICK")
                 if cfg.p_x_error:
                     circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
-                z_curr = {name: (list(vals) if vals is not None else []) for name, vals in state.prev.z_prev.items()}
-
-                # Pending seam detector emission (emit after patch Z MPPs)
-                pending_rough_key = None
-                pending_rough_prev = None
-                pending_rough_curr = None
-
-                if measure_z:
-                    # During a SMOOTH (XX) window, Z stabilizers that touch the seam anti-commute
-                    # with the joint XX checks. Skip them (reuse previous indices) to keep DEM deterministic.
-                    skip_z: Dict[str, Set[int]] = {}
-                    if merge_manager.active_smooth is not None:
-                        seam_a, seam_b, _ = merge_manager.active_smooth
-                        pairs = self.layout.seams.get(("smooth", seam_a, seam_b), [])
-                        if pairs:
-                            skip_z[seam_a] = {ia for ia, _ in pairs}
-                            skip_z[seam_b] = {ib for _, ib in pairs}
-                    meas_z_curr = self._measure_patch_stabilizers(
-                        circuit,
-                        names,
-                        "Z",
-                        skip_indices=skip_z if skip_z else None,
-                        prev_map=state.prev.z_prev,
-                    )
-                    # Pad state.prev.z_prev[name] to number of Z stabilizers for each name
-                    for name in names:
-                        z_stabs = self.layout.patches[name].z_stabs
-                        if name not in state.prev.z_prev:
-                            state.prev.z_prev[name] = [None] * len(z_stabs)
-                        elif len(state.prev.z_prev[name]) < len(z_stabs):
-                            state.prev.z_prev[name].extend([None] * (len(z_stabs) - len(state.prev.z_prev[name])))
-                    for name in names:
-                        # Segment tracking (Z): update last seen; first is set on first temporal edge
-                        z_list = list(meas_z_curr.get(name, []))
-                        segment_tracker.ensure_seg_lists(name, "Z", len(z_list))
-                        keyZ = (name, "Z")
-                        for si, idx_abs in enumerate(z_list):
-                            if idx_abs is not None:
-                                segment_tracker.update_segment(name, "Z", si, idx_abs)
-                        # Suppress Z temporal detectors while this patch is in an active SMOOTH (XX) merge window
-                        # Per-row suppression: only skip rows that touch the active seam
-                        row_skip: Set[int] = set()
-                        if merge_manager.active_smooth is not None and name in {merge_manager.active_smooth[0], merge_manager.active_smooth[1]}:
-                            rows = self.layout.seams.get(("smooth", merge_manager.active_smooth[0], merge_manager.active_smooth[1]), [])
-                            if rows:
-                                if name == merge_manager.active_smooth[0]:
-                                    local_set = {ia for ia, _ in rows}
-                                else:
-                                    local_set = {ib for _, ib in rows}
-                                row_skip = _rows_touching_local_indices(name, "Z", local_set)
-                        # Record temporal detector edges (absolute measurement indices) for non-skipped rows
-                        p_list = list(state.prev.z_prev.get(name, []))
-                        c_list = list(meas_z_curr.get(name, []))
-                        from itertools import zip_longest as _ziplg
-                        for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
-                            if si in row_skip:
-                                continue
-                            if a is None or b is None or a == b:
-                                continue
-                            # On first edge within a fresh segment, set first=a so wrap uses [a,last]
-                            keyZ_h = (name, "Z")
-                            segment_tracker.ensure_seg_lists(name, "Z", max(len(p_list), len(c_list)))
-                            first_edge = segment_tracker.set_first_if_none(name, "Z", si, a)
-                            segment_tracker.update_segment(name, "Z", si, b)
-                            # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
-                            _det_id = detector_manager.defer_detector([a, b], "z_temporal", {"patch": name, "row": si})
-                            if detector_manager.force_boundaries and first_edge:
-                                keyZ_h = (name, "Z")
-                                segment_tracker.ensure_seg_lists(name, "Z", si + 1)
-                                if si < len(segment_tracker.seg_boundary_emitted.get(keyZ_h, [])) and not segment_tracker.seg_boundary_emitted[keyZ_h][si]:
-                                    detector_manager.anchor_detector_ids.append(_det_id)
-                                    segment_tracker.seg_boundary_emitted[keyZ_h][si] = True
-                                    detector_manager.boundary_counts_z[name] = detector_manager.boundary_counts_z.get(name, 0) + 1
-                            segment_tracker.mark_had_edge(name, "Z", si)
-                        z_curr[name] = list(meas_z_curr.get(name, []))
-                        if (
-                            name in pending_start
-                            and pending_start[name] == "Z"
-                            and not (
-                                (merge_manager.active_smooth is not None and name in {merge_manager.active_smooth[0], merge_manager.active_smooth[1]})
-                                or (merge_manager.active_rough is not None and name in {merge_manager.active_rough[0], merge_manager.active_rough[1]})
-                            )
-                            and conflict_counts.get((name, "Z"), 0) == 0
-                        ):
-                            indices = meas_z_curr.get(name, [])
-                            first_idx = next((idx for idx in indices if idx is not None), None)
-                            if first_idx is not None:
-                                start_indices[name] = first_idx
-                                pending_start.pop(name, None)
-                else:
-                    for name in names:
-                        if name not in z_curr:
-                            z_curr[name] = list(state.prev.z_prev.get(name, []))
-
-                # Rough seam: only record for later emission (after patch Z MPPs)
-                if measure_z and merge_manager.active_rough is not None:
-                    seam_a, seam_b, _ = merge_manager.active_rough
-                    pending_rough_key = ("rough", seam_a, seam_b)
-                    pending_rough_prev = list(state.prev.joint_prev.get(pending_rough_key, []))
-                    pending_rough_curr = merge_manager.measure_joint_checks(circuit, "rough", seam_a, seam_b)
-                    if pending_rough_curr:
-                        merge_manager.seam_round_counts[pending_rough_key] = merge_manager.seam_round_counts.get(pending_rough_key, 0) + 1
-                    # Capture the first joint round indices for wrap-around closure
-                    if pending_rough_prev is None or not pending_rough_prev or all(x is None for x in pending_rough_prev):
-                        if pending_rough_curr:
-                            merge_manager.first_window_joint[pending_rough_key] = list(pending_rough_curr)
-
-                # Emit seam temporal detectors *after* all Z MPPs of this half
-                if pending_rough_key is not None and pending_rough_curr is not None:
-                    if merge_manager.seam_round_counts.get(pending_rough_key, 0) >= 2:
-                        p_list = list(pending_rough_prev if pending_rough_prev is not None else [])
-                        c_list = list(pending_rough_curr)
-                        from itertools import zip_longest as _ziplg
-                        for pair_i, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
-                            if a is None or b is None or a == b:
-                                continue
-                            key_emit = (pending_rough_key[0], pending_rough_key[1], pending_rough_key[2], pair_i, merge_manager.get_current_window_id())
-                            if detector_manager.force_boundaries and key_emit not in detector_manager.seam_pair_boundary_emitted:
-                                _det_id = detector_manager.defer_detector([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
-                                detector_manager.anchor_detector_ids.append(_det_id)
-                                detector_manager.seam_pair_boundary_emitted.add(key_emit)
-                            else:
-                                detector_manager.defer_detector([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
-                    state.prev.joint_prev[pending_rough_key] = list(pending_rough_curr)
-
+                
+                z_half = MeasurementHalf(self, "Z")
+                z_curr = z_half.measure_round(
+                    circuit,
+                    names,
+                    cfg,
+                    state,
+                    detector_manager,
+                    segment_tracker,
+                    merge_manager,
+                    measure_z,
+                    pending_start,
+                    conflict_counts,
+                    start_indices,
+                    _rows_touching_local_indices,
+                )
                 state.prev.z_prev = z_curr
 
                 # X half
                 circuit.append_operation("TICK")
                 if cfg.p_z_error:
                     circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
-                x_curr = {name: (list(vals) if vals is not None else []) for name, vals in state.prev.x_prev.items()}
-
-                # Pending seam detector emission (emit after patch X MPPs)
-                pending_smooth_key = None
-                pending_smooth_prev = None
-                pending_smooth_curr = None
-
-                if measure_x:
-                    # During a ROUGH (ZZ) window, X stabilizers that touch the seam anti-commute
-                    # with the joint ZZ checks. Skip them (reuse previous indices) to keep DEM deterministic.
-                    skip_x: Dict[str, Set[int]] = {}
-                    if merge_manager.active_rough is not None:
-                        seam_a, seam_b, _ = merge_manager.active_rough
-                        pairs = self.layout.seams.get(("rough", seam_a, seam_b), [])
-                        if pairs:
-                            skip_x[seam_a] = {ia for ia, _ in pairs}
-                            skip_x[seam_b] = {ib for _, ib in pairs}
-                    meas_x_curr = self._measure_patch_stabilizers(
-                        circuit,
-                        names,
-                        "X",
-                        skip_indices=skip_x if skip_x else None,
-                        prev_map=state.prev.x_prev,
-                    )
-                    # Pad state.prev.x_prev[name] to number of X stabilizers for each name
-                    for name in names:
-                        x_stabs = self.layout.patches[name].x_stabs
-                        if name not in state.prev.x_prev:
-                            state.prev.x_prev[name] = [None] * len(x_stabs)
-                        elif len(state.prev.x_prev[name]) < len(x_stabs):
-                            state.prev.x_prev[name].extend([None] * (len(x_stabs) - len(state.prev.x_prev[name])))
-                    for name in names:
-                        # Segment tracking (X): update last seen; first is set on first temporal edge
-                        x_list = list(meas_x_curr.get(name, []))
-                        segment_tracker.ensure_seg_lists(name, "X", len(x_list))
-                        keyX = (name, "X")
-                        for si, idx_abs in enumerate(x_list):
-                            if idx_abs is not None:
-                                segment_tracker.update_segment(name, "X", si, idx_abs)
-                        # Suppress X temporal detectors while this patch is in an active ROUGH (ZZ) merge window
-                        # Per-row suppression: only skip rows that touch the active seam
-                        row_skip_x: Set[int] = set()
-                        if merge_manager.active_rough is not None and name in {merge_manager.active_rough[0], merge_manager.active_rough[1]}:
-                            rows = self.layout.seams.get(("rough", merge_manager.active_rough[0], merge_manager.active_rough[1]), [])
-                            if rows:
-                                if name == merge_manager.active_rough[0]:
-                                    local_set = {ia for ia, _ in rows}
-                                else:
-                                    local_set = {ib for _, ib in rows}
-                                row_skip_x = _rows_touching_local_indices(name, "X", local_set)
-                        p_list = list(state.prev.x_prev.get(name, []))
-                        c_list = list(meas_x_curr.get(name, []))
-                        from itertools import zip_longest as _ziplg
-                        for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
-                            if si in row_skip_x:
-                                continue
-                            if a is None or b is None or a == b:
-                                continue
-                            keyX_h = (name, "X")
-                            segment_tracker.ensure_seg_lists(name, "X", max(len(p_list), len(c_list)))
-                            first_edge = segment_tracker.set_first_if_none(name, "X", si, a)
-                            segment_tracker.update_segment(name, "X", si, b)
-                            # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
-                            _det_id = detector_manager.defer_detector([a, b], "x_temporal", {"patch": name, "row": si})
-                            if detector_manager.force_boundaries and first_edge:
-                                keyX_h = (name, "X")
-                                segment_tracker.ensure_seg_lists(name, "X", si + 1)
-                                if si < len(segment_tracker.seg_boundary_emitted.get(keyX_h, [])) and not segment_tracker.seg_boundary_emitted[keyX_h][si]:
-                                    detector_manager.anchor_detector_ids.append(_det_id)
-                                    segment_tracker.seg_boundary_emitted[keyX_h][si] = True
-                                    detector_manager.boundary_counts_x[name] = detector_manager.boundary_counts_x.get(name, 0) + 1
-                            segment_tracker.mark_had_edge(name, "X", si)
-                        x_curr[name] = list(meas_x_curr.get(name, []))
-                        if (
-                            name in pending_start
-                            and pending_start[name] == "X"
-                            and not (
-                                (merge_manager.active_smooth is not None and name in {merge_manager.active_smooth[0], merge_manager.active_smooth[1]})
-                                or (merge_manager.active_rough is not None and name in {merge_manager.active_rough[0], merge_manager.active_rough[1]})
-                            )
-                            and conflict_counts.get((name, "X"), 0) == 0
-                        ):
-                            indices = meas_x_curr.get(name, [])
-                            first_idx = next((idx for idx in indices if idx is not None), None)
-                            if first_idx is not None:
-                                start_indices[name] = first_idx
-                                pending_start.pop(name, None)
-                else:
-                    for name in names:
-                        if name not in x_curr:
-                            x_curr[name] = list(state.prev.x_prev.get(name, []))
-
-                # Smooth seam: only record for later emission (after patch X MPPs)
-                if measure_x and merge_manager.active_smooth is not None:
-                    seam_a, seam_b, _ = merge_manager.active_smooth
-                    pending_smooth_key = ("smooth", seam_a, seam_b)
-                    pending_smooth_prev = list(state.prev.joint_prev.get(pending_smooth_key, []))
-                    pending_smooth_curr = merge_manager.measure_joint_checks(circuit, "smooth", seam_a, seam_b)
-                    if pending_smooth_curr:
-                        merge_manager.seam_round_counts[pending_smooth_key] = merge_manager.seam_round_counts.get(pending_smooth_key, 0) + 1
-                    # Capture the first joint round indices for wrap-around closure
-                    if pending_smooth_prev is None or not pending_smooth_prev or all(x is None for x in pending_smooth_prev):
-                        if pending_smooth_curr:
-                            merge_manager.first_window_joint[pending_smooth_key] = list(pending_smooth_curr)
-
-                # Emit seam temporal detectors *after* all X MPPs of this half
-                if pending_smooth_key is not None and pending_smooth_curr is not None:
-                    if merge_manager.seam_round_counts.get(pending_smooth_key, 0) >= 2:
-                        p_list = list(pending_smooth_prev if pending_smooth_prev is not None else [])
-                        c_list = list(pending_smooth_curr)
-                        from itertools import zip_longest as _ziplg
-                        for pair_i, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
-                            if a is None or b is None or a == b:
-                                continue
-                            key_emit = (pending_smooth_key[0], pending_smooth_key[1], pending_smooth_key[2], pair_i, merge_manager.get_current_window_id())
-                            if detector_manager.force_boundaries and key_emit not in detector_manager.seam_pair_boundary_emitted:
-                                _det_id = detector_manager.defer_detector([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
-                                detector_manager.anchor_detector_ids.append(_det_id)
-                                detector_manager.seam_pair_boundary_emitted.add(key_emit)
-                            else:
-                                detector_manager.defer_detector([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
-                    state.prev.joint_prev[pending_smooth_key] = list(pending_smooth_curr)
-
+                
+                x_half = MeasurementHalf(self, "X")
+                x_curr = x_half.measure_round(
+                    circuit,
+                    names,
+                    cfg,
+                    state,
+                    detector_manager,
+                    segment_tracker,
+                    merge_manager,
+                    measure_x,
+                    pending_start,
+                    conflict_counts,
+                    start_indices,
+                    _rows_touching_local_indices,
+                )
                 state.prev.x_prev = x_curr
 
                 # Update merge countdowns and close windows when done

@@ -21,16 +21,11 @@ from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, TerminatePat
 from .configs import PhenomenologicalStimConfig
 from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index, _mpp_targets_from_pauli
 from .pauli import Pauli, conjugate_through_circuit, PauliTracker
+from .builder_state import BuilderState, _PrevState
+from .detector_manager import DetectorManager
 
 
 GateTarget = stim.GateTarget
-
-
-@dataclass
-class _PrevState:
-    z_prev: Dict[str, List[Optional[int]]]
-    x_prev: Dict[str, List[Optional[int]]]
-    joint_prev: Dict[Tuple[str, str, str], List[int]]  # key=(kind,a,b)
 
 
 class GlobalStimBuilder:
@@ -151,45 +146,21 @@ class GlobalStimBuilder:
         # Coordinates
         self._emit_qubit_coords(circuit)
 
-
-        # Defer DETECTOR appends to the end for determinism.
-        # Collect edges as absolute measurement index lists (len 2; wraps are len 2 as well).
-        deferred_detectors: List[List[int]] = []
-        # Edge provenance for debugging odd-degree endpoints
-        edge_records: List[Dict[str, object]] = []
-        # Per-row temporal degree tracking: key=(basis, patch, row) -> {abs_idx: degree}
-        row_temporal_degree: Dict[Tuple[str, str, int], Dict[int, int]] = {}
-
-        def _defer_detector_from_abs(abs_indices: List[int], tag: str, context: Optional[Dict[str, object]] = None) -> int:
-            deferred_detectors.append(list(abs_indices))
-            edge_records.append({
-                "indices": list(abs_indices),
-                "tag": tag,
-                "context": dict(context or {}),
-            })
-            # Track per-row temporal degrees for x_temporal/z_temporal
-            if tag in ("x_temporal", "z_temporal"):
-                patch_name = (context or {}).get("patch")
-                row = (context or {}).get("row")
-                if isinstance(patch_name, str) and isinstance(row, int):
-                    basis = "X" if tag.startswith("x_") else "Z"
-                    key_rt = (basis, patch_name, int(row))
-                    deg_map = row_temporal_degree.setdefault(key_rt, {})
-                    for idx in abs_indices:
-                        deg_map[idx] = deg_map.get(idx, 0) + 1
-            # Return a stable index even though it's not used downstream.
-            return len(deferred_detectors) - 1
+        # Initialize state and managers
+        state = BuilderState()
+        force_boundaries = getattr(cfg, "force_boundaries", True)
+        boundary_error_prob = getattr(cfg, "boundary_error_prob", 1e-12)
+        detector_manager = DetectorManager(force_boundaries=force_boundaries, boundary_error_prob=boundary_error_prob)
 
         # Resolve patch order and selection helpers
         all_patches: List[str] = list(layout.patches.keys())
         
-        # Track patches terminated by mid-circuit measurements
-        terminated_patches: Set[str] = set()
+        # Track patches terminated by mid-circuit measurements (now in state)
 
         def select_patches(spec: Optional[List[str]]) -> List[str]:
             # Filter out terminated patches
-            active = [p for p in all_patches if p not in terminated_patches]
-            return active if spec is None else [p for p in spec if p not in terminated_patches]
+            active = [p for p in all_patches if p not in state.terminated_patches]
+            return active if spec is None else [p for p in spec if p not in state.terminated_patches]
 
 
         # Determine merge participation per patch for bracket adjustments
@@ -306,7 +277,7 @@ class GlobalStimBuilder:
                 b = last_list[si] if si < len(last_list) else None
                 # Wrap-close any open segment where endpoints differ
                 if a is not None and b is not None and a != b:
-                    _defer_detector_from_abs([a, b], f"{basis.lower()}_wrap", {"patch": patch_name, "row": si})
+                    detector_manager.defer_detector([a, b], f"{basis.lower()}_wrap", {"patch": patch_name, "row": si})
                     if basis == "Z":
                         z_row_wraps.setdefault(patch_name, []).append(si)
                     else:
@@ -324,12 +295,13 @@ class GlobalStimBuilder:
 
 
         # Establish initial references: Z then X for active patches
-        prev = _PrevState(z_prev={}, x_prev={}, joint_prev={})
+        # (prev is now in state.prev)
+        
         # Cache the last joint indices per merge window and accumulate byproduct metadata
         last_window_joint: Dict[Tuple[str, str, str], List[int]] = {}
         # Track the first joint indices per merge window for wrap-around closure
         first_window_joint: Dict[Tuple[str, str, str], List[int]] = {}
-        byproducts: List[Dict[str, object]] = []
+        # (byproducts now in state.byproducts)
 
         # Active merge trackers and metadata for joint windows
         active_rough: Optional[Tuple[str, str, int]] = None  # (a,b,remaining)
@@ -338,28 +310,11 @@ class GlobalStimBuilder:
         current_window: Optional[Dict[str, object]] = None
         window_id = 0
         
-        # CNOT operation tracking for Pauli frame updates
-        cnot_operations: List[Dict[str, object]] = []
-        current_cnot: Optional[Dict[str, object]] = None
-
-        # Configurable boundary anchors
-        force_boundaries = getattr(cfg, "force_boundaries", True)
-        boundary_error_prob = getattr(cfg, "boundary_error_prob", 1e-12)
-
-        # Track anchor DETECTOR ids: ids of the FIRST 2-target temporal detectors per row or seam pair per window; used later to inject DEM boundaries.
-        anchor_detector_ids: List[int] = []
-
-        # Track whether we've added a boundary anchor per seam pair per window
-        seam_pair_boundary_emitted: Set[Tuple[str, str, str, int, int]] = set()
+        # CNOT operation tracking for Pauli frame updates (now in state)
+        
         # Track seam round counts and wraps for diagnostics and gating
         seam_round_counts: Dict[Tuple[str, str, str], int] = {}
         seam_wrap_counts: Dict[Tuple[str, str, str], int] = {}
-        # Count emitted boundaries for diagnostics
-        boundary_counts_z: Dict[str, int] = {}
-        boundary_counts_x: Dict[str, int] = {}
-        seam_boundary_counts: Dict[Tuple[str, str, str, int], int] = {}
-        # Track whether we've already anchored a seam wrap for a given pair within a window
-        seam_wrap_anchor_emitted: Set[Tuple[str, str, str, int]] = set()
 
         def _begin_window(kind: str, a: str, b: str, rounds: int) -> None:
             nonlocal current_window, window_id
@@ -373,9 +328,9 @@ class GlobalStimBuilder:
             }
             window_id += 1
             seam_round_counts[(kind, a, b)] = 0
-            # Seed prev.joint_prev[(kind, a, b)] with [None] * len(pairs) for this window
+            # Seed state.prev.joint_prev[(kind, a, b)] with [None] * len(pairs) for this window
             pairs = self.layout.seams.get((kind, a, b), [])
-            prev.joint_prev[(kind, a, b)] = [None] * len(pairs)
+            state.prev.joint_prev[(kind, a, b)] = [None] * len(pairs)
 
         def _end_window() -> None:
             nonlocal current_window
@@ -396,7 +351,7 @@ class GlobalStimBuilder:
                 circuit.append_operation("TICK")
                 if cfg.p_x_error:
                     circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
-                z_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.z_prev.items()}
+                z_curr = {name: (list(vals) if vals is not None else []) for name, vals in state.prev.z_prev.items()}
 
                 # Pending seam detector emission (emit after patch Z MPPs)
                 pending_rough_key = None
@@ -418,15 +373,15 @@ class GlobalStimBuilder:
                         names,
                         "Z",
                         skip_indices=skip_z if skip_z else None,
-                        prev_map=prev.z_prev,
+                        prev_map=state.prev.z_prev,
                     )
-                    # Pad prev.z_prev[name] to number of Z stabilizers for each name
+                    # Pad state.prev.z_prev[name] to number of Z stabilizers for each name
                     for name in names:
                         z_stabs = self.layout.patches[name].z_stabs
-                        if name not in prev.z_prev:
-                            prev.z_prev[name] = [None] * len(z_stabs)
-                        elif len(prev.z_prev[name]) < len(z_stabs):
-                            prev.z_prev[name].extend([None] * (len(z_stabs) - len(prev.z_prev[name])))
+                        if name not in state.prev.z_prev:
+                            state.prev.z_prev[name] = [None] * len(z_stabs)
+                        elif len(state.prev.z_prev[name]) < len(z_stabs):
+                            state.prev.z_prev[name].extend([None] * (len(z_stabs) - len(state.prev.z_prev[name])))
                     for name in names:
                         # Segment tracking (Z): update last seen; first is set on first temporal edge
                         z_list = list(meas_z_curr.get(name, []))
@@ -447,7 +402,7 @@ class GlobalStimBuilder:
                                     local_set = {ib for _, ib in rows}
                                 row_skip = _rows_touching_local_indices(name, "Z", local_set)
                         # Record temporal detector edges (absolute measurement indices) for non-skipped rows
-                        p_list = list(prev.z_prev.get(name, []))
+                        p_list = list(state.prev.z_prev.get(name, []))
                         c_list = list(meas_z_curr.get(name, []))
                         from itertools import zip_longest as _ziplg
                         for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
@@ -463,12 +418,12 @@ class GlobalStimBuilder:
                                 seg_first[keyZ_h][si] = a
                             seg_last[keyZ_h][si] = b
                             # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
-                            _det_id = _defer_detector_from_abs([a, b], "z_temporal", {"patch": name, "row": si})
-                            if force_boundaries and first_edge:
+                            _det_id = detector_manager.defer_detector([a, b], "z_temporal", {"patch": name, "row": si})
+                            if detector_manager.force_boundaries and first_edge:
                                 if si < len(seg_boundary_emitted[keyZ_h]) and not seg_boundary_emitted[keyZ_h][si]:
-                                    anchor_detector_ids.append(_det_id)
+                                    detector_manager.anchor_detector_ids.append(_det_id)
                                     seg_boundary_emitted[keyZ_h][si] = True
-                                    boundary_counts_z[name] = boundary_counts_z.get(name, 0) + 1
+                                    detector_manager.boundary_counts_z[name] = detector_manager.boundary_counts_z.get(name, 0) + 1
                             if si < len(seg_had_edge[keyZ_h]):
                                 seg_had_edge[keyZ_h][si] = True
                         z_curr[name] = list(meas_z_curr.get(name, []))
@@ -489,13 +444,13 @@ class GlobalStimBuilder:
                 else:
                     for name in names:
                         if name not in z_curr:
-                            z_curr[name] = list(prev.z_prev.get(name, []))
+                            z_curr[name] = list(state.prev.z_prev.get(name, []))
 
                 # Rough seam: only record for later emission (after patch Z MPPs)
                 if measure_z and active_rough is not None:
                     seam_a, seam_b, _ = active_rough
                     pending_rough_key = ("rough", seam_a, seam_b)
-                    pending_rough_prev = list(prev.joint_prev.get(pending_rough_key, []))
+                    pending_rough_prev = list(state.prev.joint_prev.get(pending_rough_key, []))
                     pending_rough_curr = self._measure_joint_checks(circuit, "rough", seam_a, seam_b)
                     if pending_rough_curr:
                         seam_round_counts[pending_rough_key] = seam_round_counts.get(pending_rough_key, 0) + 1
@@ -514,21 +469,21 @@ class GlobalStimBuilder:
                             if a is None or b is None or a == b:
                                 continue
                             key_emit = (pending_rough_key[0], pending_rough_key[1], pending_rough_key[2], pair_i, (current_window["id"] if current_window is not None else window_id))
-                            if force_boundaries and key_emit not in seam_pair_boundary_emitted:
-                                _det_id = _defer_detector_from_abs([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
-                                anchor_detector_ids.append(_det_id)
-                                seam_pair_boundary_emitted.add(key_emit)
+                            if detector_manager.force_boundaries and key_emit not in detector_manager.seam_pair_boundary_emitted:
+                                _det_id = detector_manager.defer_detector([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
+                                detector_manager.anchor_detector_ids.append(_det_id)
+                                detector_manager.seam_pair_boundary_emitted.add(key_emit)
                             else:
-                                _defer_detector_from_abs([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
-                    prev.joint_prev[pending_rough_key] = list(pending_rough_curr)
+                                detector_manager.defer_detector([a, b], "rough_temporal", {"seam": pending_rough_key, "pair_idx": pair_i})
+                    state.prev.joint_prev[pending_rough_key] = list(pending_rough_curr)
 
-                prev.z_prev = z_curr
+                state.prev.z_prev = z_curr
 
                 # X half
                 circuit.append_operation("TICK")
                 if cfg.p_z_error:
                     circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
-                x_curr = {name: (list(vals) if vals is not None else []) for name, vals in prev.x_prev.items()}
+                x_curr = {name: (list(vals) if vals is not None else []) for name, vals in state.prev.x_prev.items()}
 
                 # Pending seam detector emission (emit after patch X MPPs)
                 pending_smooth_key = None
@@ -550,15 +505,15 @@ class GlobalStimBuilder:
                         names,
                         "X",
                         skip_indices=skip_x if skip_x else None,
-                        prev_map=prev.x_prev,
+                        prev_map=state.prev.x_prev,
                     )
-                    # Pad prev.x_prev[name] to number of X stabilizers for each name
+                    # Pad state.prev.x_prev[name] to number of X stabilizers for each name
                     for name in names:
                         x_stabs = self.layout.patches[name].x_stabs
-                        if name not in prev.x_prev:
-                            prev.x_prev[name] = [None] * len(x_stabs)
-                        elif len(prev.x_prev[name]) < len(x_stabs):
-                            prev.x_prev[name].extend([None] * (len(x_stabs) - len(prev.x_prev[name])))
+                        if name not in state.prev.x_prev:
+                            state.prev.x_prev[name] = [None] * len(x_stabs)
+                        elif len(state.prev.x_prev[name]) < len(x_stabs):
+                            state.prev.x_prev[name].extend([None] * (len(x_stabs) - len(state.prev.x_prev[name])))
                     for name in names:
                         # Segment tracking (X): update last seen; first is set on first temporal edge
                         x_list = list(meas_x_curr.get(name, []))
@@ -578,7 +533,7 @@ class GlobalStimBuilder:
                                 else:
                                     local_set = {ib for _, ib in rows}
                                 row_skip_x = _rows_touching_local_indices(name, "X", local_set)
-                        p_list = list(prev.x_prev.get(name, []))
+                        p_list = list(state.prev.x_prev.get(name, []))
                         c_list = list(meas_x_curr.get(name, []))
                         from itertools import zip_longest as _ziplg
                         for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
@@ -593,12 +548,12 @@ class GlobalStimBuilder:
                                 seg_first[keyX_h][si] = a
                             seg_last[keyX_h][si] = b
                             # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
-                            _det_id = _defer_detector_from_abs([a, b], "x_temporal", {"patch": name, "row": si})
-                            if force_boundaries and first_edge:
+                            _det_id = detector_manager.defer_detector([a, b], "x_temporal", {"patch": name, "row": si})
+                            if detector_manager.force_boundaries and first_edge:
                                 if si < len(seg_boundary_emitted[keyX_h]) and not seg_boundary_emitted[keyX_h][si]:
-                                    anchor_detector_ids.append(_det_id)
+                                    detector_manager.anchor_detector_ids.append(_det_id)
                                     seg_boundary_emitted[keyX_h][si] = True
-                                    boundary_counts_x[name] = boundary_counts_x.get(name, 0) + 1
+                                    detector_manager.boundary_counts_x[name] = detector_manager.boundary_counts_x.get(name, 0) + 1
                             if si < len(seg_had_edge[keyX_h]):
                                 seg_had_edge[keyX_h][si] = True
                         x_curr[name] = list(meas_x_curr.get(name, []))
@@ -619,13 +574,13 @@ class GlobalStimBuilder:
                 else:
                     for name in names:
                         if name not in x_curr:
-                            x_curr[name] = list(prev.x_prev.get(name, []))
+                            x_curr[name] = list(state.prev.x_prev.get(name, []))
 
                 # Smooth seam: only record for later emission (after patch X MPPs)
                 if measure_x and active_smooth is not None:
                     seam_a, seam_b, _ = active_smooth
                     pending_smooth_key = ("smooth", seam_a, seam_b)
-                    pending_smooth_prev = list(prev.joint_prev.get(pending_smooth_key, []))
+                    pending_smooth_prev = list(state.prev.joint_prev.get(pending_smooth_key, []))
                     pending_smooth_curr = self._measure_joint_checks(circuit, "smooth", seam_a, seam_b)
                     if pending_smooth_curr:
                         seam_round_counts[pending_smooth_key] = seam_round_counts.get(pending_smooth_key, 0) + 1
@@ -644,15 +599,15 @@ class GlobalStimBuilder:
                             if a is None or b is None or a == b:
                                 continue
                             key_emit = (pending_smooth_key[0], pending_smooth_key[1], pending_smooth_key[2], pair_i, (current_window["id"] if current_window is not None else window_id))
-                            if force_boundaries and key_emit not in seam_pair_boundary_emitted:
-                                _det_id = _defer_detector_from_abs([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
-                                anchor_detector_ids.append(_det_id)
-                                seam_pair_boundary_emitted.add(key_emit)
+                            if detector_manager.force_boundaries and key_emit not in detector_manager.seam_pair_boundary_emitted:
+                                _det_id = detector_manager.defer_detector([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
+                                detector_manager.anchor_detector_ids.append(_det_id)
+                                detector_manager.seam_pair_boundary_emitted.add(key_emit)
                             else:
-                                _defer_detector_from_abs([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
-                    prev.joint_prev[pending_smooth_key] = list(pending_smooth_curr)
+                                detector_manager.defer_detector([a, b], "smooth_temporal", {"seam": pending_smooth_key, "pair_idx": pair_i})
+                    state.prev.joint_prev[pending_smooth_key] = list(pending_smooth_curr)
 
-                prev.x_prev = x_curr
+                state.prev.x_prev = x_curr
 
                 # Update merge countdowns and close windows when done
                 if active_rough is not None:
@@ -679,16 +634,16 @@ class GlobalStimBuilder:
                         raise RuntimeError("A rough merge is already active")
                     seam_pairs = layout.seams.get(("rough", op.a, op.b), [])
                     if not seam_pairs:
-                        prev.joint_prev[(k, op.a, op.b)] = [None] * 0
+                        state.prev.joint_prev[(k, op.a, op.b)] = [None] * 0
                         continue
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
                     # Seal X-basis observables on involved patches if still unset
                     for pname in (op.a, op.b):
                         if effective_basis_map.get(pname) == "X" and end_indices.get(pname) is None:
-                            end_indices[pname] = _last_non_none(list(prev.x_prev.get(pname, [])))
-                    mask_a = self._mask_prev_stabilizers(prev.x_prev, op.a, "X", indices_a)
-                    mask_b = self._mask_prev_stabilizers(prev.x_prev, op.b, "X", indices_b)
+                            end_indices[pname] = _last_non_none(list(state.prev.x_prev.get(pname, [])))
+                    mask_a = self._mask_prev_stabilizers(state.prev.x_prev, op.a, "X", indices_a)
+                    mask_b = self._mask_prev_stabilizers(state.prev.x_prev, op.b, "X", indices_b)
                     # Close current X segments touching the seam before the gap
                     _wrap_close_segment(op.a, "X", mask_a)
                     _wrap_close_segment(op.b, "X", mask_b)
@@ -698,21 +653,21 @@ class GlobalStimBuilder:
                         raise RuntimeError("A smooth merge is already active")
                     seam_pairs = layout.seams.get(("smooth", op.a, op.b), [])
                     if not seam_pairs:
-                        prev.joint_prev[(k, op.a, op.b)] = [None] * 0
+                        state.prev.joint_prev[(k, op.a, op.b)] = [None] * 0
                         continue
                     indices_a = {ia for ia, _ in seam_pairs}
                     indices_b = {ib for _, ib in seam_pairs}
                     # Seal Z-basis observables on involved patches if still unset
                     for pname in (op.a, op.b):
                         if effective_basis_map.get(pname) == "Z" and end_indices.get(pname) is None:
-                            end_indices[pname] = _last_non_none(list(prev.z_prev.get(pname, [])))
-                    mask_a = self._mask_prev_stabilizers(prev.z_prev, op.a, "Z", indices_a)
-                    mask_b = self._mask_prev_stabilizers(prev.z_prev, op.b, "Z", indices_b)
+                            end_indices[pname] = _last_non_none(list(state.prev.z_prev.get(pname, [])))
+                    mask_a = self._mask_prev_stabilizers(state.prev.z_prev, op.a, "Z", indices_a)
+                    mask_b = self._mask_prev_stabilizers(state.prev.z_prev, op.b, "Z", indices_b)
                     _wrap_close_segment(op.a, "Z", mask_a)
                     _wrap_close_segment(op.b, "Z", mask_b)
                     active_smooth = (op.a, op.b, int(op.rounds))
                 # Clear any lingering joint history for this seam
-                prev.joint_prev[(k, op.a, op.b)] = [None] * len(seam_pairs)
+                state.prev.joint_prev[(k, op.a, op.b)] = [None] * len(seam_pairs)
                 _begin_window(k, op.a, op.b, int(op.rounds))
 
             elif isinstance(op, Split):
@@ -732,7 +687,7 @@ class GlobalStimBuilder:
                     if conflict_counts.get(key2, 0) > 0:
                         conflict_counts[key2] -= 1
                 # Snapshot the last measured joint indices for this window before clearing
-                last_window_joint[(k, op.a, op.b)] = list(prev.joint_prev.get((k, op.a, op.b), []))
+                last_window_joint[(k, op.a, op.b)] = list(state.prev.joint_prev.get((k, op.a, op.b), []))
                 # Wrap-close the seam chain by adding a detector between the first and last joint measurements for each pair
                 key = (k, op.a, op.b)
                 first_list = list(first_window_joint.get(key, []))
@@ -744,19 +699,19 @@ class GlobalStimBuilder:
                     for pair_i, (a_idx, b_idx) in enumerate(_ziplg(first_list, last_list, fillvalue=None)):
                         if a_idx is None or b_idx is None or a_idx == b_idx:
                             continue
-                        det_id = _defer_detector_from_abs([a_idx, b_idx], f"{k}_wrap", {"seam": key, "pair_idx": pair_i})
-                        if force_boundaries:
+                        det_id = detector_manager.defer_detector([a_idx, b_idx], f"{k}_wrap", {"seam": key, "pair_idx": pair_i})
+                        if detector_manager.force_boundaries:
                             anchor_key = (k, op.a, op.b, pair_i)
-                            if anchor_key not in seam_wrap_anchor_emitted:
-                                anchor_detector_ids.append(det_id)
-                                seam_wrap_anchor_emitted.add(anchor_key)
-                                seam_boundary_counts[anchor_key] = seam_boundary_counts.get(anchor_key, 0) + 1
+                            if anchor_key not in detector_manager.seam_wrap_anchor_emitted:
+                                detector_manager.anchor_detector_ids.append(det_id)
+                                detector_manager.seam_wrap_anchor_emitted.add(anchor_key)
+                                detector_manager.seam_boundary_counts[anchor_key] = detector_manager.seam_boundary_counts.get(anchor_key, 0) + 1
                         wrap_added += 1
                     if wrap_added:
                         seam_wrap_counts[key] = seam_wrap_counts.get(key, 0) + wrap_added
                 # Clear stored endpoints for this window
                 first_window_joint.pop(key, None)
-                prev.joint_prev[(k, op.a, op.b)] = []
+                state.prev.joint_prev[(k, op.a, op.b)] = []
                 seam_round_counts.pop(key, None)
 
             elif isinstance(op, ParityReadout):
@@ -789,26 +744,26 @@ class GlobalStimBuilder:
                     "indices": indices,          # absolute measurement indices of the last seam round
                     "source": "seam_last_round"  # documentation tag
                 }
-                byproducts.append(byproduct_info)
+                state.byproducts.append(byproduct_info)
 
                 # Convenience: primary index (first seam pair) used for Pauli-frame sampling
                 primary_idx = indices[0] if indices else None
                 
                 # Track CNOT operations by grouping ZZ and XX parity readouts
-                if current_cnot is not None:
+                if state.current_cnot is not None:
                     if op.type == "ZZ":
-                        current_cnot["m_zz_byproduct"] = byproduct_info
-                        current_cnot["m_zz_mpp_idx"] = primary_idx
+                        state.current_cnot["m_zz_byproduct"] = byproduct_info
+                        state.current_cnot["m_zz_mpp_idx"] = primary_idx
                     elif op.type == "XX":
-                        current_cnot["m_xx_byproduct"] = byproduct_info
-                        current_cnot["m_xx_mpp_idx"] = primary_idx
-                        current_cnot["target"] = op.b  # Update target (for XX, b is the target)
-                        current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
-                        cnot_operations.append(current_cnot)
-                        current_cnot = None
+                        state.current_cnot["m_xx_byproduct"] = byproduct_info
+                        state.current_cnot["m_xx_mpp_idx"] = primary_idx
+                        state.current_cnot["target"] = op.b  # Update target (for XX, b is the target)
+                        state.current_cnot["smooth_window_id"] = window_id - 1 if current_window is None else window_id
+                        state.cnot_operations.append(state.current_cnot)
+                        state.current_cnot = None
                 else:
                     # Start of a CNOT operation (rough merge completed)
-                    current_cnot = {
+                    state.current_cnot = {
                         "control": op.a,
                         "target": op.b,  # This will be updated to actual target when XX comes
                         "ancilla": op.b,  # For ZZ, b is the ancilla
@@ -825,34 +780,34 @@ class GlobalStimBuilder:
             elif isinstance(op, TerminatePatch):
                 # Handle mid-circuit measurement: close segments and mark as terminated
                 patch_name = op.patch_id
-                if patch_name not in layout.patches or patch_name in terminated_patches:
+                if patch_name not in layout.patches or patch_name in state.terminated_patches:
                     continue
                 
                 # Track detector count before closing segments
-                num_detectors_before = len(deferred_detectors)
+                num_detectors_before = len(detector_manager.deferred_detectors)
                 
                 # Close stabilizer segments for this patch - this creates wrap detectors
                 _wrap_close_segment(patch_name, "Z", None)
                 _wrap_close_segment(patch_name, "X", None)
                 
                 # Add boundary anchors for the wrap detectors that were just created
-                if force_boundaries:
-                    num_detectors_after = len(deferred_detectors)
+                if detector_manager.force_boundaries:
+                    num_detectors_after = len(detector_manager.deferred_detectors)
                     # All detectors added between before and after are wrap detectors from this termination
                     for det_idx in range(num_detectors_before, num_detectors_after):
-                        anchor_detector_ids.append(det_idx)
-                        boundary_counts_z[patch_name] = boundary_counts_z.get(patch_name, 0) + 1
+                        detector_manager.anchor_detector_ids.append(det_idx)
+                        detector_manager.boundary_counts_z[patch_name] = detector_manager.boundary_counts_z.get(patch_name, 0) + 1
                 
                 # Seal the end observable for this patch
                 if patch_name in bracket_map:
                     basis = effective_basis_map.get(patch_name, bracket_map[patch_name]).upper()
                     if basis == "Z":
-                        end_indices[patch_name] = _last_non_none(list(prev.z_prev.get(patch_name, [])))
+                        end_indices[patch_name] = _last_non_none(list(state.prev.z_prev.get(patch_name, [])))
                     else:
-                        end_indices[patch_name] = _last_non_none(list(prev.x_prev.get(patch_name, [])))
+                        end_indices[patch_name] = _last_non_none(list(state.prev.x_prev.get(patch_name, [])))
                 
                 # Mark as terminated - it won't be measured in future rounds
-                terminated_patches.add(patch_name)
+                state.terminated_patches.add(patch_name)
 
             else:
                 raise TypeError(f"Unsupported op type: {type(op)!r}")
@@ -861,20 +816,20 @@ class GlobalStimBuilder:
         # Also close any still-open seam windows by wrapping first↔last if ≥2 rounds measured
         if first_window_joint:
             for key, first_list in list(first_window_joint.items()):
-                last_list = list(prev.joint_prev.get(key, []))
+                last_list = list(state.prev.joint_prev.get(key, []))
                 if seam_round_counts.get(key, 0) and seam_round_counts.get(key, 0) >= 2:
                     from itertools import zip_longest as _ziplg
                     wrap_added = 0
                     for pair_i, (a_idx, b_idx) in enumerate(_ziplg(first_list, last_list, fillvalue=None)):
                         if a_idx is None or b_idx is None or a_idx == b_idx:
                             continue
-                        det_id = _defer_detector_from_abs([a_idx, b_idx], "seam_wrap_finalize", {"seam": key, "pair_idx": pair_i})
-                        if force_boundaries:
+                        det_id = detector_manager.defer_detector([a_idx, b_idx], "seam_wrap_finalize", {"seam": key, "pair_idx": pair_i})
+                        if detector_manager.force_boundaries:
                             anchor_key = (key[0], key[1], key[2], pair_i)
-                            if anchor_key not in seam_wrap_anchor_emitted:
-                                anchor_detector_ids.append(det_id)
-                                seam_wrap_anchor_emitted.add(anchor_key)
-                                seam_boundary_counts[anchor_key] = seam_boundary_counts.get(anchor_key, 0) + 1
+                            if anchor_key not in detector_manager.seam_wrap_anchor_emitted:
+                                detector_manager.anchor_detector_ids.append(det_id)
+                                detector_manager.seam_wrap_anchor_emitted.add(anchor_key)
+                                detector_manager.seam_boundary_counts[anchor_key] = detector_manager.seam_boundary_counts.get(anchor_key, 0) + 1
                         wrap_added += 1
                     if wrap_added:
                         seam_wrap_counts[key] = seam_wrap_counts.get(key, 0) + wrap_added
@@ -897,13 +852,13 @@ class GlobalStimBuilder:
             if pname not in end_indices or end_indices[pname] is not None:
                 continue
             if basis == "Z":
-                end_indices[pname] = _last_non_none(list(prev.z_prev.get(pname, [])))
+                end_indices[pname] = _last_non_none(list(state.prev.z_prev.get(pname, [])))
             else:
-                end_indices[pname] = _last_non_none(list(prev.x_prev.get(pname, [])))
+                end_indices[pname] = _last_non_none(list(state.prev.x_prev.get(pname, [])))
 
         # Only bracket patches that are explicitly in bracket_map (excludes ancillas and terminated patches)
         for name in bracket_map.keys():
-            if name not in layout.patches or name in terminated_patches:
+            if name not in layout.patches or name in state.terminated_patches:
                 continue  # Skip if patch doesn't exist or was terminated
             requested_basis = bracket_map[name].upper()
             effective_basis = effective_basis_map.get(name, requested_basis)
@@ -912,9 +867,9 @@ class GlobalStimBuilder:
             end_idx = end_indices.get(name)
             if end_idx is None:
                 if effective_basis == "Z":
-                    end_idx = _last_non_none(list(prev.z_prev.get(name, [])))
+                    end_idx = _last_non_none(list(state.prev.z_prev.get(name, [])))
                 else:
-                    end_idx = _last_non_none(list(prev.x_prev.get(name, [])))
+                    end_idx = _last_non_none(list(state.prev.x_prev.get(name, [])))
                 end_indices[name] = end_idx
             start_idx = start_indices[name]
 
@@ -977,7 +932,7 @@ class GlobalStimBuilder:
 
             # Correlation pairs from compiled CNOT operations (fallback to first two logicals).
             correlation_pairs: List[Tuple[str, str]] = []
-            for cnot_op in cnot_operations:
+            for cnot_op in state.cnot_operations:
                 control = cnot_op["control"]
                 target = cnot_op["target"]
                 if control in layout.patches and target in layout.patches:
@@ -1126,51 +1081,11 @@ class GlobalStimBuilder:
                     }
 
         # Append all deferred detectors at the very end using final measurement count
-        if deferred_detectors:
-            final_m = circuit.num_measurements
-            for abs_list in deferred_detectors:
-                targets: List[GateTarget] = []
-                for k, abs_idx in enumerate(abs_list):
-                    # rec offsets are relative to current #measurements
-                    targets.append(stim.target_rec(abs_idx - final_m))
-                circuit.append_operation("DETECTOR", targets)
+        detector_manager.emit_all_detectors(circuit)
 
         # Diagnostics: compute detector degree per absolute measurement index
         # Only count 2-target detectors (graph edges). Single-target anchors are ignored here.
-        det_degree: Dict[int, int] = {}
-        for abs_list in deferred_detectors:
-            if len(abs_list) != 2:
-                continue
-            for abs_idx in abs_list:
-                det_degree[abs_idx] = det_degree.get(abs_idx, 0) + 1
-        degree_violations = [idx for idx, deg in det_degree.items() if deg not in (0, 2)]
-
-        # Enforce invariant: all detector endpoints must have degree 0 or 2.
-        # If violations exist, keep them in metadata but also raise in verbose runs.
-        if degree_violations:
-            # Leave raising to caller; metadata captures details below.
-            pass
-
-        # Build per-index provenance for odd-degree indices
-        odd_degree_details: Dict[int, List[Dict[str, object]]] = {}
-        if degree_violations:
-            for rec in edge_records:
-                indices = rec.get("indices", [])
-                if not isinstance(indices, list) or len(indices) != 2:
-                    continue
-                a_i, b_i = indices[0], indices[1]
-                if a_i in degree_violations:
-                    odd_degree_details.setdefault(a_i, []).append({
-                        "tag": rec.get("tag"),
-                        "neighbor": b_i,
-                        "context": rec.get("context", {}),
-                    })
-                if b_i in degree_violations:
-                    odd_degree_details.setdefault(b_i, []).append({
-                        "tag": rec.get("tag"),
-                        "neighbor": a_i,
-                        "context": rec.get("context", {}),
-                    })
+        degree_violations, odd_degree_details = detector_manager.compute_diagnostics()
 
         # NOTE: We intentionally do not auto-close per-row temporal chains here.
         # Each stabilizer row must form a single cycle via:
@@ -1196,28 +1111,15 @@ class GlobalStimBuilder:
             "observable_basis": tuple(basis_labels),
             "demo": demo_info,
             "joint_demos": joint_demo_info,
-            "cnot_operations": cnot_operations,
+            "cnot_operations": state.cnot_operations,
             "final_snapshot": snapshot_info,
-            "byproducts": byproducts,
-            "boundary_anchors": {
-                "detector_ids": list(anchor_detector_ids),
-                "epsilon": float(boundary_error_prob),
-            },
-            "mwpm_debug": {
-                "seam_wrap_counts": {str(k): v for k, v in seam_wrap_counts.items()},
-                "row_wraps": {
-                    "Z": {k: list(vs) for k, vs in z_row_wraps.items()},
-                    "X": {k: list(vs) for k, vs in x_row_wraps.items()},
-                },
-                "degree_violations": degree_violations,
-                "odd_degree_details": odd_degree_details,
-                "edge_records_count": len(edge_records),
-                "boundary_counts": {
-                    "Z": {k: int(v) for k, v in boundary_counts_z.items()},
-                    "X": {k: int(v) for k, v in boundary_counts_x.items()},
-                    "seam": {str(k): int(v) for k, v in seam_boundary_counts.items()},
-                },
-            },
+            "byproducts": state.byproducts,
+            "boundary_anchors": detector_manager.get_boundary_anchors_metadata(),
+            "mwpm_debug": detector_manager.get_diagnostics_metadata(
+                seam_wrap_counts,
+                z_row_wraps,
+                x_row_wraps,
+            ),
         }
 
         return circuit, observable_pairs, metadata

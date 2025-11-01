@@ -1,4 +1,4 @@
-"""Simulation entry points for logical-error benchmarking."""
+"""Experiments entry points for logical-error benchmarking."""
 
 from .code_threshold.threshold import (
     MonteCarloConfig,

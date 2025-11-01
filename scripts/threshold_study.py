@@ -26,7 +26,7 @@ try:  # Prefer a progress bar when available, but don't fail without it
 except ImportError:  # pragma: no cover - tqdm is optional at runtime
     tqdm = None  # type: ignore[assignment]
 
-from simulation.code_threshold import (
+from experiments.code_threshold import (
     ThresholdScenario,
     ThresholdScenarioResult,
     ThresholdStudyConfig,

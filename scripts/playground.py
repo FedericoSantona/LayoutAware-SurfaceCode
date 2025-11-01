@@ -327,7 +327,6 @@ from benchmarks.circuits.bell import BellStateBenchmark
 from benchmarks.circuits.ghz import GHZ3Benchmark
 from benchmarks.circuits.parity_check import ParityCheckBenchmark
 from benchmarks.circuits.simple import Simple1QXZHBenchmark
-from benchmarks.circuits.teleportation import TeleportationBenchmark
 from surface_code.utils import (
     plot_heavy_hex_code,
     diagnostic_print,
@@ -372,7 +371,6 @@ BENCHMARKS: Dict[str, Type[BenchmarkCircuit]] = {
     "bell": BellStateBenchmark,
     "ghz3": GHZ3Benchmark,
     "parity_check": ParityCheckBenchmark,
-    "teleportation": TeleportationBenchmark,
     "simple_1q_xzh": Simple1QXZHBenchmark,
 }
 
@@ -460,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--benchmark",
-        default="bell", # options are bell, ghz3, parity_check, teleportation, simple_1q_xzh
+        default="bell", # options are bell, ghz3, parity_check, simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )

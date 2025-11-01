@@ -33,7 +33,6 @@ from benchmarks import (
     BellStateBenchmark,
     GHZ3Benchmark,
     ParityCheckBenchmark,
-    TeleportationBenchmark,
 )
 
 

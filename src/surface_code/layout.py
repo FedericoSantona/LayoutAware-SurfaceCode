@@ -358,6 +358,20 @@ class Layout:
         ax.set_ylabel("y")
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.2)
+        
+        # Set axis limits to ensure all points are visible
+        if per_patch_points:
+            all_x = []
+            all_y = []
+            for pts in per_patch_points.values():
+                all_x.extend([p[0] for p in pts])
+                all_y.extend([p[1] for p in pts])
+            if all_x and all_y:
+                x_margin = (max(all_x) - min(all_x)) * 0.05 if max(all_x) != min(all_x) else 1.0
+                y_margin = (max(all_y) - min(all_y)) * 0.05 if max(all_y) != min(all_y) else 1.0
+                ax.set_xlim(min(all_x) - x_margin, max(all_x) + x_margin)
+                ax.set_ylim(min(all_y) - y_margin, max(all_y) + y_margin)
+        
         if title:
             ax.set_title(title)
 

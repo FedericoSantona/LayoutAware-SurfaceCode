@@ -15,6 +15,11 @@ from surface_code import (
     create_single_patch_layout,
     MeasureRound,
 )
+from surface_code.dem_utils import (
+    augment_dem_with_boundary_anchors,
+    harden_dem_for_pairwise_matching,
+    anchor_pm_isolates,
+)
 from surface_code.pauli import parse_init_label
 
 
@@ -55,7 +60,20 @@ def run_logical_error_rate(
     layout = create_single_patch_layout(model)
     
     # Generate explicit timeline of measure rounds
-    ops = [MeasureRound(patch_ids=None) for _ in range(stim_config.rounds)]
+    # Respect the family parameter to measure only the needed stabilizers
+    family = stim_config.family
+    if family == "Z":
+        # Z family: measure only Z stabilizers (detect X errors)
+        measure_z, measure_x = True, False
+    elif family == "X":
+        # X family: measure only X stabilizers (detect Z errors)
+        measure_z, measure_x = False, True
+    else:
+        # No family (symmetric): measure both
+        measure_z, measure_x = True, True
+    
+    ops = [MeasureRound(patch_ids=None, measure_z=measure_z, measure_x=measure_x) 
+           for _ in range(stim_config.rounds)]
     
     # Create builder and build circuit
     builder = GlobalStimBuilder(layout)
@@ -64,6 +82,28 @@ def run_logical_error_rate(
         raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
     bracket_map = {"q0": basis}
     circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map)
+    
+    # Validate that observables were properly created for single-patch memory experiments.
+    # In multi-patch scenarios with merges, some patches may legitimately not have observables
+    # due to conflicts, but for single-patch memory experiments, we must have at least one.
+    if not observable_pairs:
+        raise RuntimeError(
+            f"No observables were created for memory experiment! "
+            f"This indicates the start index was not captured. "
+            f"Config: rounds={stim_config.rounds}, family={stim_config.family}, "
+            f"bracket_basis={stim_config.bracket_basis}, init_label={stim_config.init_label}. "
+            f"Note: This validation only applies to single-patch memory experiments."
+        )
+    
+    # Validate that observable pairs have both start and end indices.
+    # This ensures proper tracking from initialization to final measurement.
+    for i, (start_idx, end_idx) in enumerate(observable_pairs):
+        if start_idx is None or end_idx is None:
+            raise RuntimeError(
+                f"Observable pair {i} has None indices: start={start_idx}, end={end_idx}. "
+                f"This should not happen - observables must have both start and end indices "
+                f"for proper logical error tracking in memory experiments."
+            )
     
     return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
 
@@ -76,18 +116,69 @@ def _run_circuit_logical_error_rate(
     metadata: Optional[dict] = None,
 ) -> SimulationResult:
     dem = circuit.detector_error_model()
+
+    # Ensure the DEM exposes boundary hooks for MWPM decoding.
+    # First try to add boundary anchors from metadata if available (non-critical)
+    anchor_ids: List[int] = []
+    anchor_eps = 1e-12
+    try:
+        if metadata is not None:
+            ba = (metadata.get("boundary_anchors", {}) or {})
+            anchor_ids = list(ba.get("detector_ids", []) or [])
+            anchor_eps = float(ba.get("epsilon", anchor_eps))
+        if anchor_ids:
+            dem = augment_dem_with_boundary_anchors(dem, anchor_ids, anchor_eps)
+    except Exception:
+        # If anchor augmentation fails, continue without anchors
+        # We'll still harden the DEM below which is critical
+        pass
+    
+    # ALWAYS harden the DEM to ensure every connected component has a boundary
+    # This is critical for MWPM decoding to work - don't silently fail here
+    try:
+        dem, _ = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
+    except Exception as e:
+        # If hardening fails, this is a critical error - don't silently continue
+        raise RuntimeError(f"Failed to harden DEM for pairwise matching: {e}") from e
+
     matcher = pm.Matching.from_detector_error_model(dem)
 
+    # Sample detector and observable data
     dem_sampler = dem.compile_sampler(seed=mc_config.seed)
     detector_samples, observable_samples, _ = dem_sampler.sample(mc_config.shots)
-
     detector_samples_bool = np.asarray(detector_samples, dtype=np.bool_)
+    
+    # Validate that observables were sampled correctly
     if observable_samples is None or observable_samples.size == 0:
-        logical_array = np.zeros((mc_config.shots, 1), dtype=np.uint8)
-    else:
-        logical_array = np.asarray(observable_samples, dtype=np.uint8)
+        raise RuntimeError(
+            f"No observable samples were generated! "
+            f"This indicates that no OBSERVABLE_INCLUDE operations were emitted in the circuit. "
+            f"Observable pairs count: {len(observable_pairs)}"
+        )
+    
+    logical_array = np.asarray(observable_samples, dtype=np.uint8)
+    
+    # Ensure we have the expected number of observables
+    if logical_array.shape[1] != len(observable_pairs):
+        raise RuntimeError(
+            f"Mismatch between observable pairs ({len(observable_pairs)}) "
+            f"and sampled observables ({logical_array.shape[1]})"
+        )
 
-    predictions = matcher.decode_batch(detector_samples_bool)
+    # Decode, with a defensive fallback that anchors boundaryless components
+    try:
+        predictions = matcher.decode_batch(detector_samples_bool)
+    except ValueError as e:
+        # PyMatching reports odd parity in a component without a boundary.
+        # As a fallback, add infinitesimal boundary hooks at the PM graph level
+        # (this does not change the detector count) and retry.
+        dem2, matcher2, added, _ = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+        if added > 0:
+            dem = dem2
+            matcher = matcher2
+            predictions = matcher.decode_batch(detector_samples_bool)
+        else:
+            raise
     predictions = np.asarray(predictions, dtype=np.uint8)
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
@@ -192,6 +283,8 @@ class ThresholdScenario:
     rounds_scale: float = 1.0
 
     def rounds_for_distance(self, distance: int) -> int:
+        # For surface codes, we need at least 'distance' rounds to allow proper error correction
+        # Using distance ensures sufficient time for error correction to work
         return max(1, int(round(self.rounds_scale * distance)))
 
     def px_pz_pairs(self) -> Iterable[tuple[float, float]]:

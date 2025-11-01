@@ -199,7 +199,7 @@ Examples:
     sim_group.add_argument(
         "--distance",
         type=int,
-        default=3,
+        default=7,
         help="Code distance d for the heavy-hex code"
     )
     sim_group.add_argument(

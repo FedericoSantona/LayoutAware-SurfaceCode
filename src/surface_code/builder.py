@@ -19,8 +19,7 @@ import stim
 from .layout import Layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, TerminatePatch
 from .configs import PhenomenologicalStimConfig
-from .builder_utils import mpp_from_positions, rec_from_abs, add_temporal_detectors_with_index, _mpp_targets_from_pauli
-from .pauli import Pauli, conjugate_through_circuit, PauliTracker
+from .builder_utils import mpp_from_positions
 from .builder_state import BuilderState, _PrevState
 from .detector_manager import DetectorManager
 from .segment_tracker import SegmentTracker
@@ -28,7 +27,6 @@ from .merge_manager import MergeManager
 from .measurement_half import MeasurementHalf
 from .observable_manager import ObservableManager
 from .demo_generator import DemoGenerator
-from .dem_utils import augment_dem_with_boundary_anchors
 
 
 GateTarget = stim.GateTarget
@@ -127,7 +125,6 @@ class GlobalStimBuilder:
         """
         # This method is kept for backward compatibility but is no longer used internally
         # Internal code now uses merge_manager.measure_joint_checks directly
-        from .merge_manager import MergeManager
         temp_manager = MergeManager(self.layout)
         return temp_manager.measure_joint_checks(circuit, kind, a, b)
 
@@ -143,6 +140,25 @@ class GlobalStimBuilder:
 
         # Coordinates
         self._emit_qubit_coords(circuit)
+
+        # Initialize qubits based on init_label
+        # Stim assumes qubits start in |0> by default, so we only need to apply gates for other states
+        if cfg.init_label is not None:
+            from .pauli import parse_init_label
+            init_basis, init_phase = parse_init_label(cfg.init_label)
+            all_qubits = list(range(layout.global_n()))
+            
+            if init_basis == "X":
+                # Initialize to |+> or |->
+                # |+> = H|0>, |-> = H|1> = HX|0>
+                if init_phase == -1:
+                    # |-> state: apply X then H
+                    circuit.append_operation("X", all_qubits)
+                circuit.append_operation("H", all_qubits)
+            elif init_basis == "Z" and init_phase == -1:
+                # |1> state: apply X
+                circuit.append_operation("X", all_qubits)
+            # If init_basis=="Z" and init_phase==+1, qubits are already in |0>, no initialization needed
 
         # Initialize state and managers
         state = BuilderState()

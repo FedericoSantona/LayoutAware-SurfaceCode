@@ -95,9 +95,15 @@ def _harden_and_decode_dem(
     try:
         # Pairwise matching (no correlations; requires true single-detector boundaries)
         matcher = pm.Matching.from_detector_error_model(dem)
-        dem, matcher, iso_added, iso_ids = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
-        if iso_added and verbose:
-            print(f"[DECODE] anchored {iso_added} isolated detectors: {iso_ids[:12]}")
+        # Iterate on anchoring until all components have boundaries
+        max_anchor_iterations = 5
+        for anchor_iter in range(max_anchor_iterations):
+            dem, matcher, iso_added, iso_ids = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+            if iso_added and verbose:
+                print(f"[DECODE] anchored {iso_added} detectors/components (iteration {anchor_iter+1}): {iso_ids[:12]}")
+            if iso_added == 0:
+                # No more anchors needed
+                break
         preds = matcher.decode_batch(det_samp.astype(bool))
     except Exception as exc_mwpm:
         if verbose:
@@ -108,9 +114,15 @@ def _harden_and_decode_dem(
             if verbose:
                 print(f"[DEM-CHECK] added {added_retry} additional pairwise boundary hooks on retry and rebuilt DEM via text")
             matcher = pm.Matching.from_detector_error_model(dem)
-            dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
-            if iso_added_retry and verbose:
-                print(f"[DECODE] anchored {iso_added_retry} isolated detectors on retry: {iso_ids_retry[:12]}")
+            # Iterate on anchoring until all components have boundaries
+            max_anchor_iterations = 5
+            for anchor_iter in range(max_anchor_iterations):
+                dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+                if iso_added_retry and verbose:
+                    print(f"[DECODE] anchored {iso_added_retry} detectors/components on retry (iteration {anchor_iter+1}): {iso_ids_retry[:12]}")
+                if iso_added_retry == 0:
+                    # No more anchors needed
+                    break
             preds = matcher.decode_batch(det_samp.astype(bool))
         except Exception as exc_retry:
             # Keep existing diagnostics only if decoding still fails after retry

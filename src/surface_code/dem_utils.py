@@ -162,6 +162,7 @@ def pm_find_offending_shot(matcher, det_samp, *, max_scan=2048):
 
 def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
     """Ensure every detector in the PyMatching graph has non-zero degree by adding boundary hooks.
+    Also ensures every connected component has at least one boundary node.
 
     Returns (new_dem, new_matcher, num_added, isolate_ids).
     """
@@ -178,18 +179,33 @@ def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
     num_det = getattr(matcher, "num_detectors", 0)
     deg = dict(G.degree())
     isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
-    if not isolates:
+    
+    # Find components without boundaries
+    boundary_nodes = {n for n, d in G.nodes(data=True) if d.get('is_boundary', False)}
+    comps = list(_nx.connected_components(G))
+    components_needing_boundaries = []
+    
+    for comp in comps:
+        det_nodes = [n for n in comp if isinstance(n, int) and n < num_det]
+        if det_nodes and not any(n in boundary_nodes for n in det_nodes):
+            # Component has detector nodes but no boundary
+            components_needing_boundaries.append(det_nodes[0])  # Use first detector as anchor
+    
+    # Combine isolated detectors and components needing boundaries
+    all_hooks = list(set(isolates + components_needing_boundaries))
+    
+    if not all_hooks:
         return dem, matcher, 0, []
 
     dem_text = str(dem)
     if dem_text and not dem_text.endswith("\n"):
         dem_text += "\n"
     p_str = f"{float(epsilon):.12g}"
-    for idx in isolates:
+    for idx in all_hooks:
         dem_text += f"error({p_str}) D{idx}\n"
     new_dem = stim.DetectorErrorModel(dem_text)
     new_matcher = pm.Matching.from_detector_error_model(new_dem)
-    return new_dem, new_matcher, len(isolates), isolates
+    return new_dem, new_matcher, len(all_hooks), all_hooks
 
 
 def report_boundaryless_components(dem):
@@ -276,34 +292,76 @@ def harden_dem_for_pairwise_matching(dem, *, epsilon=1e-12):
     Ensure every connected component has at least one *single-detector*
     error (a real boundary edge for pairwise MWPM).
     Returns a new DEM and the number of hooks added.
+    
+    This function iterates until all components have boundaries, as rebuilding
+    the DEM from text can change component structure.
     """
-    comps, _, errors = build_components_from_dem(dem)
-
-    # Detectors that already have a 1-detector error
-    singleton_det_ids = set()
-    for e in errors:
-        ds = e["detectors"]
-        if len(ds) == 1:
-            singleton_det_ids.add(ds[0])
-
-    hook_ids = []
-    for comp in comps:
-        # Skip components that already contain a singleton detector error
-        if any(d in singleton_det_ids for d in comp):
-            continue
-        # Need to add a hook for this component
-        d0 = comp[0]
-        hook_ids.append(d0)
-    added = len(hook_ids)
-
-    dem_text = str(dem)
-    if not dem_text.endswith('\n'):
-        dem_text += '\n'
-    p_str = f"{float(epsilon):.12g}"
-    for d0 in hook_ids:
-        dem_text += f"error({p_str}) D{d0}\n"
-    new_dem = stim.DetectorErrorModel(dem_text)
-    return new_dem, added
+    max_iterations = 5  # Safety limit to prevent infinite loops
+    current_dem = dem
+    total_added = 0
+    
+    for iteration in range(max_iterations):
+        comps, comp_has_boundary, errors = build_components_from_dem(current_dem)
+        
+        # Check if all components have boundaries
+        components_needing_boundaries = [i for i, comp in enumerate(comps) 
+                                       if comp and not comp_has_boundary[i]]
+        
+        if not components_needing_boundaries:
+            # All components have boundaries, we're done
+            return current_dem, total_added
+        
+        # Add boundaries to components that need them
+        hook_ids = []
+        for comp_idx in components_needing_boundaries:
+            comp = comps[comp_idx]
+            if comp:
+                # Use the first detector in the component as the boundary hook
+                d0 = comp[0]
+                hook_ids.append(d0)
+        
+        if not hook_ids:
+            # No hooks to add, break
+            break
+        
+        added_this_iteration = len(hook_ids)
+        total_added += added_this_iteration
+        
+        # Append boundary errors to DEM text
+        dem_text = str(current_dem)
+        if not dem_text.endswith('\n'):
+            dem_text += '\n'
+        p_str = f"{float(epsilon):.12g}"
+        for d0 in hook_ids:
+            dem_text += f"error({p_str}) D{d0}\n"
+        
+        # Rebuild DEM and continue iteration if needed
+        current_dem = stim.DetectorErrorModel(dem_text)
+    
+    # Final check: verify all components have boundaries
+    final_comps, final_has_boundary, _ = build_components_from_dem(current_dem)
+    still_needing = [i for i, comp in enumerate(final_comps) 
+                     if comp and not final_has_boundary[i]]
+    
+    if still_needing:
+        # If some components still don't have boundaries, add them aggressively
+        hook_ids = []
+        for comp_idx in still_needing:
+            comp = final_comps[comp_idx]
+            if comp:
+                hook_ids.append(comp[0])
+        
+        if hook_ids:
+            dem_text = str(current_dem)
+            if not dem_text.endswith('\n'):
+                dem_text += '\n'
+            p_str = f"{float(epsilon):.12g}"
+            for d0 in hook_ids:
+                dem_text += f"error({p_str}) D{d0}\n"
+            current_dem = stim.DetectorErrorModel(dem_text)
+            total_added += len(hook_ids)
+    
+    return current_dem, total_added
 
 
 def augment_dem_with_boundary_anchors(

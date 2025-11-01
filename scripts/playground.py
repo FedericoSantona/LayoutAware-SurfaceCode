@@ -112,16 +112,27 @@ def main() -> None:
             demo_str = args.demo_basis.strip().upper()
             demo_basis = demo_str
 
-        # Build one PatchObject per qubit
-        def build_patch() -> PatchObject:
-            return PatchObject.from_code_model(model)
+        # Build a template PatchObject to infer geometry/spacing
+        template_patch: PatchObject = PatchObject.from_code_model(model)
 
-        # Create patches with spatial offsets to avoid overlap
+        # Compute horizontal spacing based on the actual patch width.
+        # Using a fixed offset (e.g., 3.0) can cause overlap at larger d.
+        if template_patch.coords:
+            xs = [x for (x, _y) in template_patch.coords.values()]
+            patch_width = (max(xs) - min(xs)) if xs else 0.0
+        else:
+            patch_width = 0.0
+
+        # Add a small margin so patches don't touch; reuse ancilla_buffer as a sensible margin
+        h_margin = float(args.ancilla_buffer) if hasattr(args, "ancilla_buffer") else 1.0
+        h_spacing = patch_width + max(0.5, h_margin)
+
+        # Create patches with geometry-aware horizontal offsets to prevent overlap
         patches = {}
         for i in range(qc.num_qubits):
-            patch = build_patch()
-            # Offset each patch horizontally to prevent overlap
-            patches[f"q{i}"] = patch.with_offset(0, i * 3.0, 0.0)
+            # Fresh patch derived from the same template geometry
+            patch = template_patch.with_offset(0, i * h_spacing, 0.0)
+            patches[f"q{i}"] = patch
 
         # Start with empty seams - let _auto_generate_seams() handle everything
         seams = {}

@@ -50,7 +50,7 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots per data point")
+    parser.add_argument("--shots", type=int, default=10**7, help="Monte Carlo shots per data point")
     parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
@@ -58,9 +58,9 @@ def parse_args() -> argparse.Namespace:
         default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
-    parser.add_argument("--p-min", type=float, default=1e-5, help="Minimum physical error rate")
-    parser.add_argument("--p-max", type=float, default=1e-2, help="Maximum physical error rate")
-    parser.add_argument("--num-points", type=int, default=10, help="Number of physical error samples")
+    parser.add_argument("--p-min", type=float, default=1e-7, help="Minimum physical error rate")
+    parser.add_argument("--p-max", type=float, default=1e-1, help="Maximum physical error rate")
+    parser.add_argument("--num-points", type=int, default=3, help="Number of physical error samples")
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "output" / "threshold",
         help="Directory to store CSV/JSON results",
+    )
+    parser.add_argument(
+        "--rounds-scale",
+        type=float,
+        default=0.5,
+        help="Rounds scale factor (rounds ≈ rounds_scale * distance; 0 ⇒ code-capacity)",
     )
     return parser.parse_args()
 
@@ -112,7 +118,7 @@ def main() -> None:
     plot_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    scenarios = create_standard_scenarios(distances, physical_grid)
+    scenarios = create_standard_scenarios(distances, physical_grid, rounds_scale=args.rounds_scale)
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
 
     summary = {}

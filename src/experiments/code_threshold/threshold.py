@@ -94,6 +94,14 @@ def run_logical_error_rate(
             f"bracket_basis={stim_config.bracket_basis}, init_label={stim_config.init_label}. "
             f"Note: This validation only applies to single-patch memory experiments."
         )
+
+    if len(layout.patches) == 1:
+        explicit_logicals = bool(metadata.get("explicit_logical_brackets")) if metadata else False
+        if not explicit_logicals:
+            raise RuntimeError(
+                "Expected explicit logical bracketing MPPs for single-patch memory experiment,"
+                " but builder reported they were not emitted."
+            )
     
     # Validate that observable pairs have both start and end indices.
     # This ensures proper tracking from initialization to final measurement.
@@ -389,7 +397,11 @@ def estimate_crossings(result: ThresholdScenarioResult) -> Dict[tuple[int, int],
     return crossings
 
 
-def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[float]) -> List[ThresholdScenario]:
+def create_standard_scenarios(
+    distances: Sequence[int],
+    physical_grid: Sequence[float],
+    rounds_scale: float = 1.0,
+) -> List[ThresholdScenario]:
     scenarios: List[ThresholdScenario] = [
         XOnlyScenario(
             name="x_only",
@@ -397,6 +409,7 @@ def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[
             track="Z",
             distances=distances,
             physical_error_grid=physical_grid,
+            rounds_scale=rounds_scale,
         ),
         ZOnlyScenario(
             name="z_only",
@@ -404,6 +417,7 @@ def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[
             track="X",
             distances=distances,
             physical_error_grid=physical_grid,
+            rounds_scale=rounds_scale,
         ),
         SymmetricScenario(
             name="symmetric_Zinit",
@@ -411,6 +425,7 @@ def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[
             track="Z",
             distances=distances,
             physical_error_grid=physical_grid,
+            rounds_scale=rounds_scale,
         ),
         SymmetricScenario(
             name="symmetric_Xinit",
@@ -418,6 +433,7 @@ def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[
             track="X",
             distances=distances,
             physical_error_grid=physical_grid,
+            rounds_scale=rounds_scale,
         ),
     ]
     return scenarios

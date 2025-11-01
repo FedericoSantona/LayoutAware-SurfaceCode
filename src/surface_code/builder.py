@@ -128,6 +128,34 @@ class GlobalStimBuilder:
         temp_manager = MergeManager(self.layout)
         return temp_manager.measure_joint_checks(circuit, kind, a, b)
 
+    def _emit_logical_mpp(
+        self,
+        circuit: stim.Circuit,
+        patch_name: str,
+        basis: str,
+    ) -> Optional[int]:
+        """Emit an MPP for the logical operator of ``patch_name`` in ``basis``.
+
+        Returns the absolute measurement index or ``None`` when the logical has
+        no support (should not occur for surface-code patches).
+        """
+        patch = self.layout.patches.get(patch_name)
+        if patch is None:
+            return None
+
+        logical_string = patch.logical_z if basis == "Z" else patch.logical_x
+        positions, chars = self.layout.globalize_local_pauli_string(patch_name, logical_string)
+        if not positions:
+            return None
+
+        # Defensive check: ensure the stored logical matches the requested basis.
+        if any(c != basis for c in chars):
+            raise ValueError(
+                f"Logical operator for patch '{patch_name}' contains non-{basis} axes: {chars}"
+            )
+
+        return mpp_from_positions(circuit, positions, basis)
+
     def build(
         self,
         ops: Sequence[object],
@@ -208,17 +236,29 @@ class GlobalStimBuilder:
         # Sync effective_basis_map to observable_manager
         observable_manager.effective_basis_map = effective_basis_map
 
-        # Bracketing: start logicals per patch (skip if they would anti-commute with merges)
+        # Track observable bracketing indices per patch
         start_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
 
+        # Emit explicit logical brackets only when no merges are present
+        emit_explicit_logicals = not rough_merge_patches and not smooth_merge_patches
+
+        pending_start: Dict[str, str] = {}
+        if emit_explicit_logicals:
+            for name, basis in effective_basis_map.items():
+                idx = self._emit_logical_mpp(circuit, name, basis)
+                if idx is not None:
+                    start_indices[name] = idx
+                    observable_manager.capture_start(name, idx)
+                else:
+                    pending_start[name] = basis
+        else:
+            pending_start = {
+                name: effective_basis_map[name]
+                for name in effective_basis_map.keys()
+            }
+
         circuit.append_operation("TICK")
-        # Do NOT emit a start logical MPP. Capture starts from the first
-        # compatible stabilizer layer measured later in the schedule.
-        pending_start: Dict[str, str] = {
-            name: effective_basis_map[name]
-            for name in effective_basis_map.keys()
-        }
 
 
 
@@ -552,6 +592,14 @@ class GlobalStimBuilder:
             segment_tracker.wrap_close_segment(pname, "Z", detector_manager, None)
             segment_tracker.wrap_close_segment(pname, "X", detector_manager, None)
 
+        if emit_explicit_logicals:
+            for name, basis in effective_basis_map.items():
+                if end_indices.get(name) is not None:
+                    continue
+                end_idx = self._emit_logical_mpp(circuit, name, basis)
+                end_indices[name] = end_idx
+                observable_manager.seal_end(name, basis, end_idx)
+
         # Emit boundary anchors after all merges complete
         # Bracketing: end logicals per patch and observable includes
         # IMPORTANT: do not emit new MPPs here; reuse the last compatible
@@ -595,6 +643,7 @@ class GlobalStimBuilder:
                 merge_manager.get_seam_wrap_counts(),
                 *segment_tracker.get_row_wraps(),
             ),
+            "explicit_logical_brackets": emit_explicit_logicals,
         }
 
         return circuit, observable_pairs, metadata

@@ -101,7 +101,11 @@ class MeasurementHalf:
                 self.basis,
                 skip_indices=skip_indices if skip_indices else None,
                 prev_map=prev_dict,
+                p_meas=cfg.p_meas,
             )
+
+            # (No spatial detectors are emitted here; spatial connectivity is
+            # captured via error hyperedges in the DEM and temporal chaining.)
             
             # Pad state.prev dictionary to number of stabilizers for each name
             for name in names:
@@ -196,7 +200,7 @@ class MeasurementHalf:
             seam_a, seam_b, _ = active_seam_merge
             pending_seam_key = (seam_type, seam_a, seam_b)
             pending_seam_prev = list(state.prev.joint_prev.get(pending_seam_key, []))
-            pending_seam_curr = merge_manager.measure_joint_checks(circuit, seam_type, seam_a, seam_b)
+            pending_seam_curr = merge_manager.measure_joint_checks(circuit, seam_type, seam_a, seam_b, p_meas=cfg.p_meas)
             if pending_seam_curr:
                 merge_manager.seam_round_counts[pending_seam_key] = merge_manager.seam_round_counts.get(pending_seam_key, 0) + 1
             # Capture the first joint round indices for wrap-around closure
@@ -224,4 +228,3 @@ class MeasurementHalf:
                 state.prev.joint_prev[pending_seam_key] = list(pending_seam_curr)
         
         return curr_measurements
-

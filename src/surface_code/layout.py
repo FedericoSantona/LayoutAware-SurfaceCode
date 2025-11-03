@@ -38,28 +38,30 @@ class PatchObject:
 
     @classmethod
     def from_code_model(cls, model, *, name: str = "q0") -> "PatchObject":
-        """Create a PatchObject from a heavy-hex code model.
+        """Create a PatchObject from a surface code model.
         
         Args:
-            model: HeavyHexModel with code attribute
+            model: SurfaceCodeModel (HeavyHexModel or StandardSurfaceCodeModel) with code attribute
             name: Name for the patch (unused but kept for compatibility)
             
         Returns:
             PatchObject with proper 2D coordinates extracted from geometry
         """
-        # Extract actual 2D coordinates from heavy-hex geometry
+        # Extract actual 2D coordinates from code geometry
         try:
             raw_coords = cls._extract_qubit_coordinates(model.code)
             # Convert numpy arrays to tuples for compatibility
             coords = {i: tuple(pos) for i, pos in raw_coords.items()}
         except RuntimeError:
             # Fallback: generate a reasonable 2D grid if geometry not available
-            raise RuntimeError("Failed to extract qubit coordinates from heavy-hex geometry")
+            raise RuntimeError("Failed to extract qubit coordinates from code geometry")
         return cls(n=model.code.n, z_stabs=list(model.z_stabilizers), x_stabs=list(model.x_stabilizers), logical_z=model.logical_z, logical_x=model.logical_x, coords=coords)
 
     @staticmethod
     def _extract_qubit_coordinates(code):
-        """Extract actual 2D coordinates from heavy-hex code geometry.
+        """Extract actual 2D coordinates from surface code geometry.
+        
+        Works for both heavy-hex and standard surface codes built via qiskit_qec.
         
         Args:
             code: StabSubSystemCode object built via geometry-backed builder

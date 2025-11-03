@@ -10,7 +10,7 @@ import stim
 
 from surface_code import (
     PhenomenologicalStimConfig,
-    build_heavy_hex_model,
+    build_surface_code_model,
     GlobalStimBuilder,
     create_single_patch_layout,
     MeasureRound,
@@ -81,7 +81,7 @@ def run_logical_error_rate(
     if basis not in {"X", "Z"}:
         raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
     bracket_map = {"q0": basis}
-    circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map)
+    circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map, explicit_logical_start=False)
     
     # Validate that observables were properly created for single-patch memory experiments.
     # In multi-patch scenarios with merges, some patches may legitimately not have observables
@@ -125,30 +125,9 @@ def _run_circuit_logical_error_rate(
 ) -> SimulationResult:
     dem = circuit.detector_error_model()
 
-    # Ensure the DEM exposes boundary hooks for MWPM decoding.
-    # First try to add boundary anchors from metadata if available (non-critical)
-    anchor_ids: List[int] = []
-    anchor_eps = 1e-12
-    try:
-        if metadata is not None:
-            ba = (metadata.get("boundary_anchors", {}) or {})
-            anchor_ids = list(ba.get("detector_ids", []) or [])
-            anchor_eps = float(ba.get("epsilon", anchor_eps))
-        if anchor_ids:
-            dem = augment_dem_with_boundary_anchors(dem, anchor_ids, anchor_eps)
-    except Exception:
-        # If anchor augmentation fails, continue without anchors
-        # We'll still harden the DEM below which is critical
-        pass
-    
-    # ALWAYS harden the DEM to ensure every connected component has a boundary
-    # This is critical for MWPM decoding to work - don't silently fail here
-    try:
-        dem, _ = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
-    except Exception as e:
-        # If hardening fails, this is a critical error - don't silently continue
-        raise RuntimeError(f"Failed to harden DEM for pairwise matching: {e}") from e
-
+    # Build matcher on the raw DEM first. On well-formed memory experiments
+    # (closed space-time cycles), components naturally have even parity and
+    # decoding is feasible without synthetic boundaries.
     matcher = pm.Matching.from_detector_error_model(dem)
 
     # Sample detector and observable data
@@ -176,17 +155,16 @@ def _run_circuit_logical_error_rate(
     # Decode, with a defensive fallback that anchors boundaryless components
     try:
         predictions = matcher.decode_batch(detector_samples_bool)
-    except ValueError as e:
-        # PyMatching reports odd parity in a component without a boundary.
-        # As a fallback, add infinitesimal boundary hooks at the PM graph level
-        # (this does not change the detector count) and retry.
+    except ValueError:
+        # If PyMatching reports an odd parity in a component without a boundary,
+        # add infinitesimal boundary hooks only as a last resort and retry.
         dem2, matcher2, added, _ = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
-        if added > 0:
-            dem = dem2
-            matcher = matcher2
-            predictions = matcher.decode_batch(detector_samples_bool)
-        else:
+        if added <= 0:
+            # Re-raise the original error if we couldn't patch the graph
             raise
+        dem = dem2
+        matcher = matcher2
+        predictions = matcher.decode_batch(detector_samples_bool)
     predictions = np.asarray(predictions, dtype=np.uint8)
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
@@ -326,13 +304,30 @@ class ThresholdStudyConfig:
 def run_scenario(
     scenario: ThresholdScenario,
     study_cfg: ThresholdStudyConfig,
+    code_type: str = "heavy_hex",
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
+    p_meas_override: float | None = None,
+    p_meas_scale: float = 1.0,
 ) -> ThresholdScenarioResult:
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
-        model = build_heavy_hex_model(distance)
+        model = build_surface_code_model(distance, code_type=code_type)
         points: List[ThresholdPoint] = []
         for p_x, p_z in scenario.px_pz_pairs():
+            # Calculate p_meas using unambiguous auto rule
+            if p_meas_override is not None:
+                p_meas = p_meas_override
+            else:
+                # Auto rule: p_meas = p for symmetric cases, p_meas = max(p_x, p_z) for asymmetric cases
+                if isinstance(scenario, SymmetricScenario):
+                    p_meas = p_x  # p_x == p_z for symmetric scenarios
+                else:
+                    p_meas = max(p_x, p_z)  # For X-only or Z-only scenarios
+                p_meas *= p_meas_scale
+            
+            # Clamp p_meas to valid range [0.0, 0.499999]
+            p_meas = min(max(p_meas, 0.0), 0.499999)
+            
             stim_cfg = PhenomenologicalStimConfig(
                 rounds=scenario.rounds_for_distance(distance),
                 p_x_error=p_x,
@@ -341,6 +336,7 @@ def run_scenario(
                         "X" if isinstance(scenario, ZOnlyScenario) else None),
                 bracket_basis=scenario.track,
                 init_label=scenario.init_label,
+                p_meas=p_meas,
             )
             result: SimulationResult = run_logical_error_rate(
                 model,
@@ -401,6 +397,7 @@ def create_standard_scenarios(
     distances: Sequence[int],
     physical_grid: Sequence[float],
     rounds_scale: float = 1.0,
+    code_type: str = "heavy_hex",
 ) -> List[ThresholdScenario]:
     scenarios: List[ThresholdScenario] = [
         XOnlyScenario(

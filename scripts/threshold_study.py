@@ -1,4 +1,4 @@
-"""Run threshold sweeps and generate plots for the heavy-hex surface code."""
+"""Run threshold sweeps and generate plots for surface code studies."""
 from __future__ import annotations
 
 import argparse
@@ -50,7 +50,7 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=10**7, help="Monte Carlo shots per data point")
+    parser.add_argument("--shots", type=int, default=10**6, help="Monte Carlo shots per data point")
     parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
@@ -58,9 +58,21 @@ def parse_args() -> argparse.Namespace:
         default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
-    parser.add_argument("--p-min", type=float, default=1e-7, help="Minimum physical error rate")
-    parser.add_argument("--p-max", type=float, default=1e-1, help="Maximum physical error rate")
+    parser.add_argument("--p-min", type=float, default=1e-6, help="Minimum physical error rate (default: 3e-3 for phenomenological studies)")
+    parser.add_argument("--p-max", type=float, default=5e-2, help="Maximum physical error rate (default: 5e-2 for phenomenological studies)")
     parser.add_argument("--num-points", type=int, default=3, help="Number of physical error samples")
+    parser.add_argument(
+        "--p-meas",
+        type=float,
+        default=0,
+        help="Measurement error probability (phenomenological noise). If not provided, auto-sets based on data error rates: p_meas = p for symmetric cases, p_meas = max(p_x, p_z) for asymmetric cases. Set to 0 for code-capacity mode (no measurement errors).",
+    )
+    parser.add_argument(
+        "--p-meas-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for auto-calculated p_meas (default: 1.0). Only applies when --p-meas is not specified.",
+    )
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -76,8 +88,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rounds-scale",
         type=float,
-        default=0.5,
-        help="Rounds scale factor (rounds ≈ rounds_scale * distance; 0 ⇒ code-capacity)",
+        default=1,
+        help="Rounds scale factor (rounds ≈ rounds_scale * distance; 1.0 for phenomenological, 0 ⇒ code-capacity)",
+    )
+    parser.add_argument(
+        "--code-type",
+        choices=["heavy_hex", "standard"],
+        default="standard",
+        help="Type of surface code to use (default: standard)",
     )
     return parser.parse_args()
 
@@ -113,12 +131,17 @@ def main() -> None:
     distances = parse_distances(args.distances or [])
     physical_grid = make_physical_grid(args.p_min, args.p_max, args.num_points)
 
-    plot_dir: Path = args.plot_dir
-    data_dir: Path = args.data_dir
+    # Include code_type in output directories to avoid overwriting results
+    # Both heavy_hex and standard save in subdirectories
+    plot_dir: Path = args.plot_dir / args.code_type
+    data_dir: Path = args.data_dir / args.code_type
     plot_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    scenarios = create_standard_scenarios(distances, physical_grid, rounds_scale=args.rounds_scale)
+    print(f"Running threshold study with {args.code_type} surface code")
+    print(f"Output directories: plots={plot_dir}, data={data_dir}")
+
+    scenarios = create_standard_scenarios(distances, physical_grid, rounds_scale=args.rounds_scale, code_type=args.code_type)
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
 
     summary = {}
@@ -154,7 +177,10 @@ def main() -> None:
         result = run_scenario(
             scenario,
             study_cfg,
+            code_type=args.code_type,
             progress=update_progress if progress_bar is not None else None,
+            p_meas_override=args.p_meas,
+            p_meas_scale=args.p_meas_scale,
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)

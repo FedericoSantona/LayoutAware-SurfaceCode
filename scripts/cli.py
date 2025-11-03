@@ -200,7 +200,13 @@ Examples:
         "--distance",
         type=int,
         default=7,
-        help="Code distance d for the heavy-hex code"
+        help="Code distance d for the surface code"
+    )
+    sim_group.add_argument(
+        "--code-type",
+        choices=["heavy_hex", "standard"],
+        default="heavy_hex",
+        help="Type of surface code to use (default: standard)",
     )
     sim_group.add_argument(
         "--rounds",
@@ -231,6 +237,12 @@ Examples:
         type=float,
         default=1e-3,
         help="Phenomenological Z error probability"
+    )
+    sim_group.add_argument(
+        "--p-meas",
+        type=float,
+        default=0.0,
+        help="Measurement error probability (phenomenological noise on measurement results). Default 0.0 for code-capacity mode."
     )
     sim_group.add_argument(
         "--init",

@@ -14,10 +14,18 @@ if TYPE_CHECKING:  # Import only for typing to avoid circular deps at runtime
 GateTarget = stim.GateTarget
 
 
-def mpp_from_positions(circuit: stim.Circuit, positions: Sequence[int], pauli: str) -> Optional[int]:
+def mpp_from_positions(circuit: stim.Circuit, positions: Sequence[int], pauli: str, p_meas: float = 0.0) -> Optional[int]:
     """Append an MPP for a tensor product of identical Paulis at given positions.
 
-    Returns the absolute measurement index, or None if positions is empty.
+    Args:
+        circuit: Stim circuit to append to
+        positions: Qubit positions to measure
+        pauli: Pauli basis ("X", "Z", or "Y")
+        p_meas: Measurement error probability (flips reported bit with prob p_meas).
+                Default 0.0 for noiseless measurements.
+
+    Returns:
+        The absolute measurement index, or None if positions is empty.
     """
     if not positions:
         return None
@@ -35,7 +43,13 @@ def mpp_from_positions(circuit: stim.Circuit, positions: Sequence[int], pauli: s
         else:
             raise ValueError("Unsupported Pauli for MPP")
         first = False
-    circuit.append_operation("MPP", targets)
+    
+    # Use Stim's native noisy MPP support if p_meas > 0
+    # This flips the measurement result bit with probability p_meas without affecting data qubits
+    if p_meas > 0.0:
+        circuit.append_operation("MPP", targets, p_meas)
+    else:
+        circuit.append_operation("MPP", targets)
     return circuit.num_measurements - 1
 
 

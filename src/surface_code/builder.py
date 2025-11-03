@@ -51,6 +51,7 @@ class GlobalStimBuilder:
         basis: str,
         skip_indices: Optional[Dict[str, Set[int]]] = None,
         prev_map: Optional[Dict[str, List[Optional[int]]]] = None,
+        p_meas: float = 0.0,
     ) -> Dict[str, List[Optional[int]]]:
         offs = self.layout.offsets()
         measured: Dict[str, List[Optional[int]]] = {}
@@ -73,7 +74,7 @@ class GlobalStimBuilder:
                 for i, c in enumerate(s):
                     if c == basis:
                         positions.append(self.layout.globalize_local_index(name, i))
-                idx = mpp_from_positions(circuit, positions, basis)
+                idx = mpp_from_positions(circuit, positions, basis, p_meas=p_meas)
                 indices.append(idx)
             measured[name] = indices
         return measured
@@ -154,7 +155,8 @@ class GlobalStimBuilder:
                 f"Logical operator for patch '{patch_name}' contains non-{basis} axes: {chars}"
             )
 
-        return mpp_from_positions(circuit, positions, basis)
+        # Logical bracket MPPs must remain noiseless (p_meas=0.0) to keep observables deterministic anchors
+        return mpp_from_positions(circuit, positions, basis, p_meas=0.0)
 
     def build(
         self,
@@ -162,6 +164,8 @@ class GlobalStimBuilder:
         cfg: PhenomenologicalStimConfig,
         bracket_map: Dict[str, str],  # patch_name -> 'Z'|'X'
         qiskit_circuit: Optional[object] = None,  # Qiskit circuit for demo conjugation
+        *,
+        explicit_logical_start: bool = True,
     ) -> Tuple[stim.Circuit, List[Tuple[int, int]], Dict[str, object]]:
         layout = self.layout
         circuit = stim.Circuit()
@@ -244,7 +248,7 @@ class GlobalStimBuilder:
         emit_explicit_logicals = not rough_merge_patches and not smooth_merge_patches
 
         pending_start: Dict[str, str] = {}
-        if emit_explicit_logicals:
+        if emit_explicit_logicals and explicit_logical_start:
             for name, basis in effective_basis_map.items():
                 idx = self._emit_logical_mpp(circuit, name, basis)
                 if idx is not None:
@@ -253,10 +257,8 @@ class GlobalStimBuilder:
                 else:
                     pending_start[name] = basis
         else:
-            pending_start = {
-                name: effective_basis_map[name]
-                for name in effective_basis_map.keys()
-            }
+            # Defer start capture to the first compatible stabilizer half
+            pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
 
         circuit.append_operation("TICK")
 
@@ -647,5 +649,4 @@ class GlobalStimBuilder:
         }
 
         return circuit, observable_pairs, metadata
-
 

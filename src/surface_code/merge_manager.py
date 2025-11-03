@@ -82,6 +82,7 @@ class MergeManager:
         kind: str,
         a: str,
         b: str,
+        p_meas: float = 0.0,
     ) -> List[int]:
         """Measure simple 2-body joint checks across the seam.
         
@@ -90,6 +91,7 @@ class MergeManager:
             kind: Merge type ("rough" or "smooth")
             a: First patch name
             b: Second patch name
+            p_meas: Measurement error probability (default 0.0 for noiseless)
             
         Returns:
             List of absolute measurement indices (one per pair)
@@ -106,7 +108,7 @@ class MergeManager:
         for ia, ib in pairs:
             global_a = self.layout.globalize_local_index(a, ia)
             global_b = self.layout.globalize_local_index(b, ib)
-            idx = mpp_from_positions(circuit, [global_a, global_b], pauli)
+            idx = mpp_from_positions(circuit, [global_a, global_b], pauli, p_meas=p_meas)
             if idx is not None:
                 indices.append(idx)
         

@@ -1,0 +1,62 @@
+{
+  "x_only": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/x_only_d3.csv",
+      "5": "output/threshold/heavy_hex/x_only_d5.csv",
+      "7": "output/threshold/heavy_hex/x_only_d7.csv",
+      "9": "output/threshold/heavy_hex/x_only_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/x_only.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": null,
+      "7-9": null
+    },
+    "json": "output/threshold/heavy_hex/x_only.json"
+  },
+  "z_only": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/z_only_d3.csv",
+      "5": "output/threshold/heavy_hex/z_only_d5.csv",
+      "7": "output/threshold/heavy_hex/z_only_d7.csv",
+      "9": "output/threshold/heavy_hex/z_only_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/z_only.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": null,
+      "7-9": null
+    },
+    "json": "output/threshold/heavy_hex/z_only.json"
+  },
+  "symmetric_Zinit": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/symmetric_Zinit_d3.csv",
+      "5": "output/threshold/heavy_hex/symmetric_Zinit_d5.csv",
+      "7": "output/threshold/heavy_hex/symmetric_Zinit_d7.csv",
+      "9": "output/threshold/heavy_hex/symmetric_Zinit_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/symmetric_Zinit.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": null,
+      "7-9": null
+    },
+    "json": "output/threshold/heavy_hex/symmetric_Zinit.json"
+  },
+  "symmetric_Xinit": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/symmetric_Xinit_d3.csv",
+      "5": "output/threshold/heavy_hex/symmetric_Xinit_d5.csv",
+      "7": "output/threshold/heavy_hex/symmetric_Xinit_d7.csv",
+      "9": "output/threshold/heavy_hex/symmetric_Xinit_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/symmetric_Xinit.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": null,
+      "7-9": null
+    },
+    "json": "output/threshold/heavy_hex/symmetric_Xinit.json"
+  }
+}

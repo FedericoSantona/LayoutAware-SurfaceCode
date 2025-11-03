@@ -51,7 +51,7 @@ from surface_code.reporting import (
 
 from transpile.pipeline import HeavyHexTranspiler
 from surface_code import (
-    build_heavy_hex_model,
+    build_surface_code_model,
     PhenomenologicalStimConfig,
 )
 from surface_code.layout import PatchObject
@@ -86,9 +86,9 @@ def main() -> None:
         end_basis = ("X" if start_basis == "Z" else "Z") if any_h else start_basis
 
         # Unified surgery-based path (works for any number of qubits)
-        model = build_heavy_hex_model(args.distance)
+        model = build_surface_code_model(args.distance, code_type=args.code_type)
 
-        plot_heavy_hex_code(model, args.distance)
+        plot_heavy_hex_code(model, args.distance, code_type=args.code_type)
         if args.verbose:
             diagnostic_print(model, args)
     
@@ -172,6 +172,7 @@ def main() -> None:
             rounds=stim_rounds,
             p_x_error=float(args.px),
             p_z_error=float(args.pz),
+            p_meas=float(args.p_meas),
             init_label=init_label,
             logical_start=None,
             logical_end=None,

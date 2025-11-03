@@ -31,3 +31,6 @@ class PhenomenologicalStimConfig:
     demo_basis: Optional[Union[str, List[str]]] = None
     # Back-compat shim: some callers pass this flag; it is ignored by builders.
     demo_joint_only: Optional[bool] = False
+    # Measurement error probability (phenomenological noise on measurement results)
+    # Default 0.0 preserves code-capacity mode (no measurement noise)
+    p_meas: float = 0.0

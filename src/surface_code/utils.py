@@ -106,7 +106,14 @@ def compute_two_qubit_correlations(
     return correlations
 
 
-def plot_heavy_hex_code(model, distance):
+def plot_heavy_hex_code(model, distance, code_type: str = "heavy_hex"):
+    """Plot the surface code and save with appropriate filename based on code type.
+    
+    Args:
+        model: Surface code model (HeavyHexModel or StandardSurfaceCodeModel)
+        distance: Code distance
+        code_type: Type of surface code ("heavy_hex" or "standard")
+    """
     plot_dir = PROJECT_ROOT / "plots"
     plot_dir.mkdir(exist_ok=True)
     fig = model.code.draw(
@@ -115,13 +122,15 @@ def plot_heavy_hex_code(model, distance):
         zcolor="skyblue",
         figsize=(5, 5),
     )
-    plt.savefig(plot_dir / f"heavy_hex_d{distance}.png", dpi=300, bbox_inches="tight")
+    # Use code_type in filename to differentiate plots
+    filename = f"{code_type}_d{distance}.png"
+    plt.savefig(plot_dir / filename, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
 def diagnostic_print(model, args):
-
-    print(f"Heavy-hex code with d={args.distance} has {model.code.n} physical qubits.")
+    code_type_name = "surface code" if hasattr(args, 'code_type') and args.code_type == "standard" else "heavy-hex code"
+    print(f"{code_type_name.capitalize()} with d={args.distance} has {model.code.n} physical qubits.")
     print(f"Number of gauge generators: {len(model.generators)}")
     print("Gauge Generators:")
     for i, gen in enumerate(model.generators):

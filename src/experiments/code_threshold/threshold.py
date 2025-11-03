@@ -125,6 +125,32 @@ def _run_circuit_logical_error_rate(
 ) -> SimulationResult:
     dem = circuit.detector_error_model()
 
+    # Prefer physically-motivated boundary anchoring prior to constructing the matcher.
+    boundary_meta = metadata.get("boundary_anchors") if isinstance(metadata, dict) else None
+    anchor_ids: Sequence[int] = ()
+    anchor_epsilon = 1e-12
+    if isinstance(boundary_meta, dict):
+        ids = boundary_meta.get("detector_ids", [])
+        if isinstance(ids, (list, tuple)):
+            anchor_ids = [int(k) for k in ids if isinstance(k, int) and k >= 0]
+        eps = boundary_meta.get("epsilon", anchor_epsilon)
+        try:
+            anchor_epsilon = float(eps)
+        except (TypeError, ValueError):
+            anchor_epsilon = 1e-12
+    # Use the dominant physical error rate as reference for synthetic boundary weights.
+    phys_rates = [
+        getattr(stim_config, "p_x_error", 0.0) or 0.0,
+        getattr(stim_config, "p_z_error", 0.0) or 0.0,
+        getattr(stim_config, "p_meas", 0.0) or 0.0,
+    ]
+    phys_floor = max([r for r in phys_rates if isinstance(r, (int, float))], default=0.0)
+    hook_probability = max(anchor_epsilon, phys_floor, 1e-6)
+    if anchor_ids:
+        dem = augment_dem_with_boundary_anchors(dem, list(anchor_ids), hook_probability)
+    # Ensure each connected component has a boundary hook for pairwise matching.
+    dem, auto_added_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
+
     # Build matcher on the raw DEM first. On well-formed memory experiments
     # (closed space-time cycles), components naturally have even parity and
     # decoding is feasible without synthetic boundaries.
@@ -158,7 +184,7 @@ def _run_circuit_logical_error_rate(
     except ValueError:
         # If PyMatching reports an odd parity in a component without a boundary,
         # add infinitesimal boundary hooks only as a last resort and retry.
-        dem2, matcher2, added, _ = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
+        dem2, matcher2, added, _ = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
         if added <= 0:
             # Re-raise the original error if we couldn't patch the graph
             raise

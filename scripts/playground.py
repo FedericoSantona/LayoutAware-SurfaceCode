@@ -184,11 +184,13 @@ def main() -> None:
         circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map, qc)
 
         if args.verbose:
+            """
             try:
                 print("\n[DEBUG] Stim diagram (detslice-with-ops):")
                 print(circuit.diagram('detslice-with-ops', tick=range(0, circuit.num_ticks)))
             except Exception:
                 pass
+            """
 
         # Sample DEM and decode
         dem = circuit.detector_error_model()

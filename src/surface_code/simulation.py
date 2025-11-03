@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pymatching as pm
 import stim
+import networkx as nx
 from qiskit import QuantumCircuit
 
 from .dem_utils import (
@@ -26,6 +27,11 @@ from .dem_utils import (
     report_boundaryless_components,
     scan_boundaryless_odd_shot,
     pm_find_offending_shot,
+    single_detector_hook_ids,
+    log_hook_summary,
+    compute_dem_components,
+    component_anchor_coverage,
+    scan_infeasible_shot,
 )
 from .pauli import PauliTracker, sequence_from_qc
 from .utils import compute_two_qubit_correlations, compute_joint_correlations, wilson_rate_ci
@@ -71,22 +77,63 @@ def _harden_and_decode_dem(
     verbose: bool = False,
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
+    # Snapshot original DEM to measure how many single-detector hooks get added
+    dem_orig = dem
+    if verbose:
+        try:
+            base_hooks = single_detector_hook_ids(dem_orig)
+            print(f"[DEM-HOOKS] initial single-detector hooks: {len(base_hooks)} (sample {base_hooks[:12]})")
+        except Exception as _exc:
+            print(f"[DEM-HOOKS] initial hook scan failed: {_exc}")
+
     # Add boundary anchors from builder metadata (if any)
+    noise_meta = (metadata.get("noise_model", {}) or {})
+    phys_rates = [
+        float(noise_meta.get("p_x_error", 0.0) or 0.0),
+        float(noise_meta.get("p_z_error", 0.0) or 0.0),
+        float(noise_meta.get("p_meas", 0.0) or 0.0),
+    ]
+    phys_floor = max(phys_rates) if phys_rates else 0.0
+
     try:
         ba = (metadata.get("boundary_anchors", {}) or {})
         anchor_ids = list(ba.get("detector_ids", []) or [])
         anchor_eps = float(ba.get("epsilon", 1e-12))
-        if verbose:
-            print(f"[DEM-CHECK] attempting anchor augmentation: ids={len(anchor_ids)}, eps={anchor_eps:g}")
-        dem = augment_dem_with_boundary_anchors(dem, anchor_ids, anchor_eps)
-    except Exception as _exc:
-        if verbose:
-            print(f"[DEM-CHECK] anchor augmentation skipped due to error: {_exc}")
+    except Exception:
+        anchor_ids = []
+        anchor_eps = 1e-12
+    hook_probability = max(anchor_eps, phys_floor, 1e-6)
+
+    if verbose:
+        print(
+            "[DEM-CHECK] attempting anchor augmentation:",
+            f"ids={len(anchor_ids)} eps={anchor_eps:g} hook_p={hook_probability:g}",
+        )
+    if anchor_ids:
+        dem = augment_dem_with_boundary_anchors(dem, anchor_ids, hook_probability)
 
     # Ensure every connected component has a singleton for pairwise MWPM
-    dem, added_pairwise_hooks = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
+    dem, added_pairwise_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
     if verbose:
         print(f"[DEM-CHECK] added {added_pairwise_hooks} pairwise boundary hooks and rebuilt DEM via text")
+    if verbose:
+        try:
+            log_hook_summary(dem_orig, dem, prefix="[DEM-HOOKS]")
+        except Exception as _exc:
+            print(f"[DEM-HOOKS] summary failed: {_exc}")
+
+    # Component/boundary coverage before building matcher
+    if verbose:
+        try:
+            explicit_ids = list((metadata.get("boundary_anchors", {}) or {}).get("detector_ids", []) or [])
+            comps, bounds = compute_dem_components(dem)
+            cov = component_anchor_coverage(comps, bounds, explicit_ids)
+            if cov["uncovered"]:
+                print(f"[DEM-CHECK] components without boundaries: {cov['uncovered']} (indices {cov['uncovered_indices'][:16]})")
+            else:
+                print(f"[DEM-CHECK] every component has a boundary (components={cov['components']})")
+        except Exception as _exc:
+            print(f"[DEM-CHECK] component coverage check failed: {_exc}")
 
     dem_sampler = dem.compile_sampler(seed=seed)
     det_samp, obs_samp, _ = dem_sampler.sample(shots)
@@ -95,34 +142,64 @@ def _harden_and_decode_dem(
     try:
         # Pairwise matching (no correlations; requires true single-detector boundaries)
         matcher = pm.Matching.from_detector_error_model(dem)
-        # Iterate on anchoring until all components have boundaries
-        max_anchor_iterations = 5
-        for anchor_iter in range(max_anchor_iterations):
-            dem, matcher, iso_added, iso_ids = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
-            if iso_added and verbose:
-                print(f"[DECODE] anchored {iso_added} detectors/components (iteration {anchor_iter+1}): {iso_ids[:12]}")
-            if iso_added == 0:
-                # No more anchors needed
-                break
+        if verbose:
+            try:
+                graph = matcher.to_networkx()
+                num_det = matcher.num_detectors
+                graph_nodes = len(graph)
+                boundary_nodes = [n for n, data in graph.nodes(data=True) if data.get("is_boundary", False)]
+                degree_zero = [n for n in graph if graph.degree(n) == 0]
+                missing_nodes = sorted(set(range(num_det)) - set(graph.nodes()))
+                print(
+                    f"[PM-GRAPH] det={num_det} nodes={graph_nodes} "
+                    f"boundary_nodes={len(boundary_nodes)} zero_degree={len(degree_zero)} missing={len(missing_nodes)}"
+                )
+                ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+                if degree_zero:
+                    print(f"[PM-GRAPH] zero-degree sample: {degree_zero[:16]}")
+                if missing_nodes:
+                    print(f"[PM-GRAPH] missing nodes sample: {missing_nodes[:16]}")
+                    sample_ctx = {det: ctx_map.get(int(det)) for det in missing_nodes[:16]}
+                    print(f"[PM-GRAPH] missing node context: {sample_ctx}")
+            except Exception as _exc:
+                print(f"[PM-GRAPH] diagnostics failed: {_exc}")
+        # Decode without preemptive anchoring; rely on guarded fallback only on failure
         preds = matcher.decode_batch(det_samp.astype(bool))
     except Exception as exc_mwpm:
         if verbose:
             print("[DECODE] Pairwise MWPM failed; hardening DEM and retrying once:", repr(exc_mwpm))
+        # Pinpoint first infeasible shot/component before retrying
+        if verbose:
+            try:
+                expl = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
+                if expl:
+                    print(f"[FEASIBILITY] first infeasible shot={expl['shot']} comp={expl['component_index']} "
+                          f"size={expl['component_size']} boundaries={expl['boundary_count']} "
+                          f"firing_in_comp={expl['total_firing_in_comp']} sample={expl['firing_nodes'][:12]}")
+                else:
+                    print("[FEASIBILITY] no infeasible shot found within scan window; failure cause may be non-parity related.")
+            except Exception as _exc:
+                print(f"[FEASIBILITY] scan failed: {_exc}")
         try:
             # Harden again (in case the sampler revealed an odd-parity component)
-            dem, added_retry = harden_dem_for_pairwise_matching(dem, epsilon=1e-12)
+            dem_pre_retry = dem
+            dem, added_retry = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
             if verbose:
                 print(f"[DEM-CHECK] added {added_retry} additional pairwise boundary hooks on retry and rebuilt DEM via text")
+            if verbose:
+                try:
+                    log_hook_summary(dem_pre_retry, dem, prefix="[DEM-HOOKS:retry]")
+                except Exception as _exc:
+                    print(f"[DEM-HOOKS:retry] summary failed: {_exc}")
             matcher = pm.Matching.from_detector_error_model(dem)
-            # Iterate on anchoring until all components have boundaries
-            max_anchor_iterations = 5
-            for anchor_iter in range(max_anchor_iterations):
-                dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=1e-12)
-                if iso_added_retry and verbose:
-                    print(f"[DECODE] anchored {iso_added_retry} detectors/components on retry (iteration {anchor_iter+1}): {iso_ids_retry[:12]}")
-                if iso_added_retry == 0:
-                    # No more anchors needed
-                    break
+            # Guarded, single-pass PM-level fallback: if hardening added nothing, add one
+            # anchor per boundaryless PM component and retry (even if explicit anchors exist).
+            if added_retry == 0:
+                dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
+                if verbose and iso_added_retry:
+                    ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+                    ctx_sample = {det_id: ctx_map.get(int(det_id)) for det_id in iso_ids_retry[:12]}
+                    print(f"[DECODE] guarded fallback anchors added: {iso_added_retry} (sample {iso_ids_retry[:12]}) ctx={ctx_sample}")
             preds = matcher.decode_batch(det_samp.astype(bool))
         except Exception as exc_retry:
             # Keep existing diagnostics only if decoding still fails after retry
@@ -178,6 +255,15 @@ def _harden_and_decode_dem(
                     print("[PM-CHECK] matcher unavailable; skipping")
             except Exception as _exc3:
                 print(f"[PM-CHECK] diagnostics failed: {_exc3}")
+            # Final explicit feasibility scan after retry hardening
+            try:
+                expl2 = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
+                if expl2:
+                    print(f"[FEASIBILITY:post-retry] shot={expl2['shot']} comp={expl2['component_index']} "
+                          f"size={expl2['component_size']} boundaries={expl2['boundary_count']} "
+                          f"firing_in_comp={expl2['total_firing_in_comp']} sample={expl2['firing_nodes'][:12]}")
+            except Exception as _exc:
+                print(f"[FEASIBILITY:post-retry] scan failed: {_exc}")
             raise
     
     preds = np.asarray(preds, dtype=np.uint8)
@@ -594,4 +680,3 @@ def run_logical_simulation(
         per_qubit_ler=per_qubit_ler,
         per_qubit_ler_ci=per_qubit_ler_ci,
     )
-

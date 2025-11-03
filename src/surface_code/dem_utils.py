@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import List, Tuple
+from typing import List, Tuple, Sequence, Optional, Set, Dict
 
 import numpy as np
 import pymatching as pm
@@ -187,7 +187,8 @@ def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
     
     for comp in comps:
         det_nodes = [n for n in comp if isinstance(n, int) and n < num_det]
-        if det_nodes and not any(n in boundary_nodes for n in det_nodes):
+        has_boundary = any(n in boundary_nodes for n in comp)
+        if det_nodes and not has_boundary:
             # Component has detector nodes but no boundary
             components_needing_boundaries.append(det_nodes[0])  # Use first detector as anchor
     
@@ -397,3 +398,206 @@ def augment_dem_with_boundary_anchors(
         dem_text += f"error({p_str}) D{k}\n"
     return stim.DetectorErrorModel(dem_text)
 
+
+# --- Hook/anchor analysis helpers ---
+
+def single_detector_hook_ids(dem: stim.DetectorErrorModel) -> List[int]:
+    """
+    Return the sorted unique detector ids that appear in *single-detector* error lines
+    of the DEM. These are lines of the form 'error(p) Dk' (possibly with comments).
+    This function does not try to distinguish between physically modeled boundaries
+    and synthetic anchors; use diffs (before vs. after) to see what was added.
+    """
+    ids: set[int] = set()
+    for line in str(dem).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or not s.lower().startswith("error"):
+            continue
+        dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
+        # Count only single-detector errors
+        if len(dets) == 1:
+            ids.add(dets[0])
+    return sorted(ids)
+
+
+def summarize_hook_diffs(
+    before: stim.DetectorErrorModel, after: stim.DetectorErrorModel
+) -> dict:
+    """
+    Compare single-detector hooks between two DEMs and return a summary dict with:
+        - 'before_ids': sorted list of hook detector ids in 'before'
+        - 'after_ids' : sorted list of hook detector ids in 'after'
+        - 'added_ids' : sorted list of ids present only in 'after'
+        - 'removed_ids': sorted list of ids present only in 'before'
+    """
+    b = set(single_detector_hook_ids(before))
+    a = set(single_detector_hook_ids(after))
+    return {
+        "before_ids": sorted(b),
+        "after_ids": sorted(a),
+        "added_ids": sorted(a - b),
+        "removed_ids": sorted(b - a),
+    }
+
+
+def log_hook_summary(
+    before: stim.DetectorErrorModel,
+    after: stim.DetectorErrorModel,
+    *,
+    prefix: str = "[DEM-HOOKS]"
+) -> dict:
+    """
+    Print a short summary of boundary hooks before vs after and return the summary dict.
+    """
+    info = summarize_hook_diffs(before, after)
+    print(
+        f"{prefix} before={len(info['before_ids'])} "
+        f"after={len(info['after_ids'])} "
+        f"added={len(info['added_ids'])} "
+        f"removed={len(info['removed_ids'])}"
+    )
+    if info["added_ids"]:
+        print(f"{prefix} sample added: {info['added_ids'][:16]}")
+    if info["removed_ids"]:
+        print(f"{prefix} sample removed: {info['removed_ids'][:16]}")
+    return info
+
+
+# ---- DEM feasibility diagnostics (pairwise connectivity view) ----
+def _dem_iter_error_lines(dem: stim.DetectorErrorModel):
+    """Yield the detector-id list for each ERROR line in the DEM text."""
+    for line in str(dem).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or not s.lower().startswith("error"):
+            continue
+        dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
+        if dets:
+            yield dets
+
+
+def compute_dem_components(
+    dem: stim.DetectorErrorModel,
+) -> Tuple[List[Set[int]], Set[int]]:
+    """
+    Construct a simple graph from the DEM:
+      - Nodes: all detectors that appear in any ERROR line.
+      - For each ERROR:
+          * if it touches exactly 1 detector -> that detector is a *boundary node*.
+          * if it touches >=2 detectors -> add undirected edges between all pairs (clique)
+            to preserve connectivity.
+    Returns (components, boundary_nodes) where components is a list of node sets.
+    """
+    nodes: Set[int] = set()
+    boundaries: Set[int] = set()
+    adj: Dict[int, Set[int]] = {}
+
+    for dets in _dem_iter_error_lines(dem):
+        for d in dets:
+            nodes.add(d)
+            adj.setdefault(d, set())
+        if len(dets) == 1:
+            boundaries.add(dets[0])
+        else:
+            # connect all pairs (clique) to ensure connectivity within the error
+            for i in range(len(dets)):
+                for j in range(i + 1, len(dets)):
+                    a, b = dets[i], dets[j]
+                    adj[a].add(b)
+                    adj[b].add(a)
+
+    # Flood-fill components
+    unvisited = set(nodes)
+    comps: List[Set[int]] = []
+    while unvisited:
+        root = unvisited.pop()
+        stack = [root]
+        comp = {root}
+        while stack:
+            u = stack.pop()
+            for v in adj.get(u, ()):
+                if v in unvisited:
+                    unvisited.remove(v)
+                    comp.add(v)
+                    stack.append(v)
+        comps.append(comp)
+
+    return comps, boundaries
+
+
+def component_anchor_coverage(
+    components: Sequence[Set[int]],
+    boundaries: Set[int],
+    explicit_anchor_ids: Sequence[int] | None,
+) -> Dict[str, object]:
+    """
+    For each component, report whether it contains a boundary node
+    (either from a single-detector ERROR or from the explicit anchor list).
+    """
+    exp = set(explicit_anchor_ids or [])
+    covered_flags: List[bool] = [len((boundaries | exp) & comp) > 0 for comp in components]
+    return {
+        "components": len(components),
+        "covered": sum(1 for x in covered_flags if x),
+        "uncovered": sum(1 for x in covered_flags if not x),
+        "uncovered_indices": [i for i, x in enumerate(covered_flags) if not x],
+    }
+
+
+def scan_infeasible_shot(
+    dem: stim.DetectorErrorModel,
+    det_samp: np.ndarray,
+    max_scan: int = 2048,
+) -> Optional[Dict[str, object]]:
+    """
+    Find the first shot s.t. some component has odd syndrome parity and no boundary.
+    Returns a dict with details or None if none found within the scan window.
+    """
+    if det_samp is None or det_samp.size == 0:
+        return None
+    components, boundaries = compute_dem_components(dem)
+    comp_nodes = [sorted(list(comp)) for comp in components]
+
+    shots = min(max_scan, det_samp.shape[0])
+    for s in range(shots):
+        syn = det_samp[s].astype(np.uint8)
+        for i, nodes in enumerate(comp_nodes):
+            if not nodes:
+                continue
+            parity = int(np.bitwise_xor.reduce(syn[nodes]))
+            has_boundary = len((boundaries & set(nodes))) > 0
+            if (parity & 1) and not has_boundary:
+                firing = [n for n in nodes if int(syn[n]) & 1]
+                return {
+                    "shot": s,
+                    "component_index": i,
+                    "component_size": len(nodes),
+                    "boundary_count": len(boundaries & set(nodes)),
+                    "firing_nodes": firing[:64],
+                    "total_firing_in_comp": len(firing),
+                }
+    return None
+
+
+def subdem_for_component(
+    dem: stim.DetectorErrorModel,
+    component_nodes: Sequence[int],
+) -> stim.DetectorErrorModel:
+    """
+    Extract a minimal sub-DEM containing only ERROR lines supported entirely on
+    the given component nodes (plus single-detector hooks that lie in the set).
+    Non-ERROR lines are dropped for compactness.
+    """
+    keep = set(int(x) for x in component_nodes)
+    out_lines: List[str] = []
+    for line in str(dem).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if not s.lower().startswith("error"):
+            continue
+        dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
+        if not dets:
+            continue
+        if (len(dets) == 1 and dets[0] in keep) or all(d in keep for d in dets):
+            out_lines.append(s)
+    return stim.DetectorErrorModel("\n".join(out_lines))

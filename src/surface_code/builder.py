@@ -38,6 +38,78 @@ class GlobalStimBuilder:
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
         self._detector_count: int = 0
+        self._boundary_rows: Dict[Tuple[str, str], Set[int]] = self._compute_boundary_rows()
+
+    def _compute_boundary_rows(self) -> Dict[Tuple[str, str], Set[int]]:
+        """Pre-compute which stabilizer rows sit on patch boundaries.
+
+        We classify a stabilizer row as a boundary when the participating data
+        qubits live near the geometric edge of the patch (within a tolerance).
+        For models without coordinate metadata we fall back to a degree-based
+        heuristic (qubits appearing in only one stabilizer are treated as edges).
+        """
+        boundary_rows: Dict[Tuple[str, str], Set[int]] = {}
+        for name, patch in self.layout.patches.items():
+            coords = {
+                q: (float(x), float(y))
+                for q, (x, y) in patch.coords.items()
+            }
+            if coords:
+                xs = [x for x, _ in coords.values()]
+                ys = [y for _, y in coords.values()]
+                xmin, xmax = min(xs), max(xs)
+                ymin, ymax = min(ys), max(ys)
+                tolerance = 0.6
+
+                def classify(stabs: List[str], pauli: str) -> Set[int]:
+                    rows: Set[int] = set()
+                    for si, stab in enumerate(stabs):
+                        points = [(coords[idx][0], coords[idx][1]) for idx, char in enumerate(stab) if char == pauli and idx in coords]
+                        if not points:
+                            continue
+                        avg_x = sum(px for px, _ in points) / len(points)
+                        avg_y = sum(py for _, py in points) / len(points)
+                        dist = min(
+                            abs(avg_x - xmin),
+                            abs(avg_x - xmax),
+                            abs(avg_y - ymin),
+                            abs(avg_y - ymax),
+                        )
+                        if dist <= tolerance:
+                            rows.add(si)
+                    return rows
+            else:
+                n = patch.n
+
+                def classify(stabs: List[str], pauli: str) -> Set[int]:
+                    counts = [0] * n
+                    for stab in stabs:
+                        for qi, char in enumerate(stab):
+                            if char == pauli:
+                                counts[qi] += 1
+                    rows: Set[int] = set()
+                    for si, stab in enumerate(stabs):
+                        boundary = False
+                        for qi, char in enumerate(stab):
+                            if char == pauli and counts[qi] <= 1:
+                                boundary = True
+                                break
+                        if boundary:
+                            rows.add(si)
+                    return rows
+
+            boundary_rows[(name, "Z")] = classify(patch.z_stabs, "Z")
+            boundary_rows[(name, "X")] = classify(patch.x_stabs, "X")
+
+        return boundary_rows
+
+    def is_boundary_row(self, patch: str, basis: str, row_idx: int) -> bool:
+        """Return True when the stabilizer row is treated as a physical boundary."""
+        key = (patch, basis.upper())
+        rows = self._boundary_rows.get(key)
+        if not rows:
+            return False
+        return row_idx in rows
 
     def _emit_qubit_coords(self, circuit: stim.Circuit) -> None:
         coords = self.layout.global_coords()
@@ -197,7 +269,7 @@ class GlobalStimBuilder:
         force_boundaries = getattr(cfg, "force_boundaries", True)
         boundary_error_prob = getattr(cfg, "boundary_error_prob", 1e-12)
         detector_manager = DetectorManager(force_boundaries=force_boundaries, boundary_error_prob=boundary_error_prob)
-        segment_tracker = SegmentTracker()
+        segment_tracker = SegmentTracker(boundary_checker=self.is_boundary_row)
         merge_manager = MergeManager(self.layout)
 
         # Resolve patch order and selection helpers
@@ -646,7 +718,11 @@ class GlobalStimBuilder:
                 *segment_tracker.get_row_wraps(),
             ),
             "explicit_logical_brackets": emit_explicit_logicals,
+            "noise_model": {
+                "p_x_error": float(getattr(cfg, "p_x_error", 0.0) or 0.0),
+                "p_z_error": float(getattr(cfg, "p_z_error", 0.0) or 0.0),
+                "p_meas": float(getattr(cfg, "p_meas", 0.0) or 0.0),
+            },
         }
 
         return circuit, observable_pairs, metadata
-

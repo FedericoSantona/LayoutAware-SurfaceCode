@@ -207,7 +207,7 @@ def test_dem_degree_check():
     # Build circuit with multiple rounds (distance rounds)
     cfg = PhenomenologicalStimConfig(
         rounds=distance,
-        p_x_error=0.0,  # No errors for this test
+        p_x_error=0.0,  # No random errors for this diagnostic
         p_z_error=0.0,
         p_meas=0.0,
         init_label="0",

@@ -6,13 +6,13 @@ that connect the first and last measurements of each segment.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 
 class SegmentTracker:
     """Tracks stabilizer segments for wrap-around closure."""
     
-    def __init__(self):
+    def __init__(self, boundary_checker: Optional[Callable[[str, str, int], bool]] = None):
         """Initialize segment tracker with empty state."""
         # Track first/last measured indices per stabilizer (segment tracking)
         self.seg_first: Dict[Tuple[str, str], List[Optional[int]]] = {}  # key=(patch,basis)
@@ -24,6 +24,7 @@ class SegmentTracker:
         # Row wrap summaries for diagnostics
         self.z_row_wraps: Dict[str, List[int]] = {}
         self.x_row_wraps: Dict[str, List[int]] = {}
+        self._boundary_checker = boundary_checker
     
     def ensure_seg_lists(self, patch_name: str, basis: str, length: int) -> None:
         """Ensure segment lists exist and are long enough.
@@ -127,7 +128,17 @@ class SegmentTracker:
             b = last_list[si] if si < len(last_list) else None
             # Wrap-close any open segment where endpoints differ
             if a is not None and b is not None and a != b:
-                detector_manager.defer_detector([a, b], f"{basis.lower()}_wrap", {"patch": patch_name, "row": si})
+                det_id = detector_manager.defer_detector([a, b], f"{basis.lower()}_wrap", {"patch": patch_name, "row": si})
+                if (
+                    detector_manager.force_boundaries
+                    and self._boundary_checker is not None
+                    and self._boundary_checker(patch_name, basis, si)
+                ):
+                    detector_manager.anchor_detector_ids.append(det_id)
+                    if basis == "Z":
+                        detector_manager.boundary_counts_z[patch_name] = detector_manager.boundary_counts_z.get(patch_name, 0) + 1
+                    else:
+                        detector_manager.boundary_counts_x[patch_name] = detector_manager.boundary_counts_x.get(patch_name, 0) + 1
                 if basis == "Z":
                     self.z_row_wraps.setdefault(patch_name, []).append(si)
                 else:
@@ -156,4 +167,3 @@ class SegmentTracker:
             Tuple of (z_row_wraps, x_row_wraps) dictionaries
         """
         return self.z_row_wraps, self.x_row_wraps
-

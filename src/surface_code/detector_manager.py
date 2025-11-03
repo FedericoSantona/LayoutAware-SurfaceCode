@@ -30,6 +30,7 @@ class DetectorManager:
         # Deferred detector storage
         self.deferred_detectors: List[List[int]] = []
         self.edge_records: List[Dict[str, object]] = []
+        self.detector_context: Dict[int, Dict[str, object]] = {}
         
         # Boundary anchor tracking
         self.anchor_detector_ids: List[int] = []
@@ -64,6 +65,11 @@ class DetectorManager:
             "tag": tag,
             "context": dict(context or {}),
         })
+        det_idx = len(self.deferred_detectors) - 1
+        self.detector_context[det_idx] = {
+            "tag": tag,
+            "context": dict(context or {}),
+        }
         
         # Track per-row temporal degrees for x_temporal/z_temporal
         if tag in ("x_temporal", "z_temporal"):
@@ -179,5 +185,5 @@ class DetectorManager:
                 "X": {k: int(v) for k, v in self.boundary_counts_x.items()},
                 "seam": {str(k): int(v) for k, v in self.seam_boundary_counts.items()},
             },
+            "detector_context": {int(k): dict(v) for k, v in self.detector_context.items()},
         }
-

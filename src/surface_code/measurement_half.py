@@ -140,6 +140,7 @@ class MeasurementHalf:
                 p_list = list(prev_dict.get(name, []))
                 c_list = list(meas_curr.get(name, []))
                 from itertools import zip_longest as _ziplg
+                has_history = any(val is not None for val in p_list)
                 for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
                     if si in row_skip:
                         continue
@@ -154,18 +155,24 @@ class MeasurementHalf:
                     # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
                     temporal_type = f"{self.basis.lower()}_temporal"
                     _det_id = detector_manager.defer_detector([a, b], temporal_type, {"patch": name, "row": si})
-                    if detector_manager.force_boundaries and first_edge:
-                        segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
-                        key = (name, self.basis)
-                        if si < len(segment_tracker.seg_boundary_emitted.get(key, [])) and not segment_tracker.seg_boundary_emitted[key][si]:
+                    if detector_manager.force_boundaries:
+                        if (
+                            self.builder.is_boundary_row(name, self.basis, si)
+                            or (first_edge and not has_history)
+                        ):
+                            segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
+                            key = (name, self.basis)
+                            emitted_flags = segment_tracker.seg_boundary_emitted.get(key, [])
+                            # Track that we've emitted at least one anchor for this row, but still allow multiple hooks.
+                            if si < len(emitted_flags):
+                                emitted_flags[si] = True
                             detector_manager.anchor_detector_ids.append(_det_id)
-                            segment_tracker.seg_boundary_emitted[key][si] = True
                             if self.basis == "Z":
                                 detector_manager.boundary_counts_z[name] = detector_manager.boundary_counts_z.get(name, 0) + 1
                             else:
                                 detector_manager.boundary_counts_x[name] = detector_manager.boundary_counts_x.get(name, 0) + 1
                     segment_tracker.mark_had_edge(name, self.basis, si)
-                
+
                 curr_measurements[name] = list(meas_curr.get(name, []))
                 
                 # Capture start index if conditions are met

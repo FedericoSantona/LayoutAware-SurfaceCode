@@ -205,7 +205,7 @@ Examples:
     sim_group.add_argument(
         "--code-type",
         choices=["heavy_hex", "standard"],
-        default="heavy_hex",
+        default="standard",
         help="Type of surface code to use (default: standard)",
     )
     sim_group.add_argument(

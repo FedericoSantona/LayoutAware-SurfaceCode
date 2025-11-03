@@ -244,6 +244,18 @@ def print_header(
     
     # Code geometry
     print(f"\nCode Geometry:")
+    # Determine code type from args or model class
+    code_type = getattr(args, 'code_type', None)
+    if code_type is None:
+        # Fallback: determine from model class
+        model_class_name = type(model).__name__
+        if 'HeavyHex' in model_class_name:
+            code_type = "heavy_hex"
+        elif 'Standard' in model_class_name:
+            code_type = "standard"
+        else:
+            code_type = "unknown"
+    print(f"  Code type: {code_type}")
     print(f"  Distance: d={args.distance}")
     print(f"  Physical qubits: n={model.code.n}")
     print(f"  Measurement rounds: {stim_rounds}")

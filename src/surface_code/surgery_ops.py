@@ -44,6 +44,13 @@ class ParityReadout:
 
 
 @dataclass
+class ResetPatch:
+    """Reset a logical patch to a specified basis eigenstate (default |+>)."""
+    patch_id: str
+    basis: str = "X"  # Target basis eigenstate after reset ('X' -> |+>, 'Z' -> |0>)
+
+
+@dataclass
 class CNOTOp:
     """High-level CNOT operation using ancilla-mediated surgery.
     
@@ -71,4 +78,3 @@ class TerminatePatch:
     """
     patch_id: str
     classical_register: str | None = None  # Optional: classical register storing result
-

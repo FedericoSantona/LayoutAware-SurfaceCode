@@ -4,7 +4,7 @@ from .model import SurfaceCodeModel
 from .builder import GlobalStimBuilder
 from .configs import PhenomenologicalStimConfig
 from .layout import Layout, PatchObject, create_single_patch_layout
-from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
+from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, ResetPatch
 from .pauli import PauliTracker
 
 try:
@@ -71,5 +71,6 @@ __all__ = [
     "Merge",
     "Split",
     "ParityReadout",
+    "ResetPatch",
     "PauliTracker",
 ]

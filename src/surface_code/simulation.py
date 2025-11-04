@@ -38,6 +38,170 @@ from .pauli import PauliTracker, sequence_from_qc
 from .utils import compute_two_qubit_correlations, compute_joint_correlations, wilson_rate_ci
 
 
+# Helper: Count observable support in ERROR terms
+def _debug_obs_support(dem: stim.DetectorErrorModel) -> List[int]:
+    """Return a list where entry k is the number of ERROR terms that reference observable k."""
+    try:
+        try:
+            n_obs = int(dem.num_observables)
+        except Exception:
+            n_obs = int(dem.num_observables())
+        counts = [0] * max(n_obs, 0)
+        for inst in dem:
+            # Robust "is this an ERROR instruction?" check
+            is_error = False
+            try:
+                # Preferred: enum comparison
+                if hasattr(stim, "DemInstructionType"):
+                    is_error = (getattr(inst, "type", None) == stim.DemInstructionType.ERROR)
+                # Fallbacks: string name or enum-name
+                if not is_error:
+                    name = getattr(inst, "name", None)
+                    if name is not None:
+                        is_error = (str(name).lower() == "error")
+                if not is_error:
+                    t = getattr(inst, "type", None)
+                    if t is not None:
+                        is_error = (str(getattr(t, "name", t)).lower() == "error")
+                # Last-resort: textual representation
+                if not is_error:
+                    s = str(inst).lstrip().lower()
+                    if s.startswith("error"):
+                        is_error = True
+            except Exception:
+                is_error = False
+            if not is_error:
+                continue
+
+            # Access targets in a Stim-version-proof way
+            targets = []
+            try:
+                if hasattr(inst, "targets_copy"):
+                    targets = list(inst.targets_copy())
+                else:
+                    raw = getattr(inst, "targets", ())
+                    try:
+                        targets = list(raw)
+                    except Exception:
+                        targets = []
+            except Exception:
+                targets = []
+
+            # Count observable ids; fallback to text parse if needed
+            any_obs = False
+            for t in targets:
+                try:
+                    if hasattr(t, "is_observable_id") and t.is_observable_id():
+                        k = int(getattr(t, "value", getattr(t, "val", 0)))
+                        if 0 <= k < len(counts):
+                            counts[k] += 1
+                            any_obs = True
+                except Exception:
+                    pass
+            if not any_obs:
+                # Fallback: parse textual tokens like "L0", "L1"
+                try:
+                    toks = str(inst).replace(",", " ").split()
+                    for tok in toks:
+                        if tok.startswith("L") and tok[1:].isdigit():
+                            k = int(tok[1:])
+                            if 0 <= k < len(counts):
+                                counts[k] += 1
+                                any_obs = True
+                except Exception:
+                    pass
+        return counts
+    except Exception:
+        return []
+
+
+def _debug_iter_observable_error_terms(dem: stim.DetectorErrorModel, limit: int = 12) -> List[str]:
+    """Return formatted summaries of the first few ERROR terms that include any observable ids."""
+    out: List[str] = []
+    try:
+        for inst in dem:
+            # Robust "is this an ERROR instruction?" check
+            is_error = False
+            try:
+                if hasattr(stim, "DemInstructionType"):
+                    is_error = (getattr(inst, "type", None) == stim.DemInstructionType.ERROR)
+                if not is_error:
+                    name = getattr(inst, "name", None)
+                    if name is not None:
+                        is_error = (str(name).lower() == "error")
+                if not is_error:
+                    t = getattr(inst, "type", None)
+                    if t is not None:
+                        is_error = (str(getattr(t, "name", t)).lower() == "error")
+                if not is_error:
+                    s0 = str(inst).lstrip().lower()
+                    if s0.startswith("error"):
+                        is_error = True
+            except Exception:
+                is_error = False
+            if not is_error:
+                continue
+
+            # Stim-version-safe target access
+            targets = []
+            try:
+                if hasattr(inst, "targets_copy"):
+                    targets = list(inst.targets_copy())
+                else:
+                    raw = getattr(inst, "targets", ())
+                    try:
+                        targets = list(raw)
+                    except Exception:
+                        targets = []
+            except Exception:
+                targets = []
+
+            obs_ids: List[int] = []
+            det_ids: List[int] = []
+            for t in targets:
+                try:
+                    if hasattr(t, "is_observable_id") and t.is_observable_id():
+                        obs_ids.append(int(getattr(t, "value", getattr(t, "val", 0))))
+                    elif hasattr(t, "is_detector_id") and t.is_detector_id():
+                        det_ids.append(int(getattr(t, "value", getattr(t, "val", 0))))
+                except Exception:
+                    pass
+
+            # Try to read the probability/weight if available
+            prob = None
+            try:
+                if hasattr(inst, "args_copy"):
+                    args = inst.args_copy()
+                else:
+                    args = getattr(inst, "args", None) or getattr(inst, "arguments", None)
+                if args:
+                    try:
+                        prob = float(args[0])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if prob is None:
+                # Parse from textual form like "error(0.001) ..."
+                try:
+                    s1 = str(inst)
+                    if "error(" in s1:
+                        s2 = s1.split("error(", 1)[1]
+                        s3 = s2.split(")", 1)[0]
+                        prob = float(s3.strip().split()[0])
+                except Exception:
+                    pass
+
+            if obs_ids:
+                prob_str = f"p={prob:.3g}" if isinstance(prob, float) else "p=?"
+                out.append(f"ERROR {prob_str}  dets={det_ids[:6]}  obs={obs_ids}")
+                if len(out) >= limit:
+                    break
+    except Exception:
+        pass
+    return out
+
+
 @dataclass
 class SimulationResults:
     """Structured results from logical simulation."""
@@ -79,6 +243,26 @@ def _harden_and_decode_dem(
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
     # Snapshot original DEM to measure how many single-detector hooks get added
+    if verbose:
+        try:
+            obs_support = _debug_obs_support(dem)
+            print(f"[OBS-SUPPORT] per-observable error terms (pre-pruning): {obs_support}")
+            if sum(obs_support) > 0:
+                samples = _debug_iter_observable_error_terms(dem, limit=6)
+                if samples:
+                    print("[OBS-SUPPORT] sample ERROR lines carrying observables (pre-pruning):")
+                    for s in samples:
+                        print("  ", s)
+            try:
+                txt = str(dem)
+                c0 = txt.count(" L0")
+                c1 = txt.count(" L1")
+                print(f"[OBS-TEXT] raw DEM text counts: L0={c0} L1={c1}")
+            except Exception:
+                pass
+        except Exception as _exc:
+            print(f"[OBS-SUPPORT] scan failed (pre-pruning): {_exc}")
+
     dem, _ = prune_dem_to_live_detectors(dem, metadata)
     dem_orig = dem
     if verbose:
@@ -162,6 +346,7 @@ def _harden_and_decode_dem(
                 candidate = int(comp[0])
             targeted_hooks.append(candidate)
         dem = augment_dem_with_boundary_anchors(dem, targeted_hooks, hook_probability)
+        fallback_added = len(targeted_hooks)
         matcher = pm.Matching.from_detector_error_model(dem)
         graph = matcher.to_networkx()
         mg = matcher._matching_graph
@@ -192,6 +377,29 @@ def _harden_and_decode_dem(
                 print(f"[DEM-CHECK] WARNING: components still boundaryless after targeted anchoring (sample): {residual[:16]}")
         elif verbose:
             print("[DEM-CHECK] all components have boundaries after targeted anchoring")
+
+        # Re-check observable support after targeted anchoring
+        if verbose:
+            try:
+                obs_support_post = _debug_obs_support(dem)
+                print(f"[OBS-SUPPORT] per-observable error terms (post-pruning): {obs_support_post}")
+                if sum(obs_support_post) > 0:
+                    samples = _debug_iter_observable_error_terms(dem, limit=6)
+                    if samples:
+                        print("[OBS-SUPPORT] sample ERROR lines carrying observables (post-pruning):")
+                        for s in samples:
+                            print("  ", s)
+                else:
+                    print("[OBS-SUPPORT] no ERROR terms carry any observables (post-pruning).")
+                try:
+                    txt = str(dem)
+                    c0 = txt.count(" L0")
+                    c1 = txt.count(" L1")
+                    print(f"[OBS-TEXT] raw DEM text counts: L0={c0} L1={c1}")
+                except Exception:
+                    pass
+            except Exception as _exc:
+                print(f"[OBS-SUPPORT] scan failed (post-pruning): {_exc}")
 
     actual_hooks = single_detector_hook_ids(dem)
     metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(actual_hooks)
@@ -247,6 +455,8 @@ def _harden_and_decode_dem(
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
         preds = matcher.decode_batch(det_samp.astype(bool))
+        if verbose:
+            print(f"[PM-CHECK] fallback anchors added: {fallback_added}")
     except Exception as exc_mwpm:
         if verbose:
             print("[DECODE] Pairwise MWPM failed; hardening DEM and retrying once:", repr(exc_mwpm))
@@ -408,6 +618,7 @@ def _track_pauli_frame(
 def _apply_corrections(
     obs_u8: np.ndarray,
     preds: np.ndarray,
+    metadata: Dict[str, Any],
     bracket_map: Dict[str, str],
     pauli_tracker: PauliTracker,
 ) -> Tuple[np.ndarray, Dict[str, int], Tuple[str, ...]]:
@@ -416,27 +627,45 @@ def _apply_corrections(
     corrected_obs = obs_u8.copy()
     
     # Map patch names to their observable indices
-    patch_to_obs_idx = {}
-    for i, patch_name in enumerate(sorted(bracket_map.keys())):
-        patch_to_obs_idx[patch_name] = i
+    patch_order = list(metadata.get("observable_patches", ()))
+    if not patch_order:
+        patch_order = sorted(bracket_map.keys())
+
+    patch_to_obs_idx = {patch: idx for idx, patch in enumerate(patch_order)}
     
     # Apply Pauli frame corrections
-    for patch_name in sorted(bracket_map.keys()):
+    basis_labels = list(metadata.get("observable_basis", ()))
+    for patch_name in patch_order:
         if patch_name in patch_to_obs_idx:
             obs_idx = patch_to_obs_idx[patch_name]
             # Check if obs_idx is within bounds
             if obs_idx < corrected_obs.shape[1]:
-                basis = bracket_map[patch_name]
-                if basis == "Z":
-                    corrected_obs[:, obs_idx] ^= pauli_tracker.frame[patch_name]["fz"]
+                if obs_idx < len(basis_labels):
+                    basis = basis_labels[obs_idx]
                 else:
-                    corrected_obs[:, obs_idx] ^= pauli_tracker.frame[patch_name]["fx"]
+                    basis = bracket_map.get(patch_name, "Z")
+                frame_entry = pauli_tracker.frame.get(patch_name, {})
+                if basis == "Z":
+                    val = frame_entry.get("fz", 0)
+                else:
+                    val = frame_entry.get("fx", 0)
+                if isinstance(val, np.ndarray):
+                    val = int(val[-1]) if val.size else 0
+                else:
+                    val = int(val)
+                corrected_obs[:, obs_idx] ^= val & 1
     
     # Apply decoder predictions to flip outcomes when decoder detects errors
     # The decoder predictions indicate when the logical outcome should be flipped
     corrected_obs ^= preds
     
-    return corrected_obs, patch_to_obs_idx, tuple(bracket_map[q] for q in sorted(bracket_map))
+    if not basis_labels or len(basis_labels) < len(patch_order):
+        basis_labels = [bracket_map.get(p, "Z") for p in patch_order]
+
+    if metadata.get("_debug_verbose"):
+        print(f"[OBS-MAP] patch_order={patch_order} basis={basis_labels}")
+
+    return corrected_obs, patch_to_obs_idx, tuple(basis_labels)
 
 
 def _extract_measurements(
@@ -651,6 +880,8 @@ def run_logical_simulation(
         SimulationResults containing all simulation outputs
     """
     # Step 1: Harden DEM and decode
+    if verbose:
+        metadata["_debug_verbose"] = True
     dem, det_samp, obs_u8, preds = _harden_and_decode_dem(
         dem, metadata, observable_pairs, shots, seed, verbose
     )
@@ -662,7 +893,7 @@ def run_logical_simulation(
     
     # Step 3: Apply corrections to observables
     corrected_obs, patch_to_obs_idx, basis_labels_from_bracket = _apply_corrections(
-        obs_u8, preds, bracket_map, pauli_tracker
+        obs_u8, preds, metadata, bracket_map, pauli_tracker
     )
     
     # Get basis labels from metadata or fallback to bracket_map
@@ -723,6 +954,9 @@ def run_logical_simulation(
         ler_ci = wilson_rate_ci(error_count, shots)
         per_qubit_ler.append(ler)
         per_qubit_ler_ci.append(ler_ci)
+
+    if metadata.get("_debug_verbose"):
+        print(f"[OBS-DEBUG] preds_mean={np.mean(preds, axis=0) if preds.size else []}")
     
     # Step 9: Compute correlations
     correlations = _compute_correlations(

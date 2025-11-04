@@ -17,7 +17,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 import stim
 
 from .layout import Layout
-from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, TerminatePatch
+from .surgery_ops import MeasureRound, Merge, Split, ParityReadout, TerminatePatch, ResetPatch
 from .configs import PhenomenologicalStimConfig
 from .builder_utils import mpp_from_positions
 from .builder_state import BuilderState, _PrevState
@@ -609,6 +609,53 @@ class GlobalStimBuilder:
                 
                 # NOTE: No circuit operations are emitted here to keep the DEM deterministic.
 
+            elif isinstance(op, ResetPatch):
+                patch_name = op.patch_id
+                if patch_name not in layout.patches or patch_name in state.terminated_patches:
+                    continue
+
+                patch = layout.patches[patch_name]
+                target_basis = str(getattr(op, "basis", "X")).upper()
+                if target_basis not in {"X", "Z"}:
+                    raise ValueError("ResetPatch.basis must be 'X' or 'Z'")
+
+                # Close any open temporal segments before the reset to avoid dangling edges.
+                segment_tracker.wrap_close_segment(
+                    patch_name,
+                    "Z",
+                    detector_manager,
+                    None,
+                    skip_boundary_rows=True,
+                )
+                segment_tracker.wrap_close_segment(
+                    patch_name,
+                    "X",
+                    detector_manager,
+                    None,
+                    skip_boundary_rows=True,
+                )
+
+                # Reset previous measurement history so subsequent rounds treat the patch as fresh.
+                state.prev.z_prev[patch_name] = [None] * len(patch.z_stabs)
+                state.prev.x_prev[patch_name] = [None] * len(patch.x_stabs)
+
+                # Mark rows dynamic so that boundary anchors are retained in code-capacity mode.
+                for row_idx in range(len(patch.z_stabs)):
+                    detector_manager.mark_row_dynamic(patch_name, "Z", int(row_idx))
+                for row_idx in range(len(patch.x_stabs)):
+                    detector_manager.mark_row_dynamic(patch_name, "X", int(row_idx))
+
+                # Apply a physical reset followed by an optional Hadamard to prepare |+>.
+                circuit.append_operation("TICK")
+                offs = layout.offsets()
+                base = offs[patch_name]
+                qubits = [base + q_local for q_local in range(patch.n)]
+                for g_idx in qubits:
+                    circuit.append_operation("R", [g_idx])
+                if target_basis == "X":
+                    for g_idx in qubits:
+                        circuit.append_operation("H", [g_idx])
+
             elif isinstance(op, TerminatePatch):
                 # Handle mid-circuit measurement: close segments and mark as terminated
                 patch_name = op.patch_id
@@ -718,7 +765,7 @@ class GlobalStimBuilder:
         # Bracketing: end logicals per patch and observable includes
         # IMPORTANT: do not emit new MPPs here; reuse the last compatible
         # stabilizer measurements from the final round to keep DEM deterministic.
-        observable_pairs, basis_labels, deferred_observables = observable_manager.finalize_observables(
+        observable_pairs, basis_labels, deferred_observables, patch_labels = observable_manager.finalize_observables(
             circuit, state, _last_non_none
         )
 
@@ -754,6 +801,7 @@ class GlobalStimBuilder:
         metadata: Dict[str, object] = {
             "merge_windows": merge_manager.get_windows(),
             "observable_basis": tuple(basis_labels),
+            "observable_patches": tuple(patch_labels),
             "demo": demo_info,
             "joint_demos": joint_demo_info,
             "cnot_operations": state.cnot_operations,

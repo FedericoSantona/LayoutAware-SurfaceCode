@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p-meas",
         type=float,
-        default=0,
+        default=1e-12,
         help="Measurement error probability (phenomenological noise). If not provided, auto-sets based on data error rates: p_meas = p for symmetric cases, p_meas = max(p_x, p_z) for asymmetric cases. Set to 0 for code-capacity mode (no measurement errors).",
     )
     parser.add_argument(

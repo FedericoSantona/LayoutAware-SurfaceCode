@@ -84,7 +84,7 @@ class ObservableManager:
         circuit: stim.Circuit,
         state: BuilderState,
         _last_non_none,
-    ) -> Tuple[List[Tuple[int, int]], List[str], List[Tuple[Optional[int], Optional[int], int]]]:
+    ) -> Tuple[List[Tuple[int, int]], List[str], List[Tuple[Optional[int], Optional[int], int]], List[str]]:
         """Finalize observables and prepare for emission.
         
         Args:
@@ -98,6 +98,7 @@ class ObservableManager:
         observable_pairs: List[Tuple[int, int]] = []
         basis_labels: List[str] = []
         deferred_observables: List[Tuple[Optional[int], Optional[int], int]] = []
+        patch_labels: List[str] = []
         observable_index = 0
         
         # At the very end, fallback-seal any observables that didn't conflict
@@ -139,9 +140,10 @@ class ObservableManager:
                 deferred_observables.append((start_idx, end_idx, observable_index))
                 observable_pairs.append((start_idx, end_idx))
                 basis_labels.append(effective_basis)
+                patch_labels.append(name)
                 observable_index += 1
-        
-        return observable_pairs, basis_labels, deferred_observables
+
+        return observable_pairs, basis_labels, deferred_observables, patch_labels
     
     def emit_observables(
         self,
@@ -164,4 +166,3 @@ class ObservableManager:
                     obs_targets.append(stim.target_rec(e_idx - final_m2))
                 if obs_targets:
                     circuit.append_operation("OBSERVABLE_INCLUDE", obs_targets, obs_k)
-

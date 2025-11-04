@@ -241,7 +241,7 @@ Examples:
     sim_group.add_argument(
         "--p-meas",
         type=float,
-        default=0.0,
+        default=1e-12,
         help="Measurement error probability (phenomenological noise on measurement results). Default 0.0 for code-capacity mode."
     )
     sim_group.add_argument(

@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Tuple
 from qiskit import QuantumCircuit
 
 from .layout import Layout, PatchObject
-from .surgery_ops import MeasureRound, Merge, ParityReadout, Split, CNOTOp, TerminatePatch
+from .surgery_ops import MeasureRound, Merge, ParityReadout, Split, CNOTOp, TerminatePatch, ResetPatch
 
 
 def _allocate_ancilla(patches: Dict[str, PatchObject], ancilla_name: str = "ancilla_0", buffer: float = 1.0) -> PatchObject:
@@ -245,6 +245,8 @@ def compile_circuit_to_surgery(
                 ops.append(MeasureRound())
             ops.append(Split("rough", control_name, ancilla_name))
             ops.append(ParityReadout("ZZ", "ZZ", control_name, ancilla_name))
+            # Reset ancilla back to |+> (X eigenstate) before engaging smooth seam
+            ops.append(ResetPatch(ancilla_name, basis="X"))
             # 2. Smooth XX merge (Ancilla-Target)  
             smooth_rounds = max(0, int(distance))
             ops.append(Merge("smooth", ancilla_name, target_name, rounds=smooth_rounds))

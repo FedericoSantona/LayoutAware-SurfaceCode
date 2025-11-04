@@ -132,14 +132,18 @@ def diagnostic_print(model, args):
     code_type_name = "surface code" if hasattr(args, 'code_type') and args.code_type == "standard" else "heavy-hex code"
     print(f"{code_type_name.capitalize()} with d={args.distance} has {model.code.n} physical qubits.")
     print(f"Number of gauge generators: {len(model.generators)}")
+    
+    """
     print("Gauge Generators:")
     for i, gen in enumerate(model.generators):
         print(f"  GG{i}: {gen}")
-
+    
     stabilizers = PauliList(model.stabilizer_matrix)
+    
     print("Stabilizers (basis):")
     for i, stab in enumerate(stabilizers):
         print(f"  SG{i}: {stab}")
+    """
 
     print(
         "Using CSS-projected stabilizers: "

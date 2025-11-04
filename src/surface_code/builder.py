@@ -467,8 +467,12 @@ class GlobalStimBuilder:
                     mask_a = self._mask_prev_stabilizers(state.prev.x_prev, op.a, "X", indices_a)
                     mask_b = self._mask_prev_stabilizers(state.prev.x_prev, op.b, "X", indices_b)
                     # Close current X segments touching the seam before the gap
-                    segment_tracker.wrap_close_segment(op.a, "X", detector_manager, mask_a)
-                    segment_tracker.wrap_close_segment(op.b, "X", detector_manager, mask_b)
+                    for row_idx in mask_a:
+                        detector_manager.mark_row_dynamic(op.a, "X", int(row_idx))
+                    for row_idx in mask_b:
+                        detector_manager.mark_row_dynamic(op.b, "X", int(row_idx))
+                    segment_tracker.wrap_close_segment(op.a, "X", detector_manager, mask_a, skip_boundary_rows=True)
+                    segment_tracker.wrap_close_segment(op.b, "X", detector_manager, mask_b, skip_boundary_rows=True)
                     merge_manager.active_rough = (op.a, op.b, int(op.rounds))
                 else:
                     if merge_manager.active_smooth is not None:
@@ -487,8 +491,12 @@ class GlobalStimBuilder:
                             end_indices[pname] = end_idx
                     mask_a = self._mask_prev_stabilizers(state.prev.z_prev, op.a, "Z", indices_a)
                     mask_b = self._mask_prev_stabilizers(state.prev.z_prev, op.b, "Z", indices_b)
-                    segment_tracker.wrap_close_segment(op.a, "Z", detector_manager, mask_a)
-                    segment_tracker.wrap_close_segment(op.b, "Z", detector_manager, mask_b)
+                    for row_idx in mask_a:
+                        detector_manager.mark_row_dynamic(op.a, "Z", int(row_idx))
+                    for row_idx in mask_b:
+                        detector_manager.mark_row_dynamic(op.b, "Z", int(row_idx))
+                    segment_tracker.wrap_close_segment(op.a, "Z", detector_manager, mask_a, skip_boundary_rows=True)
+                    segment_tracker.wrap_close_segment(op.b, "Z", detector_manager, mask_b, skip_boundary_rows=True)
                     merge_manager.active_smooth = (op.a, op.b, int(op.rounds))
                 # Clear any lingering joint history for this seam
                 state.prev.joint_prev[(k, op.a, op.b)] = [None] * len(seam_pairs)
@@ -609,10 +617,30 @@ class GlobalStimBuilder:
                 
                 # Track detector count before closing segments
                 num_detectors_before = len(detector_manager.deferred_detectors)
+
+                # Mark all rows in both bases as having experienced a dynamic event
+                patch = layout.patches.get(patch_name)
+                if patch is not None:
+                    for row_idx in range(len(patch.z_stabs)):
+                        detector_manager.mark_row_dynamic(patch_name, "Z", row_idx)
+                    for row_idx in range(len(patch.x_stabs)):
+                        detector_manager.mark_row_dynamic(patch_name, "X", row_idx)
                 
                 # Close stabilizer segments for this patch - this creates wrap detectors
-                segment_tracker.wrap_close_segment(patch_name, "Z", detector_manager, None)
-                segment_tracker.wrap_close_segment(patch_name, "X", detector_manager, None)
+                segment_tracker.wrap_close_segment(
+                    patch_name,
+                    "Z",
+                    detector_manager,
+                    None,
+                    skip_boundary_rows=True,
+                )
+                segment_tracker.wrap_close_segment(
+                    patch_name,
+                    "X",
+                    detector_manager,
+                    None,
+                    skip_boundary_rows=True,
+                )
                 
                 # Add boundary anchors for the wrap detectors that were just created
                 if detector_manager.force_boundaries:
@@ -663,8 +691,20 @@ class GlobalStimBuilder:
                         merge_manager.seam_wrap_counts[key] = merge_manager.seam_wrap_counts.get(key, 0) + wrap_added
             merge_manager.first_window_joint.clear()
         for pname in layout.patches.keys():
-            segment_tracker.wrap_close_segment(pname, "Z", detector_manager, None)
-            segment_tracker.wrap_close_segment(pname, "X", detector_manager, None)
+            segment_tracker.wrap_close_segment(
+                pname,
+                "Z",
+                detector_manager,
+                None,
+                skip_boundary_rows=True,
+            )
+            segment_tracker.wrap_close_segment(
+                pname,
+                "X",
+                detector_manager,
+                None,
+                skip_boundary_rows=True,
+            )
 
         if emit_explicit_logicals:
             for name, basis in effective_basis_map.items():
@@ -688,7 +728,14 @@ class GlobalStimBuilder:
         )
 
         # Append all deferred detectors at the very end using final measurement count
-        detector_manager.emit_all_detectors(circuit)
+        detector_manager.emit_all_detectors(
+            circuit,
+            noise_model={
+                "p_x_error": float(getattr(cfg, "p_x_error", 0.0) or 0.0),
+                "p_z_error": float(getattr(cfg, "p_z_error", 0.0) or 0.0),
+                "p_meas": float(getattr(cfg, "p_meas", 0.0) or 0.0),
+            },
+        )
 
         # Diagnostics: compute detector degree per absolute measurement index
         # Only count 2-target detectors (graph edges). Single-target anchors are ignored here.

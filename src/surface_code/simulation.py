@@ -11,6 +11,7 @@ This module handles the full simulation pipeline:
 from __future__ import annotations
 
 from collections import Counter
+import numbers
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -22,16 +23,16 @@ from qiskit import QuantumCircuit
 
 from .dem_utils import (
     augment_dem_with_boundary_anchors,
-    harden_dem_for_pairwise_matching,
     anchor_pm_isolates,
     report_boundaryless_components,
     scan_boundaryless_odd_shot,
     pm_find_offending_shot,
     single_detector_hook_ids,
     log_hook_summary,
-    compute_dem_components,
-    component_anchor_coverage,
     scan_infeasible_shot,
+    collect_detectors_in_errors,
+    prune_dem_to_live_detectors,
+    update_tag_stats_with_presence,
 )
 from .pauli import PauliTracker, sequence_from_qc
 from .utils import compute_two_qubit_correlations, compute_joint_correlations, wilson_rate_ci
@@ -78,6 +79,7 @@ def _harden_and_decode_dem(
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
     # Snapshot original DEM to measure how many single-detector hooks get added
+    dem, _ = prune_dem_to_live_detectors(dem, metadata)
     dem_orig = dem
     if verbose:
         try:
@@ -104,66 +106,146 @@ def _harden_and_decode_dem(
         anchor_eps = 1e-12
     hook_probability = max(anchor_eps, phys_floor, 1e-6)
 
-    if verbose:
-        print(
-            "[DEM-CHECK] attempting anchor augmentation:",
-            f"ids={len(anchor_ids)} eps={anchor_eps:g} hook_p={hook_probability:g}",
-        )
-    if anchor_ids:
-        dem = augment_dem_with_boundary_anchors(dem, anchor_ids, hook_probability)
+    pm_nodes = collect_detectors_in_errors(dem)
+    fallback_added = 0
+    update_tag_stats_with_presence(metadata, pm_nodes)
 
-    # Ensure every connected component has a singleton for pairwise MWPM
-    dem, added_pairwise_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
+    anchor_ids = sorted(set(int(x) for x in anchor_ids if 0 <= int(x) < dem.num_detectors))
     if verbose:
-        print(f"[DEM-CHECK] added {added_pairwise_hooks} pairwise boundary hooks and rebuilt DEM via text")
+        print(f"[DEM-CHECK] eligible boundary anchors={len(anchor_ids)} sample={anchor_ids[:16]}")
+
     if verbose:
         try:
             log_hook_summary(dem_orig, dem, prefix="[DEM-HOOKS]")
         except Exception as _exc:
             print(f"[DEM-HOOKS] summary failed: {_exc}")
 
-    # Component/boundary coverage before building matcher
+    # Build matcher before sampling so we can ensure PM components are bounded.
+    matcher = pm.Matching.from_detector_error_model(dem)
+    graph = matcher.to_networkx()
+    mg = matcher._matching_graph
+    det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors}
+    boundary_detectors = {
+        int(a) for a, b, _data in mg.get_edges()
+        if b is None and isinstance(a, numbers.Integral)
+    }
+
+    components: List[List[int]] = []
+    boundaryless_components: List[List[int]] = []
+    for comp in nx.connected_components(graph):
+        dets = [int(n) for n in comp if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors]
+        if not dets:
+            continue
+        components.append(dets)
+        if not any(d in boundary_detectors for d in dets):
+            boundaryless_components.append(dets)
+
+    size_counter = Counter(len(comp) for comp in components if comp)
+    hist_preview = {k: size_counter[k] for k in list(size_counter.keys())[:8]}
+    ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
     if verbose:
-        try:
-            explicit_ids = list((metadata.get("boundary_anchors", {}) or {}).get("detector_ids", []) or [])
-            comps, bounds = compute_dem_components(dem)
-            cov = component_anchor_coverage(comps, bounds, explicit_ids)
-            if cov["uncovered"]:
-                print(f"[DEM-CHECK] components without boundaries: {cov['uncovered']} (indices {cov['uncovered_indices'][:16]})")
-            else:
-                print(f"[DEM-CHECK] every component has a boundary (components={cov['components']})")
-        except Exception as _exc:
-            print(f"[DEM-CHECK] component coverage check failed: {_exc}")
+        print(f"[DEM-CHECK] component histogram (pre-anchor): {hist_preview}")
+        if boundaryless_components:
+            sample = []
+            for comp in boundaryless_components[:16]:
+                rep = int(comp[0])
+                info = ctx_map.get(rep, {}) or {}
+                sample.append((rep, info.get("tag"), info.get("context")))
+            print(f"[DEM-CHECK] boundaryless components (sample): {sample}")
+
+    targeted_hooks: List[int] = []
+    if boundaryless_components:
+        anchor_set = set(anchor_ids)
+        for comp in boundaryless_components:
+            candidate = next((int(d) for d in comp if d in anchor_set), None)
+            if candidate is None:
+                candidate = int(comp[0])
+            targeted_hooks.append(candidate)
+        dem = augment_dem_with_boundary_anchors(dem, targeted_hooks, hook_probability)
+        matcher = pm.Matching.from_detector_error_model(dem)
+        graph = matcher.to_networkx()
+        mg = matcher._matching_graph
+        det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors}
+        boundary_detectors = {
+            int(a) for a, b, _data in mg.get_edges()
+            if b is None and isinstance(a, numbers.Integral)
+        }
+        components = []
+        for comp in nx.connected_components(graph):
+            dets = [int(n) for n in comp if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors]
+            if not dets:
+                continue
+            components.append(dets)
+        if verbose:
+            sample = []
+            for det in targeted_hooks[:16]:
+                info = ctx_map.get(det, {}) or {}
+                sample.append((det, info.get("tag"), info.get("context")))
+            print(f"[DEM-CHECK] targeted boundary anchors added: {len(targeted_hooks)} sample={sample}")
+        if any(not any(d in boundary_detectors for d in comp) for comp in components if comp):
+            if verbose:
+                residual = [
+                    (comp[0], ctx_map.get(int(comp[0]), {}))
+                    for comp in components
+                    if comp and not any(d in boundary_detectors for d in comp)
+                ]
+                print(f"[DEM-CHECK] WARNING: components still boundaryless after targeted anchoring (sample): {residual[:16]}")
+        elif verbose:
+            print("[DEM-CHECK] all components have boundaries after targeted anchoring")
+
+    actual_hooks = single_detector_hook_ids(dem)
+    metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(actual_hooks)
+
+    pm_nodes = collect_detectors_in_errors(dem)
 
     dem_sampler = dem.compile_sampler(seed=seed)
     det_samp, obs_samp, _ = dem_sampler.sample(shots)
     obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((shots, len(observable_pairs)), dtype=np.uint8)
 
     try:
-        # Pairwise matching (no correlations; requires true single-detector boundaries)
-        matcher = pm.Matching.from_detector_error_model(dem)
         if verbose:
             try:
                 graph = matcher.to_networkx()
                 num_det = matcher.num_detectors
-                graph_nodes = len(graph)
-                boundary_nodes = [n for n, data in graph.nodes(data=True) if data.get("is_boundary", False)]
-                degree_zero = [n for n in graph if graph.degree(n) == 0]
-                missing_nodes = sorted(set(range(num_det)) - set(graph.nodes()))
+                det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < num_det}
+                mg = matcher._matching_graph
+                boundary_nodes = {
+                    int(a) for a, b, _data in mg.get_edges()
+                    if b is None and isinstance(a, numbers.Integral)
+                }
+                degree_zero = [
+                    int(n) for n in det_nodes
+                    if graph.degree(n) == 0
+                ]
+                missing_nodes = sorted(set(range(num_det)) - det_nodes)
+                comp_sizes: Counter[int] = Counter()
+                boundaryless_reps = []
+                for comp in nx.connected_components(graph):
+                    dets = [int(n) for n in comp if isinstance(n, numbers.Integral) and 0 <= int(n) < num_det]
+                    if not dets:
+                        continue
+                    comp_sizes[len(dets)] += 1
+                    if not any(d in boundary_nodes for d in dets):
+                        boundaryless_reps.append(dets[0])
                 print(
-                    f"[PM-GRAPH] det={num_det} nodes={graph_nodes} "
+                    f"[PM-GRAPH] det={num_det} nodes={len(det_nodes)} "
                     f"boundary_nodes={len(boundary_nodes)} zero_degree={len(degree_zero)} missing={len(missing_nodes)}"
                 )
-                ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+                if comp_sizes:
+                    sample_hist = dict(list(comp_sizes.items())[:8])
+                    print(f"[PM-GRAPH] component size histogram (size->count): {sample_hist}")
+                if boundaryless_reps:
+                    ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+                    sample_ctx = {det: ctx_map.get(int(det)) for det in boundaryless_reps[:16]}
+                    print(f"[PM-GRAPH] boundaryless component samples: {sample_ctx}")
                 if degree_zero:
                     print(f"[PM-GRAPH] zero-degree sample: {degree_zero[:16]}")
                 if missing_nodes:
-                    print(f"[PM-GRAPH] missing nodes sample: {missing_nodes[:16]}")
+                    ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
                     sample_ctx = {det: ctx_map.get(int(det)) for det in missing_nodes[:16]}
                     print(f"[PM-GRAPH] missing node context: {sample_ctx}")
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
-        # Decode without preemptive anchoring; rely on guarded fallback only on failure
         preds = matcher.decode_batch(det_samp.astype(bool))
     except Exception as exc_mwpm:
         if verbose:
@@ -181,25 +263,13 @@ def _harden_and_decode_dem(
             except Exception as _exc:
                 print(f"[FEASIBILITY] scan failed: {_exc}")
         try:
-            # Harden again (in case the sampler revealed an odd-parity component)
-            dem_pre_retry = dem
-            dem, added_retry = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
-            if verbose:
-                print(f"[DEM-CHECK] added {added_retry} additional pairwise boundary hooks on retry and rebuilt DEM via text")
-            if verbose:
-                try:
-                    log_hook_summary(dem_pre_retry, dem, prefix="[DEM-HOOKS:retry]")
-                except Exception as _exc:
-                    print(f"[DEM-HOOKS:retry] summary failed: {_exc}")
             matcher = pm.Matching.from_detector_error_model(dem)
-            # Guarded, single-pass PM-level fallback: if hardening added nothing, add one
-            # anchor per boundaryless PM component and retry (even if explicit anchors exist).
-            if added_retry == 0:
-                dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
-                if verbose and iso_added_retry:
-                    ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
-                    ctx_sample = {det_id: ctx_map.get(int(det_id)) for det_id in iso_ids_retry[:12]}
-                    print(f"[DECODE] guarded fallback anchors added: {iso_added_retry} (sample {iso_ids_retry[:12]}) ctx={ctx_sample}")
+            dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
+            fallback_added = iso_added_retry
+            if verbose and iso_added_retry:
+                ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+                ctx_sample = {det_id: ctx_map.get(int(det_id)) for det_id in iso_ids_retry[:12]}
+                print(f"[DECODE] guarded fallback anchors added: {iso_added_retry} (sample {iso_ids_retry[:12]}) ctx={ctx_sample}")
             preds = matcher.decode_batch(det_samp.astype(bool))
         except Exception as exc_retry:
             # Keep existing diagnostics only if decoding still fails after retry

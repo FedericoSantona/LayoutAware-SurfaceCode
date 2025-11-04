@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import List, Tuple, Sequence, Optional, Set, Dict
+from typing import Iterable, List, Tuple, Sequence, Optional, Set, Dict
+import numbers
 
 import numpy as np
 import pymatching as pm
@@ -125,12 +126,18 @@ def pm_find_offending_shot(matcher, det_samp, *, max_scan=2048):
         return False
 
     num_det = getattr(matcher, 'num_detectors', 0)
+
+    def _is_det_node(node) -> bool:
+        return isinstance(node, numbers.Integral) and 0 <= int(node) < num_det
+
     comps = list(_nx.connected_components(G))
-    boundary_nodes = {n for n, d in G.nodes(data=True) if d.get('is_boundary', False)}
+    boundary_nodes = {
+        n for n, d in G.nodes(data=True) if d.get('is_boundary', False)
+    }
 
     comp_info = []
     for comp_id, comp in enumerate(comps):
-        det_nodes = sorted([n for n in comp if isinstance(n, int) and n < num_det])
+        det_nodes = sorted(int(n) for n in comp if _is_det_node(n))
         has_boundary = any(n in boundary_nodes for n in comp)
         comp_info.append((comp_id, det_nodes, has_boundary))
 
@@ -148,8 +155,18 @@ def pm_find_offending_shot(matcher, det_samp, *, max_scan=2048):
 
     print("[PM-CHECK] no boundaryless odd-parity component found in scanned shots.")
     # Check for isolated detector nodes (degree 0) and whether any shot hits them
+    present_det_nodes = {int(n) for n in G.nodes() if _is_det_node(n)}
     deg = dict(G.degree())
-    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
+    present_det_nodes = {int(n) for n in G.nodes() if _is_det_node(n)}
+    isolates = [
+        int(n) for n, degree in deg.items()
+        if _is_det_node(n) and degree == 0
+    ]
+    missing_det_nodes = [k for k in range(num_det) if k not in present_det_nodes]
+    isolates.extend(missing_det_nodes)
+    isolates = sorted(set(isolates))
+    isolates.extend(sorted(set(range(num_det)) - present_det_nodes))
+    isolates = sorted(set(isolates))
     if isolates:
         print(f"[PM-CHECK] isolated detector nodes (deg 0): {isolates[:16]}")
         for s in range(nscan):
@@ -177,8 +194,19 @@ def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
         return dem, matcher, 0, []
 
     num_det = getattr(matcher, "num_detectors", 0)
+
+    def _is_det_node(node) -> bool:
+        return isinstance(node, numbers.Integral) and 0 <= int(node) < num_det
+
     deg = dict(G.degree())
-    isolates = [n for n in range(num_det) if deg.get(n, 0) == 0]
+    present_det_nodes = {int(n) for n in G.nodes() if _is_det_node(n)}
+    isolates = [
+        int(n) for n, degree in deg.items()
+        if _is_det_node(n) and degree == 0
+    ]
+    missing_det_nodes = [k for k in range(num_det) if k not in present_det_nodes]
+    isolates.extend(missing_det_nodes)
+    isolates = sorted(set(isolates))
     
     # Find components without boundaries
     boundary_nodes = {n for n, d in G.nodes(data=True) if d.get('is_boundary', False)}
@@ -186,7 +214,7 @@ def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
     components_needing_boundaries = []
     
     for comp in comps:
-        det_nodes = [n for n in comp if isinstance(n, int) and n < num_det]
+        det_nodes = [int(n) for n in comp if _is_det_node(n)]
         has_boundary = any(n in boundary_nodes for n in comp)
         if det_nodes and not has_boundary:
             # Component has detector nodes but no boundary
@@ -198,15 +226,9 @@ def anchor_pm_isolates(dem, matcher, *, epsilon=1e-12):
     if not all_hooks:
         return dem, matcher, 0, []
 
-    dem_text = str(dem)
-    if dem_text and not dem_text.endswith("\n"):
-        dem_text += "\n"
-    p_str = f"{float(epsilon):.12g}"
-    for idx in all_hooks:
-        dem_text += f"error({p_str}) D{idx}\n"
-    new_dem = stim.DetectorErrorModel(dem_text)
+    new_dem = augment_dem_with_boundary_anchors(dem, [int(x) for x in all_hooks], epsilon)
     new_matcher = pm.Matching.from_detector_error_model(new_dem)
-    return new_dem, new_matcher, len(all_hooks), all_hooks
+    return new_dem, new_matcher, len(all_hooks), [int(x) for x in all_hooks]
 
 
 def report_boundaryless_components(dem):
@@ -473,6 +495,146 @@ def _dem_iter_error_lines(dem: stim.DetectorErrorModel):
         dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
         if dets:
             yield dets
+
+
+def collect_detectors_in_errors(dem: stim.DetectorErrorModel) -> Set[int]:
+    """Return the set of detector ids that participate in any ERROR line."""
+    nodes: Set[int] = set()
+    for dets in _dem_iter_error_lines(dem):
+        for d in dets:
+            nodes.add(int(d))
+    return nodes
+
+
+def collect_detectors_in_multi_errors(dem: stim.DetectorErrorModel) -> Set[int]:
+    """Return detectors that participate in ERROR lines touching ≥2 detectors."""
+    nodes: Set[int] = set()
+    for dets in _dem_iter_error_lines(dem):
+        if len(dets) < 2:
+            continue
+        for d in dets:
+            nodes.add(int(d))
+    return nodes
+
+
+def remap_metadata_detectors(metadata: Dict[str, object], mapping: Dict[int, int]) -> None:
+    """Apply detector id remapping to metadata structures in-place."""
+    if not mapping:
+        return
+    if not isinstance(metadata, dict):
+        return
+
+    def _remap_list(ids: Iterable[int]) -> List[int]:
+        out: List[int] = []
+        for k in ids:
+            mk = mapping.get(int(k))
+            if mk is not None and mk not in out:
+                out.append(mk)
+        return out
+
+    # Boundary anchors
+    ba = metadata.get("boundary_anchors")
+    if isinstance(ba, dict):
+        ids = ba.get("detector_ids") or []
+        if isinstance(ids, (list, tuple)):
+            ba["detector_ids"] = _remap_list(int(x) for x in ids)
+
+    # MWPM debug detector context
+    mwpm_dbg = metadata.get("mwpm_debug")
+    if isinstance(mwpm_dbg, dict):
+        ctx = mwpm_dbg.get("detector_context")
+        if isinstance(ctx, dict):
+            remapped_ctx: Dict[int, Dict[str, object]] = {}
+            for k, v in ctx.items():
+                mk = mapping.get(int(k))
+                if mk is not None:
+                    remapped_ctx[int(mk)] = dict(v)
+            mwpm_dbg["detector_context"] = remapped_ctx
+        # Update degree violation listings if present
+        deg = mwpm_dbg.get("degree_violations")
+        if isinstance(deg, list):
+            mwpm_dbg["degree_violations"] = [mapping.get(int(x), int(x)) for x in deg if mapping.get(int(x)) is not None]
+        odd = mwpm_dbg.get("odd_degree_details")
+        if isinstance(odd, dict):
+            remapped_odds: Dict[int, List[Dict[str, object]]] = {}
+            for k, entries in odd.items():
+                mk = mapping.get(int(k))
+                if mk is None:
+                    continue
+                remapped_odds[int(mk)] = list(entries)
+            mwpm_dbg["odd_degree_details"] = remapped_odds
+
+
+def prune_dem_to_live_detectors(
+    dem: stim.DetectorErrorModel,
+    metadata: Optional[Dict[str, object]] = None,
+) -> Tuple[stim.DetectorErrorModel, Dict[int, int]]:
+    """Drop detectors that never appear in any ERROR line and reindex the DEM.
+
+    Returns the new DEM along with the old→new detector index mapping for
+    surviving detectors. Metadata is updated in-place when provided.
+    """
+    live = collect_detectors_in_errors(dem)
+    if len(live) == dem.num_detectors:
+        mapping = {int(k): int(k) for k in range(dem.num_detectors)}
+        return dem, mapping
+
+    keep = sorted(int(k) for k in live)
+    mapping = {old: new for new, old in enumerate(keep)}
+
+    new_lines: List[str] = []
+    for line in str(dem).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.lower().startswith("detector"):
+            continue  # drop explicit detector declarations for removed indices
+
+        def _repl(match: re.Match[str]) -> str:
+            old_idx = int(match.group(1))
+            new_idx = mapping.get(old_idx)
+            if new_idx is None:
+                raise KeyError(old_idx)
+            return f"D{new_idx}"
+
+        try:
+            newline = _D_TOKEN_RE.sub(_repl, line)
+        except KeyError:
+            # Skip any line that references a pruned detector (should not occur for live-only set)
+            continue
+        new_lines.append(newline)
+
+    new_dem_text = "\n".join(new_lines)
+    new_dem = stim.DetectorErrorModel(new_dem_text) if new_dem_text else stim.DetectorErrorModel()
+
+    if metadata is not None:
+        remap_metadata_detectors(metadata, mapping)
+
+    return new_dem, mapping
+
+
+def update_tag_stats_with_presence(
+    metadata: Dict[str, object],
+    detectors_in_error: Iterable[int],
+) -> None:
+    """Augment tag_stats in metadata with present_in_error counts."""
+    if not isinstance(metadata, dict):
+        return
+    mwpm = metadata.get("mwpm_debug")
+    if not isinstance(mwpm, dict):
+        return
+    tag_stats = mwpm.get("tag_stats")
+    detector_context = mwpm.get("detector_context")
+    if not isinstance(tag_stats, dict) or not isinstance(detector_context, dict):
+        return
+    seen: Set[int] = {int(d) for d in detectors_in_error if isinstance(d, numbers.Integral)}
+    for det_id in seen:
+        ctx = detector_context.get(int(det_id))
+        if not isinstance(ctx, dict):
+            continue
+        tag = str(ctx.get("tag", ""))
+        entry = tag_stats.setdefault(tag, {"emitted": 0, "kept": 0, "dropped": 0, "present_in_error": 0})
+        entry["present_in_error"] = int(entry.get("present_in_error", 0)) + 1
 
 
 def compute_dem_components(

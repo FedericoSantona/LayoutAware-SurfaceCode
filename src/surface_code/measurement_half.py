@@ -135,6 +135,8 @@ class MeasurementHalf:
                         else:
                             local_set = {ib for _, ib in rows}
                         row_skip = _rows_touching_local_indices(name, self.basis, local_set)
+                        for skipped in row_skip:
+                            detector_manager.mark_row_dynamic(name, self.basis, int(skipped))
                 
                 # Record temporal detector edges (absolute measurement indices) for non-skipped rows
                 p_list = list(prev_dict.get(name, []))
@@ -155,15 +157,12 @@ class MeasurementHalf:
                     # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
                     temporal_type = f"{self.basis.lower()}_temporal"
                     _det_id = detector_manager.defer_detector([a, b], temporal_type, {"patch": name, "row": si})
+                    segment_tracker.record_temporal_detector(name, self.basis, si, _det_id)
                     if detector_manager.force_boundaries:
-                        if (
-                            self.builder.is_boundary_row(name, self.basis, si)
-                            or (first_edge and not has_history)
-                        ):
-                            segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
-                            key = (name, self.basis)
-                            emitted_flags = segment_tracker.seg_boundary_emitted.get(key, [])
-                            # Track that we've emitted at least one anchor for this row, but still allow multiple hooks.
+                        segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
+                        key = (name, self.basis)
+                        emitted_flags = segment_tracker.seg_boundary_emitted.get(key, [])
+                        if self.builder.is_boundary_row(name, self.basis, si):
                             if si < len(emitted_flags):
                                 emitted_flags[si] = True
                             detector_manager.anchor_detector_ids.append(_det_id)

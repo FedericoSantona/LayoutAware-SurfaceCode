@@ -1,13 +1,35 @@
 """Surface code utilities and models for logical qubit simulations."""
 
 from .model import SurfaceCodeModel
-from .heavy_hex import HeavyHexModel, build_heavy_hex_model
-from .surface_code import StandardSurfaceCodeModel, build_standard_surface_code_model
 from .builder import GlobalStimBuilder
 from .configs import PhenomenologicalStimConfig
 from .layout import Layout, PatchObject, create_single_patch_layout
 from .surgery_ops import MeasureRound, Merge, Split, ParityReadout
 from .pauli import PauliTracker
+
+try:
+    from .surface_code import StandardSurfaceCodeModel, build_standard_surface_code_model
+except ImportError as _standard_import_error:  # pragma: no cover - optional dependency
+    StandardSurfaceCodeModel = None
+
+    def build_standard_surface_code_model(*args, **kwargs):
+        """Lazy import guard for optional standard surface-code dependency."""
+        raise ImportError(
+            "Standard surface-code builders require the 'qiskit_qec' package. "
+            "Install qiskit-qec to enable these helpers."
+        ) from _standard_import_error
+
+try:
+    from .heavy_hex import HeavyHexModel, build_heavy_hex_model
+except ImportError as _heavy_hex_import_error:  # pragma: no cover - optional dependency
+    HeavyHexModel = None
+
+    def build_heavy_hex_model(*args, **kwargs):
+        """Lazy import guard for optional heavy-hex dependency."""
+        raise ImportError(
+            "Heavy-hex codes require the 'qiskit_qec' package. "
+            "Install qiskit-qec to enable heavy-hex builders."
+        ) from _heavy_hex_import_error
 
 
 def build_surface_code_model(distance: int, code_type: str = "heavy_hex") -> SurfaceCodeModel:

@@ -158,6 +158,10 @@ class MeasurementHalf:
                     temporal_type = f"{self.basis.lower()}_temporal"
                     _det_id = detector_manager.defer_detector([a, b], temporal_type, {"patch": name, "row": si})
                     segment_tracker.record_temporal_detector(name, self.basis, si, _det_id)
+                    if first_edge and not segment_tracker.has_start_anchor(name, self.basis, si):
+                        if not detector_manager.is_row_dynamic(name, self.basis, si):
+                            detector_manager.anchor_detector_ids.append(_det_id)
+                            segment_tracker.mark_start_anchor(name, self.basis, si)
                     if detector_manager.force_boundaries:
                         segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
                         key = (name, self.basis)

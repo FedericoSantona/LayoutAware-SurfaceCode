@@ -23,6 +23,8 @@ class SegmentTracker:
         self.seg_had_edge: Dict[Tuple[str, str], List[bool]] = {}
         # Track whether a boundary anchor was emitted for the current open segment per row
         self.seg_boundary_emitted: Dict[Tuple[str, str], List[bool]] = {}
+        # Track whether an initial anchor has been emitted for the current open segment per row
+        self.seg_start_anchor: Dict[Tuple[str, str], List[bool]] = {}
         # Row wrap summaries for diagnostics
         self.z_row_wraps: Dict[str, List[int]] = {}
         self.x_row_wraps: Dict[str, List[int]] = {}
@@ -44,6 +46,7 @@ class SegmentTracker:
             self.seg_last_det[key] = [None] * length
             self.seg_had_edge[key] = [False] * length
             self.seg_boundary_emitted[key] = [False] * length
+            self.seg_start_anchor[key] = [False] * length
         else:
             # grow if needed
             if len(self.seg_first[key]) < length:
@@ -53,6 +56,7 @@ class SegmentTracker:
                 self.seg_last_det[key].extend([None] * (length - len(self.seg_last_det[key])))
                 self.seg_had_edge[key].extend([False] * (length - len(self.seg_had_edge[key])))
                 self.seg_boundary_emitted[key].extend([False] * (length - len(self.seg_boundary_emitted[key])))
+                self.seg_start_anchor[key].extend([False] * (length - len(self.seg_start_anchor[key])))
     
     def update_segment(self, patch_name: str, basis: str, stab_idx: int, measurement_idx: int) -> None:
         """Update segment tracking for a measurement.
@@ -109,6 +113,22 @@ class SegmentTracker:
         self.ensure_seg_lists(patch_name, basis, stab_idx + 1)
         if stab_idx < len(self.seg_had_edge[key]):
             self.seg_had_edge[key][stab_idx] = True
+
+    def has_start_anchor(self, patch_name: str, basis: str, stab_idx: int) -> bool:
+        key = (patch_name, basis)
+        self.ensure_seg_lists(patch_name, basis, stab_idx + 1)
+        anchors = self.seg_start_anchor.get(key, [])
+        if stab_idx < len(anchors):
+            return bool(anchors[stab_idx])
+        return False
+
+    def mark_start_anchor(self, patch_name: str, basis: str, stab_idx: int) -> None:
+        key = (patch_name, basis)
+        self.ensure_seg_lists(patch_name, basis, stab_idx + 1)
+        anchors = self.seg_start_anchor.setdefault(key, [])
+        if stab_idx >= len(anchors):
+            anchors.extend([False] * (stab_idx + 1 - len(anchors)))
+        anchors[stab_idx] = True
     
     def wrap_close_segment(
         self,
@@ -162,6 +182,11 @@ class SegmentTracker:
             b_list = self.seg_boundary_emitted.get(key, [])
             if row_idx < len(b_list):
                 b_list[row_idx] = False
+            if key not in self.seg_start_anchor:
+                self.seg_start_anchor[key] = [False] * len(first_list)
+            s_list = self.seg_start_anchor.get(key, [])
+            if row_idx < len(s_list):
+                s_list[row_idx] = False
 
         for si in rng:
             if si is None or si >= len(first_list):

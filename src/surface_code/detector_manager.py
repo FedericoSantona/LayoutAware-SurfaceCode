@@ -71,6 +71,12 @@ class DetectorManager:
             return
         self._row_dynamic.add((patch, basis_u, int(row)))
 
+    def is_row_dynamic(self, patch: str, basis: str, row: int) -> bool:
+        """Return True if the given stabilizer row has been marked dynamic."""
+        if not isinstance(patch, str) or not isinstance(row, int):
+            return False
+        return (patch, str(basis).upper(), int(row)) in self._row_dynamic
+
     def mark_seam_dynamic(self, seam_key: Tuple[str, str, str]) -> None:
         """Mark that a seam component participates in dynamic events."""
         if not isinstance(seam_key, tuple) or len(seam_key) < 3:
@@ -220,14 +226,10 @@ class DetectorManager:
         p_x = self._noise_model.get("p_x_error", 0.0) or 0.0
         p_z = self._noise_model.get("p_z_error", 0.0) or 0.0
 
-        if tag == "z_temporal":
-            return (p_meas > 0.0) or self._row_is_dynamic(context, "Z")
-        if tag == "x_temporal":
-            return (p_meas > 0.0) or self._row_is_dynamic(context, "X")
-        if tag == "z_wrap":
-            return (p_meas > 0.0) or self._row_is_dynamic(context, "Z")
-        if tag == "x_wrap":
-            return (p_meas > 0.0) or self._row_is_dynamic(context, "X")
+        if tag in ("z_temporal", "z_wrap"):
+            return (p_meas > 0.0) or (p_x > 0.0) or self._row_is_dynamic(context, "Z")
+        if tag in ("x_temporal", "x_wrap"):
+            return (p_meas > 0.0) or (p_z > 0.0) or self._row_is_dynamic(context, "X")
         if tag in ("rough_temporal", "smooth_temporal"):
             seam_key = self._context_seam_key(context)
             return seam_key is not None and self._seam_is_dynamic(seam_key)

@@ -19,7 +19,7 @@ import numpy as np
 import stim
 
 from surface_code import build_standard_surface_code_model, PhenomenologicalStimConfig
-from surface_code.layout import create_single_patch_layout
+from surface_code.layout import Layout, PatchObject
 from surface_code.builder import GlobalStimBuilder
 from surface_code.surgery_ops import MeasureRound
 
@@ -69,8 +69,8 @@ def test_fault_injection_sanity():
     distance = 5  # Use d=5 for a good interior
     model = build_standard_surface_code_model(distance)
     
-    # Create layout with single patch
-    layout = create_single_patch_layout(model, name="q0")
+    layout = Layout()
+    layout.add_patch("q0", PatchObject.from_code_model(model, name="q0"))
     
     # Find a central data qubit that touches two Z stabilizers
     local_q_idx, z_stab_indices = find_central_data_qubit_touching_two_z_stabs(model)
@@ -201,8 +201,8 @@ def test_dem_degree_check():
     distance = 5
     model = build_standard_surface_code_model(distance)
     
-    # Create layout with single patch
-    layout = create_single_patch_layout(model, name="q0")
+    layout = Layout()
+    layout.add_patch("q0", PatchObject.from_code_model(model, name="q0"))
     
     # Build circuit with multiple rounds (distance rounds)
     cfg = PhenomenologicalStimConfig(

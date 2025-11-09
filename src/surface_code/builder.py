@@ -356,18 +356,26 @@ class GlobalStimBuilder:
             return None
 
         # Map local data indices to stabilizer row indices that include them
+        _row_cache: Dict[Tuple[str, str], Dict[int, Set[int]]] = {}
+
         def _rows_touching_local_indices(patch_name: str, basis: str, local_indices: Iterable[int]) -> Set[int]:
             patch = layout.patches.get(patch_name)
             if patch is None:
                 return set()
-            stabs = patch.z_stabs if basis == "Z" else patch.x_stabs
-            local_set = set(local_indices)
+            cache_key = (patch_name, basis)
+            cache = _row_cache.setdefault(cache_key, {})
+
+            def _rows_for_local(li: int) -> Set[int]:
+                if li in cache:
+                    return cache[li]
+                stabs = patch.z_stabs if basis == "Z" else patch.x_stabs
+                rows = {si for si, stab in enumerate(stabs) if li < len(stab) and stab[li] == basis}
+                cache[li] = rows
+                return rows
+
             rows: Set[int] = set()
-            for si, stab in enumerate(stabs):
-                for li in local_set:
-                    if li < len(stab) and stab[li] == basis:
-                        rows.add(si)
-                        break
+            for li in set(local_indices):
+                rows.update(_rows_for_local(li))
             return rows
 
         # (Segment tracking now handled by segment_tracker)
@@ -578,17 +586,22 @@ class GlobalStimBuilder:
                 }
                 state.byproducts.append(byproduct_info)
 
-                # Convenience: primary index (first seam pair) used for Pauli-frame sampling
-                primary_idx = indices[0] if indices else None
+                seam_indices = list(indices)
+                logical_idx = None
+                if op.type == "XX":
+                    logical_idx = self._emit_logical_mpp(circuit, op.a, "X")
+                    if logical_idx is not None:
+                        byproduct_info["logical_index"] = logical_idx
                 
                 # Track CNOT operations by grouping ZZ and XX parity readouts
                 if state.current_cnot is not None:
                     if op.type == "ZZ":
                         state.current_cnot["m_zz_byproduct"] = byproduct_info
-                        state.current_cnot["m_zz_mpp_idx"] = primary_idx
+                        state.current_cnot["m_zz_indices"] = seam_indices
                     elif op.type == "XX":
                         state.current_cnot["m_xx_byproduct"] = byproduct_info
-                        state.current_cnot["m_xx_mpp_idx"] = primary_idx
+                        state.current_cnot["m_xx_indices"] = seam_indices
+                        state.current_cnot["m_xx_logical_idx"] = logical_idx
                         state.current_cnot["target"] = op.b  # Update target (for XX, b is the target)
                         state.current_cnot["smooth_window_id"] = merge_manager.get_current_window_id()
                         state.cnot_operations.append(state.current_cnot)
@@ -602,9 +615,10 @@ class GlobalStimBuilder:
                         "rough_window_id": merge_manager.get_current_window_id(),
                         "smooth_window_id": None,
                         "m_zz_byproduct": byproduct_info if op.type == "ZZ" else None,
-                        "m_zz_mpp_idx": primary_idx if op.type == "ZZ" else None,
+                        "m_zz_indices": seam_indices if op.type == "ZZ" else None,
                         "m_xx_byproduct": None,
-                        "m_xx_mpp_idx": None,
+                        "m_xx_indices": None,
+                        "m_xx_logical_idx": None,
                     }
                 
                 # NOTE: No circuit operations are emitted here to keep the DEM deterministic.
@@ -798,6 +812,16 @@ class GlobalStimBuilder:
         # Append all deferred observables at the very end using final measurement count
         observable_manager.emit_observables(circuit, deferred_observables)
 
+        boundary_row_meta: Dict[str, Dict[str, Dict[str, object]]] = {}
+        for name in layout.patches.keys():
+            patch = layout.patches[name]
+            z_rows = sorted(self._boundary_rows.get((name, "Z"), set()))
+            x_rows = sorted(self._boundary_rows.get((name, "X"), set()))
+            boundary_row_meta[name] = {
+                "Z": {"rows": z_rows, "total": len(patch.z_stabs)},
+                "X": {"rows": x_rows, "total": len(patch.x_stabs)},
+            }
+
         metadata: Dict[str, object] = {
             "merge_windows": merge_manager.get_windows(),
             "observable_basis": tuple(basis_labels),
@@ -818,6 +842,29 @@ class GlobalStimBuilder:
                 "p_z_error": float(getattr(cfg, "p_z_error", 0.0) or 0.0),
                 "p_meas": float(getattr(cfg, "p_meas", 0.0) or 0.0),
             },
+            "boundary_rows": boundary_row_meta,
+            # Stabilizer row → local-qubit support map, for space-edge reconstruction.
+            # Format:
+            #   {
+            #     'Z': { patch: { row_idx: [local_q,...], ... }, ... },
+            #     'X': { patch: { row_idx: [local_q,...], ... }, ... }
+            #   }
+            "stab_support": (lambda _layout=self.layout: {
+                "Z": {
+                    name: {
+                        i: [qi for qi, ch in enumerate(patch.z_stabs[i]) if ch == "Z"]
+                        for i in range(len(patch.z_stabs))
+                    }
+                    for name, patch in _layout.patches.items()
+                },
+                "X": {
+                    name: {
+                        i: [qi for qi, ch in enumerate(patch.x_stabs[i]) if ch == "X"]
+                        for i in range(len(patch.x_stabs))
+                    }
+                    for name, patch in _layout.patches.items()
+                },
+            })(),
         }
 
         return circuit, observable_pairs, metadata

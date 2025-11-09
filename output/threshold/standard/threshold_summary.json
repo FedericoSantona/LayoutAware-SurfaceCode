@@ -10,7 +10,7 @@
     "crossings": {
       "3-5": null,
       "5-7": null,
-      "7-9": null
+      "7-9": 0.047070765051949945
     },
     "json": "output/threshold/standard/x_only.json"
   },
@@ -40,7 +40,7 @@
     "crossings": {
       "3-5": null,
       "5-7": null,
-      "7-9": 0.04787301431634038
+      "7-9": 0.04577928003056349
     },
     "json": "output/threshold/standard/symmetric_Zinit.json"
   },

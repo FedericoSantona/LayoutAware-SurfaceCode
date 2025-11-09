@@ -114,8 +114,8 @@ def plot_heavy_hex_code(model, distance, code_type: str = "heavy_hex"):
         distance: Code distance
         code_type: Type of surface code ("heavy_hex" or "standard")
     """
-    plot_dir = PROJECT_ROOT / "plots"
-    plot_dir.mkdir(exist_ok=True)
+    plot_dir = PROJECT_ROOT / "plots" / "layout" / code_type
+    plot_dir.mkdir(parents=True, exist_ok=True)
     fig = model.code.draw(
         face_colors=False,
         xcolor="lightcoral",

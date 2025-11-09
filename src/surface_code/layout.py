@@ -376,34 +376,3 @@ class Layout:
         
         if title:
             ax.set_title(title)
-
-        if save_path:
-            ax.figure.savefig(save_path, bbox_inches="tight")
-        
-
-
-def create_single_patch_layout(
-    model,
-    *,
-    name: str = "q0",
-) -> Layout:
-    """Create a single-patch Layout from a code model.
-    
-    Args:
-        model: Code model with attributes: code, z_stabilizers, x_stabilizers, logical_z, logical_x
-        name: Name for the patch in the layout
-        offset: Starting qubit index offset (usually 0)
-        
-    Returns:
-        Layout containing a single patch ready for use with GlobalStimBuilder
-    """
-    # Create the patch object using the class method
-    patch = PatchObject.from_code_model(model, name=name)
-    
-    # Create layout and add the patch
-    layout = Layout()
-    layout.add_patch(name, patch)
-    
-    return layout
-
-

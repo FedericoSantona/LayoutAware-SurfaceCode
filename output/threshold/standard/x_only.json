@@ -4,9 +4,7 @@
   "track": "Z",
   "distances": [
     3,
-    5,
-    7,
-    9
+    7
   ],
   "sweeps": [
     {
@@ -15,49 +13,23 @@
         {
           "p_x": 1e-05,
           "p_z": 0.0,
-          "logical_error_rate": 4e-05,
-          "avg_syndrome_weight": 0.00071,
-          "click_rate": 0.00032
+          "logical_error_rate": 8e-05,
+          "avg_syndrome_weight": 0.00824,
+          "click_rate": 0.00429
         },
         {
           "p_x": 0.0007071067811865475,
           "p_z": 0.0,
-          "logical_error_rate": 0.00418,
-          "avg_syndrome_weight": 0.05161,
-          "click_rate": 0.02438
+          "logical_error_rate": 0.00456,
+          "avg_syndrome_weight": 0.6032,
+          "click_rate": 0.26936
         },
         {
           "p_x": 0.049999999999999996,
           "p_z": 0.0,
-          "logical_error_rate": 0.29128,
-          "avg_syndrome_weight": 2.82758,
-          "click_rate": 0.81901
-        }
-      ]
-    },
-    {
-      "distance": 5,
-      "points": [
-        {
-          "p_x": 1e-05,
-          "p_z": 0.0,
-          "logical_error_rate": 0.00038,
-          "avg_syndrome_weight": 0.0064,
-          "click_rate": 0.00181
-        },
-        {
-          "p_x": 0.0007071067811865475,
-          "p_z": 0.0,
-          "logical_error_rate": 0.02674,
-          "avg_syndrome_weight": 0.46341,
-          "click_rate": 0.1299
-        },
-        {
-          "p_x": 0.049999999999999996,
-          "p_z": 0.0,
-          "logical_error_rate": 0.49037,
-          "avg_syndrome_weight": 21.23243,
-          "click_rate": 0.99994
+          "logical_error_rate": 0.2582,
+          "avg_syndrome_weight": 31.7427,
+          "click_rate": 1.0
         }
       ]
     },
@@ -67,48 +39,22 @@
         {
           "p_x": 1e-05,
           "p_z": 0.0,
-          "logical_error_rate": 0.00086,
-          "avg_syndrome_weight": 0.02179,
-          "click_rate": 0.00585
+          "logical_error_rate": 0.00022,
+          "avg_syndrome_weight": 0.63137,
+          "click_rate": 0.15715
         },
         {
           "p_x": 0.0007071067811865475,
           "p_z": 0.0,
-          "logical_error_rate": 0.05453,
-          "avg_syndrome_weight": 1.5207,
-          "click_rate": 0.33683
+          "logical_error_rate": 0.01731,
+          "avg_syndrome_weight": 41.9155,
+          "click_rate": 0.99999
         },
         {
           "p_x": 0.049999999999999996,
           "p_z": 0.0,
-          "logical_error_rate": 0.49938,
-          "avg_syndrome_weight": 64.68388,
-          "click_rate": 1.0
-        }
-      ]
-    },
-    {
-      "distance": 9,
-      "points": [
-        {
-          "p_x": 1e-05,
-          "p_z": 0.0,
-          "logical_error_rate": 0.00161,
-          "avg_syndrome_weight": 0.05218,
-          "click_rate": 0.01322
-        },
-        {
-          "p_x": 0.0007071067811865475,
-          "p_z": 0.0,
-          "logical_error_rate": 0.08826,
-          "avg_syndrome_weight": 3.55475,
-          "click_rate": 0.59722
-        },
-        {
-          "p_x": 0.049999999999999996,
-          "p_z": 0.0,
-          "logical_error_rate": 0.49976,
-          "avg_syndrome_weight": 142.79718,
+          "logical_error_rate": 0.45636,
+          "avg_syndrome_weight": 1636.17715,
           "click_rate": 1.0
         }
       ]

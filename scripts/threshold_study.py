@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=[3, 5, 7, 9],
+        default=[3, 7],
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=1e-5, help="Minimum physical error rate (default: 3e-3 for phenomenological studies)")

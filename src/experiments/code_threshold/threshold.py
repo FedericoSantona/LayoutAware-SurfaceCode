@@ -12,15 +12,76 @@ from surface_code import (
     PhenomenologicalStimConfig,
     build_surface_code_model,
     GlobalStimBuilder,
-    create_single_patch_layout,
     MeasureRound,
 )
+from surface_code.dem_diagnostics import log_dem_diagnostics, env_dem_debug_enabled
 from surface_code.dem_utils import (
     augment_dem_with_boundary_anchors,
     harden_dem_for_pairwise_matching,
     anchor_pm_isolates,
+    single_detector_hook_ids,
+    circuit_to_graphlike_dem,
 )
 from surface_code.pauli import parse_init_label
+from surface_code.memory_layout import build_memory_layout
+
+
+def _memory_measure_flags(stim_config: PhenomenologicalStimConfig) -> Tuple[bool, bool]:
+    family = (stim_config.family or "").upper()
+    if family == "Z":
+        return True, False
+    if family == "X":
+        return False, True
+    return True, True
+
+
+def _build_surgery_memory_layout(
+    model,
+    distance: int,
+    stim_config: PhenomenologicalStimConfig,
+) -> Tuple[Layout, List[object], Dict[str, str]]:
+    measure_z, measure_x = _memory_measure_flags(stim_config)
+
+    base_patch = PatchObject.from_code_model(model, name="q0")
+    coords = list(base_patch.coords.values())
+    if coords:
+        xs = [x for x, _ in coords]
+        patch_width = (max(xs) - min(xs)) if xs else 0.0
+    else:
+        patch_width = 0.0
+    h_spacing = patch_width + 2.0
+    ancilla_patch = base_patch.with_offset(0, h_spacing, 0.0)
+
+    layout = Layout()
+    layout.add_patch("q0", base_patch)
+    layout.add_patch("ancilla_0", ancilla_patch)
+
+    seam_pairs = [(i, i) for i in range(min(distance, base_patch.n))]
+    layout.register_seam("rough", "q0", "ancilla_0", seam_pairs)
+    layout.register_seam("smooth", "ancilla_0", "q0", seam_pairs)
+
+    ops: List[object] = []
+    ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
+
+    rounds = max(1, int(stim_config.rounds or distance))
+    merge_rounds = max(1, int(distance))
+    for _ in range(rounds):
+        ops.append(Merge("rough", "q0", "ancilla_0", rounds=merge_rounds))
+        for _ in range(merge_rounds):
+            ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
+        ops.append(Split("rough", "q0", "ancilla_0"))
+        ops.append(ResetPatch("ancilla_0", basis="X"))
+        ops.append(Merge("smooth", "ancilla_0", "q0", rounds=merge_rounds))
+        for _ in range(merge_rounds):
+            ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
+        ops.append(Split("smooth", "ancilla_0", "q0"))
+
+    basis = (stim_config.bracket_basis or "Z").strip().upper()
+    if basis not in {"X", "Z"}:
+        raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
+    bracket_map = {"q0": basis}
+
+    return layout, ops, bracket_map
 
 
 @dataclass
@@ -46,6 +107,7 @@ class SimulationResult:
 
 def run_logical_error_rate(
     model,
+    distance: int,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
 ) -> SimulationResult:
@@ -56,32 +118,29 @@ def run_logical_error_rate(
         stim_config: Stim circuit configuration
         mc_config: Monte Carlo configuration
     """
-    # Create single-patch layout
-    layout = create_single_patch_layout(model)
-    
-    # Generate explicit timeline of measure rounds
-    # Respect the family parameter to measure only the needed stabilizers
-    family = stim_config.family
-    if family == "Z":
-        # Z family: measure only Z stabilizers (detect X errors)
-        measure_z, measure_x = True, False
-    elif family == "X":
-        # X family: measure only X stabilizers (detect Z errors)
-        measure_z, measure_x = False, True
-    else:
-        # No family (symmetric): measure both
-        measure_z, measure_x = True, True
-    
-    ops = [MeasureRound(patch_ids=None, measure_z=measure_z, measure_x=measure_x) 
-           for _ in range(stim_config.rounds)]
-    
-    # Create builder and build circuit
+    layout, ops, bracket_map = build_memory_layout(
+        model,
+        distance,
+        rounds=max(1, int(getattr(stim_config, "rounds", distance) or distance)),
+        bracket_basis=stim_config.bracket_basis or "Z",
+        family=stim_config.family,
+    )
+
     builder = GlobalStimBuilder(layout)
-    basis = (stim_config.bracket_basis or "Z").strip().upper()
-    if basis not in {"X", "Z"}:
-        raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
-    bracket_map = {"q0": basis}
-    circuit, observable_pairs, metadata = builder.build(ops, stim_config, bracket_map, explicit_logical_start=False)
+    circuit, observable_pairs, metadata = builder.build(
+        ops,
+        stim_config,
+        bracket_map,
+        explicit_logical_start=True,
+    )
+    fixed_pairs: List[Tuple[int, int]] = []
+    for start_idx, end_idx in observable_pairs:
+        if end_idx is None:
+            raise RuntimeError("Observable end index missing for memory experiment.")
+        if start_idx is None:
+            start_idx = end_idx
+        fixed_pairs.append((start_idx, end_idx))
+    observable_pairs = fixed_pairs
     
     # Validate that observables were properly created for single-patch memory experiments.
     # In multi-patch scenarios with merges, some patches may legitimately not have observables
@@ -123,7 +182,11 @@ def _run_circuit_logical_error_rate(
     mc_config: MonteCarloConfig,
     metadata: Optional[dict] = None,
 ) -> SimulationResult:
-    dem = circuit.detector_error_model()
+    if metadata is None:
+        metadata = {}
+    dem = circuit_to_graphlike_dem(circuit)
+    dem_debug = env_dem_debug_enabled()
+    log_dem_diagnostics("memory-pre", dem, metadata, enabled=dem_debug)
 
     # Prefer physically-motivated boundary anchoring prior to constructing the matcher.
     boundary_meta = metadata.get("boundary_anchors") if isinstance(metadata, dict) else None
@@ -150,6 +213,8 @@ def _run_circuit_logical_error_rate(
         dem = augment_dem_with_boundary_anchors(dem, list(anchor_ids), hook_probability)
     # Ensure each connected component has a boundary hook for pairwise matching.
     dem, auto_added_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
+    metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(single_detector_hook_ids(dem))
+    log_dem_diagnostics("memory-post-harden", dem, metadata, enabled=dem_debug)
 
     # Build matcher on the raw DEM first. On well-formed memory experiments
     # (closed space-time cycles), components naturally have even parity and
@@ -190,6 +255,8 @@ def _run_circuit_logical_error_rate(
             raise
         dem = dem2
         matcher = matcher2
+        metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(single_detector_hook_ids(dem))
+        log_dem_diagnostics("memory-post-anchor", dem, metadata, enabled=dem_debug)
         predictions = matcher.decode_batch(detector_samples_bool)
     predictions = np.asarray(predictions, dtype=np.uint8)
     if predictions.ndim == 1:
@@ -366,6 +433,7 @@ def run_scenario(
             )
             result: SimulationResult = run_logical_error_rate(
                 model,
+                distance,
                 stim_cfg,
                 MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
             )

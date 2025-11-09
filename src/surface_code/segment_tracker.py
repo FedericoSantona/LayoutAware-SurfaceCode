@@ -214,11 +214,19 @@ class SegmentTracker:
                         detector_manager.boundary_counts_z[patch_name] = detector_manager.boundary_counts_z.get(patch_name, 0) + 1
                     else:
                         detector_manager.boundary_counts_x[patch_name] = detector_manager.boundary_counts_x.get(patch_name, 0) + 1
+                if basis == "Z":
+                    self.z_row_wraps.setdefault(patch_name, []).append(si)
+                else:
+                    self.x_row_wraps.setdefault(patch_name, []).append(si)
                 reset_row(si)
                 continue
             # Wrap-close any open segment where endpoints differ
             if a is not None and b is not None and a != b:
                 det_id = detector_manager.defer_detector([a, b], f"{basis.lower()}_wrap", {"patch": patch_name, "row": si})
+                if basis == "Z":
+                    self.z_row_wraps.setdefault(patch_name, []).append(si)
+                else:
+                    self.x_row_wraps.setdefault(patch_name, []).append(si)
                 if (
                     detector_manager.force_boundaries
                     and self._boundary_checker is not None
@@ -229,10 +237,6 @@ class SegmentTracker:
                         detector_manager.boundary_counts_z[patch_name] = detector_manager.boundary_counts_z.get(patch_name, 0) + 1
                     else:
                         detector_manager.boundary_counts_x[patch_name] = detector_manager.boundary_counts_x.get(patch_name, 0) + 1
-                    if basis == "Z":
-                        self.z_row_wraps.setdefault(patch_name, []).append(si)
-                    else:
-                        self.x_row_wraps.setdefault(patch_name, []).append(si)
                 wrap_count += 1
             reset_row(si)
 

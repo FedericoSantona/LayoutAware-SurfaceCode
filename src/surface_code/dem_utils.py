@@ -23,6 +23,30 @@ _D_TOKEN_RE = re.compile(r"D(\d+)")
 _L_TOKEN_RE = re.compile(r"L(\d+)")
 
 
+def _is_error_instruction(inst: stim.DemInstruction) -> bool:  # type: ignore[name-defined]
+    """Stim-version-safe check for ERROR instructions."""
+    try:
+        if hasattr(stim, "DemInstructionType"):
+            return getattr(inst, "type", None) == stim.DemInstructionType.ERROR
+        name = getattr(inst, "name", None)
+        if name is not None:
+            return str(name).lower() == "error"
+        inst_type = getattr(inst, "type", None)
+        if inst_type is not None:
+            return str(getattr(inst_type, "name", inst_type)).lower() == "error"
+        return str(inst).lstrip().lower().startswith("error")
+    except Exception:
+        return False
+
+
+def circuit_to_graphlike_dem(circuit: stim.Circuit) -> stim.DetectorErrorModel:
+    """Return a DEM that preserves multi-detector error terms; fall back if needed."""
+    try:
+        return circuit.detector_error_model()
+    except ValueError:
+        return circuit.detector_error_model(ignore_decomposition_failures=True)
+
+
 def parse_dem_errors(dem):
     """
     Return a list of elementary faults as dicts:

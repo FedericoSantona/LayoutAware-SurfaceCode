@@ -57,6 +57,8 @@ from surface_code import (
 from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
+from surface_code.memory_layout import build_memory_layout
+from surface_code.dem_utils import circuit_to_graphlike_dem
 
 from surface_code.pauli import PauliTracker, parse_init_label, sequence_from_qc
 
@@ -151,17 +153,27 @@ def main() -> None:
             except Exception as _exc:
                 pass
 
-        bracket_map = {f"q{i}": bracket_basis for i in range(qc.num_qubits)}
-        layout, ops = compile_circuit_to_surgery(
-            qc, patches, seams, distance=d, bracket_map=bracket_map, 
-            warmup_rounds=warmup_rounds, ancilla_strategy=args.cnot_ancilla_strategy, ancilla_buffer=args.ancilla_buffer
-        )
+        use_memory_layout = (qc.num_qubits == 1)
+        if use_memory_layout:
+            layout, ops, bracket_map = build_memory_layout(
+                model,
+                distance=d,
+                rounds=stim_rounds,
+                bracket_basis=bracket_basis,
+                family=None,
+            )
+        else:
+            bracket_map = {f"q{i}": bracket_basis for i in range(qc.num_qubits)}
+            layout, ops = compile_circuit_to_surgery(
+                qc, patches, seams, distance=d, bracket_map=bracket_map,
+                warmup_rounds=warmup_rounds, ancilla_strategy=args.cnot_ancilla_strategy, ancilla_buffer=args.ancilla_buffer
+            )
 
         layout.plot(
             annotate=False,         # set True to label global qubit indices
             seams=True,             # draw rough/smooth seam edges
             title=f"Layout for {args.benchmark} (d={d})",
-            save_path=PROJECT_ROOT / f"plots/layout_{args.benchmark}_d{d}.png",
+            save_path=PROJECT_ROOT / "plots" / "layout" / args.code_type / f"layout_{args.benchmark}_d{d}.png",
         )
 
         if args.verbose:
@@ -193,7 +205,155 @@ def main() -> None:
             """
 
         # Sample DEM and decode
-        dem = circuit.detector_error_model()
+        dem = circuit_to_graphlike_dem(circuit)
+
+
+        if args.verbose:
+            import re
+            from collections import Counter
+
+            # 1) Dump the DEM text for manual inspection (optional but handy)
+            dem_text = str(dem)
+            (PROJECT_ROOT / "plots").mkdir(exist_ok=True)
+            (PROJECT_ROOT / "plots" / f"dem_{args.benchmark}.dem.txt").write_text(dem_text)
+
+            # 2) Map detector id -> (tag, patch, row)
+            #    This comes from your DetectorManager diagnostics.
+            dbg = (metadata.get("mwpm_debug", {}) or {})
+            det_ctx = dbg.get("detector_context", {})  # {det_id: {"tag": "...", "context": {...}}}
+
+
+            missing_ctx = {"x_temporal": 0, "z_temporal": 0}
+            wrong_keys = []
+            rows_seen = {"x_temporal": set(), "z_temporal": set()}
+            for did, meta in det_ctx.items():
+                tag = (meta or {}).get("tag")
+                if tag in ("x_temporal", "z_temporal"):
+                    ctx = (meta or {}).get("context", {}) or {}
+                    if "patch" not in ctx or "row" not in ctx:
+                        missing_ctx[tag] += 1
+                        wrong_keys.append((did, tag, sorted(ctx.keys())))
+                    else:
+                        rows_seen[tag].add((ctx.get("patch"), ctx.get("row")))
+            print("[DEM-CHECK] missing (patch,row):", missing_ctx)
+            print("[DEM-CHECK] unique rows per tag: sizes",
+                {t: len(s) for t, s in rows_seen.items()})
+            if wrong_keys[:5]:
+                print("[DEM-CHECK] sample missing/renamed ctx keys:", wrong_keys[:5])
+
+         
+            tag_stats = dbg.get("tag_stats", {})
+            if tag_stats:
+                print("[DEM-CHECK] Detector tag statistics:")
+                for tag, stats in tag_stats.items():
+                    if "temporal" in tag:
+                        print(f"  {tag}: emitted={stats.get('emitted', 0)}, kept={stats.get('kept', 0)}, dropped={stats.get('dropped', 0)}")
+
+            def _info(did: int):
+                meta = det_ctx.get(int(did), {}) or {}
+                tag = meta.get("tag")
+                ctx = meta.get("context", {}) or {}
+                patch = ctx.get("patch")
+                row = ctx.get("row")
+                return tag, patch, row
+
+            # 3) Parse ERROR(...) lines; collect 1-detector and 2-detector terms
+            err_line_re = re.compile(r"^\s*error\(([^)]+)\)\s+(.*)$")
+            D_re = re.compile(r"\bD(\d+)\b")
+
+            one_det = []     # [(p, d0)]
+            error_terms: List[Tuple[float, List[int]]] = []  # [(p, [d0,d1,...])]
+            other = 0
+
+            for line in dem_text.splitlines():
+                m = err_line_re.match(line)
+                if not m:
+                    continue
+                p_str, rhs = m.groups()
+                try:
+                    p_val = float(p_str)
+                except:
+                    # could be a named probability; keep the string
+                    p_val = p_str
+
+                Ds = [int(x) for x in D_re.findall(rhs)]
+                if len(Ds) == 1:
+                    one_det.append((p_val, Ds[0]))
+                elif len(Ds) >= 2:
+                    error_terms.append((p_val, Ds))
+                else:
+                    other += 1
+
+            # 4) Summarize two-detector terms that look like cross-row DATA faults:
+            #    both ends are temporal detectors of the same basis and same patch,
+            #    but on *different* stabilizer rows.
+            #    (That’s the signature of a single data X fault for Z-basis rows,
+            #     or a data Z fault for X-basis rows.)
+            candidates = []
+            for p_val, ids in error_terms:
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        d0, d1 = ids[i], ids[j]
+                        tag0, patch0, row0 = _info(d0)
+                        tag1, patch1, row1 = _info(d1)
+                        # same patch, same temporal-basis tag, different rows
+                        if tag0 in ("z_temporal", "x_temporal") and tag0 == tag1 \
+                        and patch0 is not None and patch0 == patch1 \
+                        and isinstance(row0, int) and isinstance(row1, int) and row0 != row1:
+                            # normalize pair order
+                            r_pair = tuple(sorted((row0, row1)))
+                            candidates.append((tag0, patch0, r_pair, p_val, d0, d1))
+
+
+            x_temporal_candidates = [(tag, patch, rpair, p_val, d0, d1) 
+                                    for tag, patch, rpair, p_val, d0, d1 in candidates 
+                                    if tag == "x_temporal"]
+            if x_temporal_candidates:
+                print(f"[DEM-CHECK] Found {len(x_temporal_candidates)} x_temporal cross-row candidates")
+                for tag, patch, rpair, p_val, d0, d1 in x_temporal_candidates[:5]:
+                    print(f"  {tag} {patch} rows={rpair} error({p_val}) D{d0} D{d1}")
+            else:
+                print("[DEM-CHECK] No x_temporal cross-row candidates found")
+                # Check if x_temporal detectors appear in any error terms
+                x_temporal_in_errors = []
+                for p_val, d0, d1 in two_det:
+                    tag0, _, _ = _info(d0)
+                    tag1, _, _ = _info(d1)
+                    if tag0 == "x_temporal" or tag1 == "x_temporal":
+                        x_temporal_in_errors.append((p_val, d0, d1, tag0, tag1))
+                print(f"[DEM-CHECK] x_temporal detectors appear in {len(x_temporal_in_errors)} two-detector error terms")
+                if x_temporal_in_errors:
+                    print("[DEM-CHECK] Sample x_temporal error terms:")
+                    for p_val, d0, d1, tag0, tag1 in x_temporal_in_errors[:5]:
+                        print(f"  error({p_val}) D{d0}({tag0}) D{d1}({tag1})")
+
+            # 5) Print a compact summary
+            print(f"[DEM-CHECK] total ERROR terms: 1-det={len(one_det)}, >=2-det={len(error_terms)}, other={other}")
+
+            # Group by (basis, patch, (row_i,row_j)) and show counts
+            bucket = Counter((tag, patch, rpair) for tag, patch, rpair, _, _, _ in candidates)
+            print("[DEM-CHECK] cross-row 2-detector candidates (same patch & basis, different rows):")
+            for (tag, patch, rpair), cnt in bucket.most_common(15):
+                print(f"  {tag}  {patch} rows={rpair}  count={cnt}")
+
+            # Show a few concrete examples with probabilities
+            print("[DEM-CHECK] sample cross-row edges (up to 10):")
+            for tag, patch, rpair, p_val, d0, d1 in candidates[:10]:
+                print(f"  error({p_val}) D{d0} D{d1}   -> {tag}  {patch} rows={rpair}")
+
+            # 6) Also sanity-check the single-detector measurement-fault edges for weights
+            #    (useful to see p_meas clustered here)
+            meas_ones = []
+            for p_val, d0 in one_det:
+                tag0, patch0, row0 = _info(d0)
+                if tag0 in ("z_temporal", "x_temporal"):
+                    meas_ones.append(p_val)
+            if meas_ones:
+                # crude: just print a few and a rough min/max
+                vals = [v for v in meas_ones if isinstance(v, float)]
+                print(f"[DEM-CHECK] single-detector temporal terms (measurement-like) samples: {meas_ones[:5]}")
+                if vals:
+                    print(f"[DEM-CHECK] single-detector (temporal) prob range: {min(vals):.3g}..{max(vals):.3g}")
 
         # Run simulation
         results = run_logical_simulation(
@@ -210,6 +370,71 @@ def main() -> None:
             corr_pairs=args.corr_pairs,
             verbose=args.verbose,
         )
+
+        # Post-augmentation DEM sanity (augmented graph)
+        if args.verbose:
+            try:
+                dem_text_post = str(results.dem)
+                import re
+                err_re = re.compile(r"^\s*error\(([^)]+)\)\s+(.*)$")
+                D_re = re.compile(r"\bD(\d+)\b")
+
+                dbg = (metadata.get("mwpm_debug", {}) or {})
+                det_ctx = dbg.get("detector_context", {}) or {}
+
+                def _info_post(did: int):
+                    meta = det_ctx.get(int(did), {}) or {}
+                    tag = meta.get("tag")
+                    ctx = meta.get("context", {}) or {}
+                    patch = ctx.get("patch")
+                    row = ctx.get("row")
+                    return tag, patch, row
+
+                two_det_post = []
+                for line in dem_text_post.splitlines():
+                    m = err_re.match(line)
+                    if not m:
+                        continue
+                    p_str, rhs = m.groups()
+                    try:
+                        p_val = float(p_str)
+                    except Exception:
+                        p_val = p_str
+                    Ds = [int(x) for x in D_re.findall(rhs)]
+                    if len(Ds) == 2:
+                        two_det_post.append((p_val, Ds[0], Ds[1]))
+
+                # Count post-aug cross-row candidates
+                x_post = []
+                z_post = []
+                for p_val, d0, d1 in two_det_post:
+                    tag0, patch0, row0 = _info_post(d0)
+                    tag1, patch1, row1 = _info_post(d1)
+                    if not (patch0 == patch1 and isinstance(row0, int) and isinstance(row1, int) and row0 != row1):
+                        continue
+                    if tag0 == tag1 == "x_temporal":
+                        x_post.append((p_val, d0, d1, patch0, tuple(sorted((row0, row1)))))
+                    if tag0 == tag1 == "z_temporal":
+                        z_post.append((p_val, d0, d1, patch0, tuple(sorted((row0, row1)))))
+
+                from collections import Counter
+                bx = Counter((patch, rpair) for _p, _d0, _d1, patch, rpair in x_post)
+                bz = Counter((patch, rpair) for _p, _d0, _d1, patch, rpair in z_post)
+                print("[DEM-CHECK:POST] cross-row 2-detector candidates (augmented):")
+                if bx:
+                    print("  x_temporal:")
+                    for (patch, rpair), cnt in list(bx.most_common(10)):
+                        print(f"    {patch} rows={rpair}  count={cnt}")
+                else:
+                    print("  x_temporal: none")
+                if bz:
+                    print("  z_temporal:")
+                    for (patch, rpair), cnt in list(bz.most_common(10)):
+                        print(f"    {patch} rows={rpair}  count={cnt}")
+                else:
+                    print("  z_temporal: none")
+            except Exception as _exc_post:
+                print(f"[DEM-CHECK:POST] scan failed: {_exc_post}")
 
         # Print structured report
         print_header(args, model, results.dem, metadata, {}, results.cnot_metadata, stim_rounds, int(args.shots))
@@ -244,7 +469,13 @@ def main() -> None:
         )
         try:
             decoded_order = [name for name in sorted(bracket_map.keys()) if name in bracket_map]
-            print_decoded_logical_distribution(decoded_order, results.corrected_obs, int(args.shots))
+            print_decoded_logical_distribution(
+                decoded_order,
+                results.corrected_obs,
+                int(args.shots),
+                pauli_frame=results.pauli_tracker.frame,
+                basis_labels=results.basis_labels,
+            )
         except Exception as _exc_dist:
             if args.verbose:
                 print(f"[DEBUG] decoded logical distribution unavailable: {_exc_dist}")

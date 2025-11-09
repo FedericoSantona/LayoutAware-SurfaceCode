@@ -104,13 +104,13 @@ def _get_virtual_gates_for_qubit(qubit: str, virtual_gates_per_qubit: Optional[D
 # --- Helper functions for demo readout phase/frame handling ---
 def _get_frame_bit(pauli_frame: Optional[Dict[str, Dict[str, Any]]], qubit: str, basis_axis: str) -> int:
     """Return the frame flip bit for a given qubit and basis.
-    For singles: Z-basis ← fx; X-basis ← fz.
+    For singles: Z-basis uses fz; X-basis uses fx.
     basis_axis is 'Z' or 'X'.
     """
     try:
         if not pauli_frame or qubit not in pauli_frame:
             return 0
-        key = "fx" if basis_axis == "Z" else "fz"
+        key = "fz" if basis_axis == "Z" else "fx"
         v = pauli_frame[qubit].get(key, 0)
         if isinstance(v, np.ndarray):
             # Reduce to a single bit: majority/mean -> {0,1}
@@ -164,6 +164,8 @@ def print_decoded_logical_distribution(
     logical_order: List[str],
     decoded_bits: np.ndarray,
     shots: int,
+    pauli_frame: Optional[Dict[str, Dict[str, Any]]] = None,
+    basis_labels: Optional[Tuple[str, ...]] = None,
 ) -> None:
     """Print the empirical distribution of decoded logical outcomes (post Pauli-frame and decoder).
 
@@ -195,13 +197,45 @@ def print_decoded_logical_distribution(
     counts = Counter(bitstrings)
     total = sum(counts.values()) or 1
 
+    # Derive header basis label when available
+    hdr_basis = "Z"
+    try:
+        if basis_labels:
+            uniq = sorted({str(b).upper() for b in basis_labels if str(b).upper() in {"Z", "X"}})
+            if len(uniq) == 1:
+                hdr_basis = uniq[0]
+            elif len(uniq) > 1:
+                hdr_basis = "mixed"
+    except Exception:
+        pass
+
     print("\n" + "=" * 80)
-    print("DECODED LOGICAL DISTRIBUTION (Z basis)")
+    print(f"DECODED LOGICAL DISTRIBUTION ({hdr_basis} basis)")
     print("=" * 80)
     print(f"Order (MSB→LSB): {' '.join(order)}")
     print(f"Shots: {shots:,}")
     print(f"Unique states observed: {len(counts)}")
     print()
+    # Summarize Pauli-frame context alongside the distribution
+    if pauli_frame:
+        print("Frame correction: ON (decoded samples are post frame+decoder)")
+        print("Frame bits used:")
+        for q in order:
+            try:
+                fx = pauli_frame.get(q, {}).get("fx", 0)
+                fz = pauli_frame.get(q, {}).get("fz", 0)
+                if isinstance(fx, np.ndarray):
+                    fx = int(round(float(fx.mean()))) & 1
+                else:
+                    fx = int(fx) & 1
+                if isinstance(fz, np.ndarray):
+                    fz = int(round(float(fz.mean()))) & 1
+                else:
+                    fz = int(fz) & 1
+                print(f"  {q}: fx={fx}, fz={fz}")
+            except Exception:
+                continue
+        print()
     print(f"{'State':<{len(order)+2}} {'Shots':<12} Prob")
     print("-" * 40)
     for state, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
@@ -446,7 +480,8 @@ def print_physics_demo(
                 }
                 print(f"    Basis Z: requested {z_requested}; measured (final-frame) {z_logical}")
                 print(f"      bit=1 ↔ eigenvalue −1")
-                axis_tag = "fx" if (final_axis or "Z") == "Z" else "fz"
+                # Frame bit used for singles matches the measured axis: Z→fz, X→fx
+                axis_tag = "fz" if (final_axis or "Z") == "Z" else "fx"
                 print(f"      P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip({axis_tag})={stats['frame_flip']}")
                 print(f"      ⟨O⟩ (phase×frame) = {stats['expect_final']:+.3f}")
             else:
@@ -471,7 +506,8 @@ def print_physics_demo(
                 }
                 print(f"    Basis X: requested {x_requested}; measured (final-frame) {x_logical}")
                 print(f"      bit=1 ↔ eigenvalue −1")
-                axis_tag = "fx" if (final_axis or "X") == "Z" else "fz"
+                # Frame bit used for singles matches the measured axis: Z→fz, X→fx
+                axis_tag = "fz" if (final_axis or "X") == "Z" else "fx"
                 print(f"      P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip({axis_tag})={stats['frame_flip']}")
                 print(f"      ⟨O⟩ (phase×frame) = {stats['expect_final']:+.3f}")
             else:
@@ -541,7 +577,8 @@ def print_physics_demo(
                     print(f"       measured (final-frame): {zz_operator}")
                     print(f"       physical targets: {zz_physical}")
                     print(f"       bit=1 ↔ eigenvalue −1")
-                    print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fx⊕fx)={stats['frame_flip']}")
+                    # ZZ joint uses fz on each qubit
+                    print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fz⊕fz)={stats['frame_flip']}")
                     # CI on expectation derived from frame-corrected p1
                     p1 = stats["p1_frame"]
                     p1_count = int(round(p1 * shots))
@@ -579,7 +616,8 @@ def print_physics_demo(
                 print(f"       measured (final-frame): {xx_operator}")
                 print(f"       physical targets: {xx_physical}")
                 print(f"       bit=1 ↔ eigenvalue −1")
-                print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fz⊕fz)={stats['frame_flip']}")
+                # XX joint uses fx on each qubit
+                print(f"       P(bit=1): raw={stats['p1_raw']:.3f}, frame={stats['p1_frame']:.3f}  |  phase={stats['phase']:+d}, frame_flip(fx⊕fx)={stats['frame_flip']}")
                 p1 = stats["p1_frame"]
                 p1_count = int(round(p1 * shots))
                 p1_ci = wilson_rate_ci(p1_count, shots)
@@ -645,8 +683,11 @@ def print_physics_demo(
     post_frame_applied = True
     print("  Post-frame flips applied in reporting: YES")
     print("  Policy:")
-    print("    • Singles: flip Z by fx[q], flip X by fz[q].")
-    print("    • Joint:   flip Z⊗Z by fx[qa]⊕fx[qb], X⊗X by fz[qa]⊕fz[qb].")
+    # For singles, Z-basis uses fz and X-basis uses fx. This matches how
+    # Pauli-frame bits are applied in decoding where basis=='Z' → use 'fz'
+    # and basis=='X' → use 'fx'.
+    print("    • Singles: flip Z by fz[q], flip X by fx[q].")
+    print("    • Joint:   flip Z⊗Z by fz[qa]⊕fz[qb], X⊗X by fx[qa]⊕fx[qb].")
     if pauli_frame:
         print("  Frame bits used:")
         for q in sorted(pauli_frame.keys()):
@@ -691,7 +732,8 @@ def print_final_state_distribution(
     
     print(f"Basis: {basis}")
     print(f"Order (MSB→LSB): {' '.join(order)}")
-    print(f"Frame correction: {'ON' if apply_frame_correction else 'OFF'} (using f{'x' if basis=='Z' else 'z'} per qubit)")
+    # Z-basis snapshots are corrected by fz; X-basis by fx
+    print(f"Frame correction: {'ON' if apply_frame_correction else 'OFF'} (using f{'z' if basis=='Z' else 'x'} per qubit)")
     print(f"Measured operators (final-frame): {snapshot_meta.get('logical_ops', [])}")
     print()
     
@@ -717,7 +759,8 @@ def print_final_state_distribution(
                     axis_for_qubit = "Z"
                 elif op_str.startswith("X("):
                     axis_for_qubit = "X"
-            frame_key = "fx" if (axis_for_qubit or basis) == "Z" else "fz"
+            # Use fz for Z-axis measurements and fx for X-axis
+            frame_key = "fz" if (axis_for_qubit or basis) == "Z" else "fx"
             flip = pauli_frame[qname].get(frame_key, 0)
             if isinstance(flip, np.ndarray):
                 flip = int(round(float(flip.mean()))) & 1

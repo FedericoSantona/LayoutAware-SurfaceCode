@@ -21,6 +21,7 @@ import stim
 import networkx as nx
 from qiskit import QuantumCircuit
 
+from .dem_diagnostics import log_dem_diagnostics, env_dem_debug_enabled
 from .dem_utils import (
     augment_dem_with_boundary_anchors,
     anchor_pm_isolates,
@@ -36,6 +37,21 @@ from .dem_utils import (
 )
 from .pauli import PauliTracker, sequence_from_qc
 from .utils import compute_two_qubit_correlations, compute_joint_correlations, wilson_rate_ci
+
+
+def _parity_from_indices(
+    m_samples: np.ndarray,
+    indices: Optional[Sequence[int]],
+) -> np.ndarray:
+    """Return XOR parity across the specified measurement columns."""
+    if indices:
+        cols = m_samples[:, list(indices)]
+        cols = np.asarray(cols, dtype=np.uint8)
+        if cols.ndim == 1:
+            return cols.copy()
+        return np.bitwise_xor.reduce(cols, axis=1).astype(np.uint8)
+    # No indices ⇒ deterministic zero parity.
+    return np.zeros(m_samples.shape[0], dtype=np.uint8)
 
 
 # Helper: Count observable support in ERROR terms
@@ -242,6 +258,9 @@ def _harden_and_decode_dem(
     verbose: bool = False,
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
+    dem_debug = verbose or env_dem_debug_enabled()
+    log_dem_diagnostics("pre-prune", dem, metadata, enabled=dem_debug)
+
     # Snapshot original DEM to measure how many single-detector hooks get added
     if verbose:
         try:
@@ -264,6 +283,173 @@ def _harden_and_decode_dem(
             print(f"[OBS-SUPPORT] scan failed (pre-pruning): {_exc}")
 
     dem, _ = prune_dem_to_live_detectors(dem, metadata)
+    log_dem_diagnostics("post-prune", dem, metadata, enabled=dem_debug)
+    if verbose:
+        with open("/tmp/dem_after_prune.dem", "w") as f:
+            f.write(str(dem))
+
+    # ------------------------------------------------------------------
+    # Inject missing space-edges between temporal chains when absent.
+    # This uses stabilizer row support to connect rows that share a data
+    # qubit, pairing detectors across rows by temporal index.
+    #  - For Z-temporal chains (detecting X faults), use p_x_error.
+    #  - For X-temporal chains (detecting Z faults), use p_z_error.
+    # The augmentation is conservative: it only adds a 2-detector ERROR
+    # when that pair is not already present in the DEM.
+    # ------------------------------------------------------------------
+    try:
+        ctx_raw = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
+        ctx_map = {}
+        for k, v in ctx_raw.items():
+            try:
+                ctx_map[int(k)] = dict(v)
+            except Exception:
+                ctx_map[k] = dict(v)
+        if verbose:
+            print(f"[DEM-CHECK] detector_context entries={len(ctx_map)} sample={list(ctx_map.items())[:5]}")
+        stab_support = (metadata.get("stab_support", {}) or {})
+        noise_meta = (metadata.get("noise_model", {}) or {})
+        p_x = float(noise_meta.get("p_x_error", 0.0) or 0.0)
+        p_z = float(noise_meta.get("p_z_error", 0.0) or 0.0)
+
+
+        def _group_temporal_detectors(tag_prefix: str) -> Dict[Tuple[str, int], List[int]]:
+            # Returns {(patch,row): [det_ids in ascending order]}
+            grouped: Dict[Tuple[str, int], List[int]] = {}
+            for det_id_str, info in ctx_map.items():
+                try:
+                    det_id = int(det_id_str)
+                except Exception:
+                    # keys may already be int
+                    det_id = int(det_id_str) if not isinstance(det_id_str, int) else int(det_id_str)
+                tag = (info or {}).get("tag")
+                if not isinstance(tag, str) or not tag.startswith(tag_prefix):
+                    continue
+                ctx = (info or {}).get("context", {}) or {}
+                patch = ctx.get("patch")
+                row = ctx.get("row")
+                if not isinstance(patch, str) or not isinstance(row, int):
+                    continue
+                grouped.setdefault((patch, int(row)), []).append(det_id)
+            for k in list(grouped.keys()):
+                grouped[k] = sorted(grouped[k])
+            return grouped
+
+        z_temporal = _group_temporal_detectors("z_temporal")
+        x_temporal = _group_temporal_detectors("x_temporal")
+
+        dem_text = str(dem)
+        # Existing 2-detector pairs
+        import re as _re
+        _D = _re.compile(r"\bD(\d+)\b")
+        existing_pairs: set[tuple[int, int]] = set()
+        # Raw cross-row pairs per tag (by (patch,row) using context)
+        raw_cross_pairs: Dict[str, set[Tuple[str, int, int]]] = {"z_temporal": set(), "x_temporal": set()}
+        for line in dem_text.splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("error("):
+                continue
+            ids = [int(m.group(1)) for m in _D.finditer(stripped)]
+            if len(ids) >= 2:
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        a, b = sorted((ids[i], ids[j]))
+                        existing_pairs.add((a, b))
+                        # Try to classify by tag+row from ctx_map
+                        info_a = ctx_map.get(a) or ctx_map.get(str(a)) or {}
+                        info_b = ctx_map.get(b) or ctx_map.get(str(b)) or {}
+                        tag_a = info_a.get("tag"); tag_b = info_b.get("tag")
+                        if tag_a == tag_b and tag_a in ("z_temporal", "x_temporal"):
+                            ca = (info_a.get("context", {}) or {})
+                            cb = (info_b.get("context", {}) or {})
+                            pa, ra = ca.get("patch"), ca.get("row")
+                            pb, rb = cb.get("patch"), cb.get("row")
+                            if isinstance(pa, str) and pa == pb and isinstance(ra, numbers.Integral) and isinstance(rb, numbers.Integral) and ra != rb:
+                                r1, r2 = (ra, rb) if ra < rb else (rb, ra)
+                                pair = (pa, int(r1), int(r2))
+                                if verbose and pair not in raw_cross_pairs[str(tag_a)]:
+                                    print(f"[DEM-CHECK] found raw pair {tag_a} {pair}")
+                                raw_cross_pairs[str(tag_a)].add(pair)
+
+        def _row_support(basis: str, patch: str, row: int) -> set[int]:
+            try:
+                return set(stab_support.get(basis, {}).get(patch, {}).get(int(row), []) or [])
+            except Exception:
+                return set()
+
+        new_lines: List[str] = []
+
+        # Helper: add zipped pairs between two temporal chains for given p
+        def _add_pairs(
+            chains: Dict[Tuple[str, int], List[int]],
+            basis: str,
+            p_edge: float,
+            limit_pairs: Optional[set[Tuple[str, int, int]]] = None,
+        ) -> None:
+            if p_edge <= 0.0 or not chains:
+                return
+            max_shared_support = 2  # heuristically, adjacent checks share ≤2 data qubits
+            # Build adjacency from shared data-qubit support
+            patches = sorted({patch for (patch, _row) in chains.keys()})
+            for patch in patches:
+                # Collect rows for this patch
+                rows = sorted({row for (p, row) in chains.keys() if p == patch})
+                # Precompute supports
+                supports = {row: _row_support(basis, patch, row) for row in rows}
+                # For each unordered pair of rows that share a data qubit, add edges
+                n = len(rows)
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        r1, r2 = rows[i], rows[j]
+                        shared = supports[r1] & supports[r2]
+                        if (
+                            not supports[r1]
+                            or not supports[r2]
+                            or not shared
+                            or len(shared) > max_shared_support
+                        ):
+                            continue
+                        if limit_pairs is not None and (patch, r1, r2) not in limit_pairs:
+                            continue
+                        seq1 = chains.get((patch, r1), [])
+                        seq2 = chains.get((patch, r2), [])
+                        if not seq1 or not seq2:
+                            continue
+                        # Zip by index to align by round ordering
+                        L = min(len(seq1), len(seq2))
+                        for k in range(L):
+                            a, b = sorted((int(seq1[k]), int(seq2[k])))
+                            if (a, b) in existing_pairs:
+                                continue
+                            new_lines.append(f"error({p_edge}) D{a} D{b}")
+                            existing_pairs.add((a, b))
+
+        if verbose:
+            print(f"[DEM-CHECK] raw cross-row pairs: {raw_cross_pairs}")
+        z_limit = raw_cross_pairs.get("z_temporal") or set()
+        x_limit = raw_cross_pairs.get("x_temporal") or set()
+
+        # Always top up space-like edges based on stabilizer support. Raw cross-row
+        # pairs only tell us that *some* correlated terms exist; they don't certify
+        # that every adjacency was emitted. Without these supplemental edges the
+        # DEM collapses to independent repetition chains, so we inject edges for
+        # every supported pair (optionally mirroring the other basis when present).
+        if p_x > 0.0:
+            z_pairs_limit = {(p, r1, r2) for (p, r1, r2) in x_limit} if x_limit else None
+            _add_pairs(z_temporal, "Z", p_x, limit_pairs=z_pairs_limit)
+
+        if p_z > 0.0:
+            x_pairs_limit = {(p, r1, r2) for (p, r1, r2) in z_limit} if z_limit else None
+            _add_pairs(x_temporal, "X", p_z, limit_pairs=x_pairs_limit)
+
+        if new_lines:
+            dem_text_aug = dem_text + "\n" + "\n".join(new_lines)
+            dem = stim.DetectorErrorModel(dem_text_aug)
+            if verbose:
+                print(f"[DEM-CHECK] injected space edges: {len(new_lines)}")
+    except Exception as _exc:
+        if verbose:
+            print(f"[DEM-CHECK] space-edge augmentation skipped due to error: {_exc}")
     dem_orig = dem
     if verbose:
         try:
@@ -288,7 +474,9 @@ def _harden_and_decode_dem(
     except Exception:
         anchor_ids = []
         anchor_eps = 1e-12
-    hook_probability = max(anchor_eps, phys_floor, 1e-6)
+    # Boundary hook edges must be much weaker than physical data errors.
+    # Clamp to a tiny range to avoid the matcher preferring hooks over real edges.
+    hook_probability = min(max(anchor_eps, 1e-12), 1e-6)
 
     pm_nodes = collect_detectors_in_errors(dem)
     fallback_added = 0
@@ -337,78 +525,56 @@ def _harden_and_decode_dem(
                 sample.append((rep, info.get("tag"), info.get("context")))
             print(f"[DEM-CHECK] boundaryless components (sample): {sample}")
 
+    # Do not eagerly anchor boundaryless components; handle them on-demand.
     targeted_hooks: List[int] = []
-    if boundaryless_components:
-        anchor_set = set(anchor_ids)
-        for comp in boundaryless_components:
-            candidate = next((int(d) for d in comp if d in anchor_set), None)
-            if candidate is None:
-                candidate = int(comp[0])
-            targeted_hooks.append(candidate)
-        dem = augment_dem_with_boundary_anchors(dem, targeted_hooks, hook_probability)
-        fallback_added = len(targeted_hooks)
-        matcher = pm.Matching.from_detector_error_model(dem)
-        graph = matcher.to_networkx()
-        mg = matcher._matching_graph
-        det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors}
-        boundary_detectors = {
-            int(a) for a, b, _data in mg.get_edges()
-            if b is None and isinstance(a, numbers.Integral)
-        }
-        components = []
-        for comp in nx.connected_components(graph):
-            dets = [int(n) for n in comp if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors]
-            if not dets:
-                continue
-            components.append(dets)
-        if verbose:
-            sample = []
-            for det in targeted_hooks[:16]:
-                info = ctx_map.get(det, {}) or {}
-                sample.append((det, info.get("tag"), info.get("context")))
-            print(f"[DEM-CHECK] targeted boundary anchors added: {len(targeted_hooks)} sample={sample}")
-        if any(not any(d in boundary_detectors for d in comp) for comp in components if comp):
-            if verbose:
-                residual = [
-                    (comp[0], ctx_map.get(int(comp[0]), {}))
-                    for comp in components
-                    if comp and not any(d in boundary_detectors for d in comp)
-                ]
-                print(f"[DEM-CHECK] WARNING: components still boundaryless after targeted anchoring (sample): {residual[:16]}")
-        elif verbose:
-            print("[DEM-CHECK] all components have boundaries after targeted anchoring")
 
-        # Re-check observable support after targeted anchoring
-        if verbose:
+    # Post-pruning observable support snapshot (for debugging)
+    if verbose:
+        try:
+            obs_support_post = _debug_obs_support(dem)
+            print(f"[OBS-SUPPORT] per-observable error terms (post-pruning): {obs_support_post}")
+            if sum(obs_support_post) > 0:
+                samples = _debug_iter_observable_error_terms(dem, limit=6)
+                if samples:
+                    print("[OBS-SUPPORT] sample ERROR lines carrying observables (post-pruning):")
+                    for s in samples:
+                        print("  ", s)
+            else:
+                print("[OBS-SUPPORT] no ERROR terms carry any observables (post-pruning).")
             try:
-                obs_support_post = _debug_obs_support(dem)
-                print(f"[OBS-SUPPORT] per-observable error terms (post-pruning): {obs_support_post}")
-                if sum(obs_support_post) > 0:
-                    samples = _debug_iter_observable_error_terms(dem, limit=6)
-                    if samples:
-                        print("[OBS-SUPPORT] sample ERROR lines carrying observables (post-pruning):")
-                        for s in samples:
-                            print("  ", s)
-                else:
-                    print("[OBS-SUPPORT] no ERROR terms carry any observables (post-pruning).")
-                try:
-                    txt = str(dem)
-                    c0 = txt.count(" L0")
-                    c1 = txt.count(" L1")
-                    print(f"[OBS-TEXT] raw DEM text counts: L0={c0} L1={c1}")
-                except Exception:
-                    pass
-            except Exception as _exc:
-                print(f"[OBS-SUPPORT] scan failed (post-pruning): {_exc}")
+                txt = str(dem)
+                c0 = txt.count(" L0")
+                c1 = txt.count(" L1")
+                print(f"[OBS-TEXT] raw DEM text counts: L0={c0} L1={c1}")
+            except Exception:
+                pass
+        except Exception as _exc:
+            print(f"[OBS-SUPPORT] scan failed (post-pruning): {_exc}")
 
     actual_hooks = single_detector_hook_ids(dem)
     metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(actual_hooks)
+    log_dem_diagnostics("post-hooks", dem, metadata, enabled=dem_debug)
 
     pm_nodes = collect_detectors_in_errors(dem)
 
     dem_sampler = dem.compile_sampler(seed=seed)
     det_samp, obs_samp, _ = dem_sampler.sample(shots)
     obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((shots, len(observable_pairs)), dtype=np.uint8)
+
+    # Before decoding, proactively check feasibility of the sampled syndromes.
+    # If any boundaryless component has odd parity in the sample set, add a
+    # single tiny-probability hook to that component and rebuild the matcher.
+    try:
+        expl = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
+        if expl is not None:
+            dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
+            if verbose:
+                print(f"[PM-CHECK] on-demand anchors added: {iso_added_retry}")
+            # Update metadata hooks for reporting
+            after_hooks = single_detector_hook_ids(dem)
+            metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(after_hooks)
+    except Exception:
+        pass
 
     try:
         if verbose:
@@ -594,11 +760,18 @@ def _track_pauli_frame(
         ancilla = cnot_op["ancilla"]
         
         # Extract m_ZZ and m_XX directly from single-shot MPP indices
-        m_zz_mpp_idx = cnot_op.get("m_zz_mpp_idx")
-        m_xx_mpp_idx = cnot_op.get("m_xx_mpp_idx")
+        m_zz_indices = cnot_op.get("m_zz_indices")
+        m_xx_indices = cnot_op.get("m_xx_indices")
+        m_xx_logical_idx = cnot_op.get("m_xx_logical_idx")
         
-        m_zz = m_samples[:, m_zz_mpp_idx] if (enable_mzz and m_zz_mpp_idx is not None) else np.zeros(shots, dtype=np.uint8)
-        m_xx = m_samples[:, m_xx_mpp_idx] if (enable_mxx and m_xx_mpp_idx is not None) else np.zeros(shots, dtype=np.uint8)
+        if enable_mzz:
+            m_zz = _parity_from_indices(m_samples, m_zz_indices)
+        else:
+            m_zz = np.zeros(shots, dtype=np.uint8)
+        if enable_mxx:
+            m_xx = _parity_from_indices(m_samples, m_xx_indices or ([m_xx_logical_idx] if m_xx_logical_idx is not None else None))
+        else:
+            m_xx = np.zeros(shots, dtype=np.uint8)
         
         # Update Pauli frame: fz[target] ^= m_ZZ, fx[control] ^= m_XX
         pfm.update_cnot(control, target, m_zz, m_xx)
@@ -680,8 +853,10 @@ def _extract_measurements(
     demo_x_bits = {}
     demo_meta = metadata.get("demo", {})
 
+    """
     # DEBUG: print tail of circuit operations to ensure joint MPPs are last
     if verbose:
+        
         try:
             tail_ops = str(circuit).strip().splitlines()[-80:]
             print("\n[DEBUG] Tail of Stim circuit (last ~80 ops):")
@@ -689,6 +864,7 @@ def _extract_measurements(
                 print("  ", ln)
         except Exception:
             pass
+    """
 
     # Singles (if present)
     if demo_meta:
@@ -820,16 +996,20 @@ def _compute_correlations(
                     
                     if basis == "Z":
                         # For ZZ correlations, flip by m_ZZ byproduct
-                        m_zz_mpp_idx = cnot_op.get("m_zz_mpp_idx")
-                        if m_zz_mpp_idx is not None:
-                            byproduct_correction = m_samples[:, m_zz_mpp_idx]
-                            print(f"[DEBUG] Joint {joint_key}: applying m_ZZ correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
+                        corr = _parity_from_indices(
+                            m_samples,
+                            cnot_op.get("m_zz_indices"),
+                        )
+                        byproduct_correction = corr
+                        print(f"[DEBUG] Joint {joint_key}: applying m_ZZ correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
                     elif basis == "X":
                         # For XX correlations, flip by m_XX byproduct
-                        m_xx_mpp_idx = cnot_op.get("m_xx_mpp_idx")
-                        if m_xx_mpp_idx is not None:
-                            byproduct_correction = m_samples[:, m_xx_mpp_idx]
-                            print(f"[DEBUG] Joint {joint_key}: applying m_XX correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
+                        corr = _parity_from_indices(
+                            m_samples,
+                            cnot_op.get("m_xx_indices") or ([cnot_op.get("m_xx_logical_idx")] if cnot_op.get("m_xx_logical_idx") is not None else None),
+                        )
+                        byproduct_correction = corr
+                        print(f"[DEBUG] Joint {joint_key}: applying m_XX correction from CNOT({control}->{target}), mean={byproduct_correction.mean():.3f}")
                     break
             
             # Apply byproduct correction: flip bits where byproduct is 1

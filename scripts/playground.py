@@ -369,6 +369,7 @@ def main() -> None:
             bracket_basis=bracket_basis,
             corr_pairs=args.corr_pairs,
             verbose=args.verbose,
+            enable_boundary_anchors=args.enable_boundary_anchors,
         )
 
         # Post-augmentation DEM sanity (augmented graph)

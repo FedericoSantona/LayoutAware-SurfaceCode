@@ -295,6 +295,12 @@ Examples:
         default=None,
         help="Custom correlation pairs in format 'q0,q1;q2,q3' for two-qubit correlation analysis.",
     )
+    sim_group.add_argument(
+        "--enable-boundary-anchors",
+        type=_str2bool,
+        default=True,
+        help="Enable boundary anchor augmentation in DEM (default: True)",
+    )
     
     # Output options
     output_group = parser.add_argument_group("Output options")

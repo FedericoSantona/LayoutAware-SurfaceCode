@@ -4,9 +4,7 @@
   "track": "X",
   "distances": [
     3,
-    5,
-    7,
-    9
+    7
   ],
   "sweeps": [
     {
@@ -16,48 +14,22 @@
           "p_x": 0.0,
           "p_z": 1e-05,
           "logical_error_rate": 0.00011,
-          "avg_syndrome_weight": 0.00067,
-          "click_rate": 0.00029
+          "avg_syndrome_weight": 0.00104,
+          "click_rate": 0.00033
         },
         {
           "p_x": 0.0,
           "p_z": 0.0007071067811865475,
-          "logical_error_rate": 0.00763,
-          "avg_syndrome_weight": 0.06222,
-          "click_rate": 0.02512
+          "logical_error_rate": 0.00866,
+          "avg_syndrome_weight": 0.08349,
+          "click_rate": 0.02785
         },
         {
           "p_x": 0.0,
           "p_z": 0.049999999999999996,
-          "logical_error_rate": 0.34407,
-          "avg_syndrome_weight": 3.31779,
-          "click_rate": 0.83207
-        }
-      ]
-    },
-    {
-      "distance": 5,
-      "points": [
-        {
-          "p_x": 0.0,
-          "p_z": 1e-05,
-          "logical_error_rate": 0.00029,
-          "avg_syndrome_weight": 0.0063,
-          "click_rate": 0.00193
-        },
-        {
-          "p_x": 0.0,
-          "p_z": 0.0007071067811865475,
-          "logical_error_rate": 0.02064,
-          "avg_syndrome_weight": 0.46826,
-          "click_rate": 0.13349
-        },
-        {
-          "p_x": 0.0,
-          "p_z": 0.049999999999999996,
-          "logical_error_rate": 0.47744,
-          "avg_syndrome_weight": 21.83968,
-          "click_rate": 0.99994
+          "logical_error_rate": 0.359,
+          "avg_syndrome_weight": 4.23789,
+          "click_rate": 0.865
         }
       ]
     },
@@ -67,48 +39,22 @@
         {
           "p_x": 0.0,
           "p_z": 1e-05,
-          "logical_error_rate": 0.00055,
-          "avg_syndrome_weight": 0.02286,
-          "click_rate": 0.00616
+          "logical_error_rate": 0.00063,
+          "avg_syndrome_weight": 0.02511,
+          "click_rate": 0.00602
         },
         {
           "p_x": 0.0,
           "p_z": 0.0007071067811865475,
-          "logical_error_rate": 0.03901,
-          "avg_syndrome_weight": 1.54009,
-          "click_rate": 0.34402
+          "logical_error_rate": 0.04355,
+          "avg_syndrome_weight": 1.71663,
+          "click_rate": 0.34378
         },
         {
           "p_x": 0.0,
           "p_z": 0.049999999999999996,
-          "logical_error_rate": 0.50091,
-          "avg_syndrome_weight": 65.84228,
-          "click_rate": 1.0
-        }
-      ]
-    },
-    {
-      "distance": 9,
-      "points": [
-        {
-          "p_x": 0.0,
-          "p_z": 1e-05,
-          "logical_error_rate": 0.00098,
-          "avg_syndrome_weight": 0.05447,
-          "click_rate": 0.01339
-        },
-        {
-          "p_x": 0.0,
-          "p_z": 0.0007071067811865475,
-          "logical_error_rate": 0.0597,
-          "avg_syndrome_weight": 3.61018,
-          "click_rate": 0.60432
-        },
-        {
-          "p_x": 0.0,
-          "p_z": 0.049999999999999996,
-          "logical_error_rate": 0.50109,
-          "avg_syndrome_weight": 144.457,
+          "logical_error_rate": 0.49835,
+          "avg_syndrome_weight": 71.10397,
           "click_rate": 1.0
         }
       ]

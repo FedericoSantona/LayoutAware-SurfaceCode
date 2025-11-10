@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         default="standard",
         help="Type of surface code to use (default: standard)",
     )
+    parser.add_argument(
+        "--enable-boundary-anchors",
+        type=lambda x: str(x).lower() in ("true", "1", "yes", "on"),
+        default=False,
+        help="Enable boundary anchor augmentation in DEM (default: True)",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +187,7 @@ def main() -> None:
             progress=update_progress if progress_bar is not None else None,
             p_meas_override=args.p_meas,
             p_meas_scale=args.p_meas_scale,
+            enable_boundary_anchors=args.enable_boundary_anchors,
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)

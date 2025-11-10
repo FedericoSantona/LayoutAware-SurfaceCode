@@ -110,6 +110,7 @@ def run_logical_error_rate(
     distance: int,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
+    enable_boundary_anchors: bool = True,
 ) -> SimulationResult:
     """Run logical error rate simulation for a single-patch code model.
     
@@ -172,7 +173,7 @@ def run_logical_error_rate(
                 f"for proper logical error tracking in memory experiments."
             )
     
-    return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
+    return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata, enable_boundary_anchors=enable_boundary_anchors)
 
 
 def _run_circuit_logical_error_rate(
@@ -181,6 +182,7 @@ def _run_circuit_logical_error_rate(
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
     metadata: Optional[dict] = None,
+    enable_boundary_anchors: bool = True,
 ) -> SimulationResult:
     if metadata is None:
         metadata = {}
@@ -209,8 +211,13 @@ def _run_circuit_logical_error_rate(
     ]
     phys_floor = max([r for r in phys_rates if isinstance(r, (int, float))], default=0.0)
     hook_probability = max(anchor_epsilon, phys_floor, 1e-6)
-    if anchor_ids:
+    if anchor_ids and enable_boundary_anchors:
+        print(f"[BOUNDARY-ANCHORS] Using {len(anchor_ids)} boundary anchors from metadata (epsilon={hook_probability:.3e})")
         dem = augment_dem_with_boundary_anchors(dem, list(anchor_ids), hook_probability)
+    elif anchor_ids and not enable_boundary_anchors:
+        print(f"[BOUNDARY-ANCHORS] Boundary anchors disabled: skipping {len(anchor_ids)} anchors from metadata")
+    elif not anchor_ids:
+        print(f"[BOUNDARY-ANCHORS] No boundary anchors found in metadata")
     # Ensure each connected component has a boundary hook for pairwise matching.
     dem, auto_added_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
     metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(single_detector_hook_ids(dem))
@@ -401,6 +408,7 @@ def run_scenario(
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
     p_meas_override: float | None = None,
     p_meas_scale: float = 1.0,
+    enable_boundary_anchors: bool = True,
 ) -> ThresholdScenarioResult:
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
@@ -436,6 +444,7 @@ def run_scenario(
                 distance,
                 stim_cfg,
                 MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
+                enable_boundary_anchors=enable_boundary_anchors,
             )
 
             points.append(

@@ -256,6 +256,7 @@ def _harden_and_decode_dem(
     shots: int,
     seed: int,
     verbose: bool = False,
+    enable_boundary_anchors: bool = True,
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
     dem_debug = verbose or env_dem_debug_enabled()
@@ -483,6 +484,15 @@ def _harden_and_decode_dem(
     update_tag_stats_with_presence(metadata, pm_nodes)
 
     anchor_ids = sorted(set(int(x) for x in anchor_ids if 0 <= int(x) < dem.num_detectors))
+    
+    # Conditionally augment DEM with boundary anchors from metadata
+    if anchor_ids and enable_boundary_anchors:
+        print(f"[BOUNDARY-ANCHORS] Using {len(anchor_ids)} boundary anchors from metadata (epsilon={hook_probability:.3e})")
+        dem = augment_dem_with_boundary_anchors(dem, anchor_ids, hook_probability)
+    elif anchor_ids and not enable_boundary_anchors:
+        print(f"[BOUNDARY-ANCHORS] Boundary anchors disabled: skipping {len(anchor_ids)} anchors from metadata")
+    elif not anchor_ids:
+        print(f"[BOUNDARY-ANCHORS] No boundary anchors found in metadata")
     if verbose:
         print(f"[DEM-CHECK] eligible boundary anchors={len(anchor_ids)} sample={anchor_ids[:16]}")
 
@@ -1039,6 +1049,7 @@ def run_logical_simulation(
     bracket_basis: str,
     corr_pairs: Optional[str] = None,
     verbose: bool = False,
+    enable_boundary_anchors: bool = True,
 ) -> SimulationResults:
     """Run full logical simulation with DEM decoding, Pauli frame tracking, and measurement extraction.
     
@@ -1063,7 +1074,7 @@ def run_logical_simulation(
     if verbose:
         metadata["_debug_verbose"] = True
     dem, det_samp, obs_u8, preds = _harden_and_decode_dem(
-        dem, metadata, observable_pairs, shots, seed, verbose
+        dem, metadata, observable_pairs, shots, seed, verbose, enable_boundary_anchors=enable_boundary_anchors
     )
     
     # Step 2: Track Pauli frame and extract CNOT byproducts

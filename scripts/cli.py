@@ -138,7 +138,7 @@ Examples:
     main_group = parser.add_argument_group("Main execution flags")
     main_group.add_argument(
         "--benchmark",
-        default="bell", #simple_1q_xzh
+        default="parity_check", #simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -229,13 +229,13 @@ Examples:
     sim_group.add_argument(
         "--px",
         type=float,
-        default=2e-4,
+        default=1e-3,
         help="Phenomenological X error probability"
     )
     sim_group.add_argument(
         "--pz",
         type=float,
-        default=1e-4,
+        default=1e-3,
         help="Phenomenological Z error probability"
     )
     sim_group.add_argument(
@@ -294,12 +294,6 @@ Examples:
         type=str,
         default=None,
         help="Custom correlation pairs in format 'q0,q1;q2,q3' for two-qubit correlation analysis.",
-    )
-    sim_group.add_argument(
-        "--enable-boundary-anchors",
-        type=_str2bool,
-        default=True,
-        help="Enable boundary anchor augmentation in DEM (default: True)",
     )
     
     # Output options

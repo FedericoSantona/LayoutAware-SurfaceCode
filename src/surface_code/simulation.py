@@ -1,7 +1,7 @@
 """Simulation execution for surface code logical circuits.
 
 This module handles the full simulation pipeline:
-- DEM hardening and MWPM decoding
+- MWPM decoding
 - Pauli frame tracking and CNOT byproduct extraction
 - Observable correction
 - Measurement extraction (demos, snapshots)
@@ -23,8 +23,6 @@ from qiskit import QuantumCircuit
 
 from .dem_diagnostics import log_dem_diagnostics, env_dem_debug_enabled
 from .dem_utils import (
-    augment_dem_with_boundary_anchors,
-    anchor_pm_isolates,
     report_boundaryless_components,
     scan_boundaryless_odd_shot,
     pm_find_offending_shot,
@@ -32,7 +30,6 @@ from .dem_utils import (
     log_hook_summary,
     scan_infeasible_shot,
     collect_detectors_in_errors,
-    prune_dem_to_live_detectors,
     update_tag_stats_with_presence,
 )
 from .pauli import PauliTracker, sequence_from_qc
@@ -249,28 +246,27 @@ class SimulationResults:
     per_qubit_ler_ci: List[Tuple[float, float]]
 
 
-def _harden_and_decode_dem(
+def _decode_dem(
     dem: stim.DetectorErrorModel,
     metadata: Dict[str, Any],
     observable_pairs: Sequence[Tuple[int, int]],
     shots: int,
     seed: int,
     verbose: bool = False,
-    enable_boundary_anchors: bool = True,
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
-    """Harden DEM and decode using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
+    """Decode DEM using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
     dem_debug = verbose or env_dem_debug_enabled()
-    log_dem_diagnostics("pre-prune", dem, metadata, enabled=dem_debug)
+    log_dem_diagnostics("pre", dem, metadata, enabled=dem_debug)
 
-    # Snapshot original DEM to measure how many single-detector hooks get added
+    # Snapshot original DEM for diagnostics
     if verbose:
         try:
             obs_support = _debug_obs_support(dem)
-            print(f"[OBS-SUPPORT] per-observable error terms (pre-pruning): {obs_support}")
+            print(f"[OBS-SUPPORT] per-observable error terms: {obs_support}")
             if sum(obs_support) > 0:
                 samples = _debug_iter_observable_error_terms(dem, limit=6)
                 if samples:
-                    print("[OBS-SUPPORT] sample ERROR lines carrying observables (pre-pruning):")
+                    print("[OBS-SUPPORT] sample ERROR lines carrying observables:")
                     for s in samples:
                         print("  ", s)
             try:
@@ -281,176 +277,8 @@ def _harden_and_decode_dem(
             except Exception:
                 pass
         except Exception as _exc:
-            print(f"[OBS-SUPPORT] scan failed (pre-pruning): {_exc}")
+            print(f"[OBS-SUPPORT] scan failed: {_exc}")
 
-    dem, _ = prune_dem_to_live_detectors(dem, metadata)
-    log_dem_diagnostics("post-prune", dem, metadata, enabled=dem_debug)
-    if verbose:
-        with open("/tmp/dem_after_prune.dem", "w") as f:
-            f.write(str(dem))
-
-    # ------------------------------------------------------------------
-    # Inject missing space-edges between temporal chains when absent.
-    # This uses stabilizer row support to connect rows that share a data
-    # qubit, pairing detectors across rows by temporal index.
-    #  - For Z-temporal chains (detecting X faults), use p_x_error.
-    #  - For X-temporal chains (detecting Z faults), use p_z_error.
-    # The augmentation is conservative: it only adds a 2-detector ERROR
-    # when that pair is not already present in the DEM.
-    # ------------------------------------------------------------------
-    try:
-        ctx_raw = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
-        ctx_map = {}
-        for k, v in ctx_raw.items():
-            try:
-                ctx_map[int(k)] = dict(v)
-            except Exception:
-                ctx_map[k] = dict(v)
-        if verbose:
-            print(f"[DEM-CHECK] detector_context entries={len(ctx_map)} sample={list(ctx_map.items())[:5]}")
-        stab_support = (metadata.get("stab_support", {}) or {})
-        noise_meta = (metadata.get("noise_model", {}) or {})
-        p_x = float(noise_meta.get("p_x_error", 0.0) or 0.0)
-        p_z = float(noise_meta.get("p_z_error", 0.0) or 0.0)
-
-
-        def _group_temporal_detectors(tag_prefix: str) -> Dict[Tuple[str, int], List[int]]:
-            # Returns {(patch,row): [det_ids in ascending order]}
-            grouped: Dict[Tuple[str, int], List[int]] = {}
-            for det_id_str, info in ctx_map.items():
-                try:
-                    det_id = int(det_id_str)
-                except Exception:
-                    # keys may already be int
-                    det_id = int(det_id_str) if not isinstance(det_id_str, int) else int(det_id_str)
-                tag = (info or {}).get("tag")
-                if not isinstance(tag, str) or not tag.startswith(tag_prefix):
-                    continue
-                ctx = (info or {}).get("context", {}) or {}
-                patch = ctx.get("patch")
-                row = ctx.get("row")
-                if not isinstance(patch, str) or not isinstance(row, int):
-                    continue
-                grouped.setdefault((patch, int(row)), []).append(det_id)
-            for k in list(grouped.keys()):
-                grouped[k] = sorted(grouped[k])
-            return grouped
-
-        z_temporal = _group_temporal_detectors("z_temporal")
-        x_temporal = _group_temporal_detectors("x_temporal")
-
-        dem_text = str(dem)
-        # Existing 2-detector pairs
-        import re as _re
-        _D = _re.compile(r"\bD(\d+)\b")
-        existing_pairs: set[tuple[int, int]] = set()
-        # Raw cross-row pairs per tag (by (patch,row) using context)
-        raw_cross_pairs: Dict[str, set[Tuple[str, int, int]]] = {"z_temporal": set(), "x_temporal": set()}
-        for line in dem_text.splitlines():
-            stripped = line.strip()
-            if not stripped.lower().startswith("error("):
-                continue
-            ids = [int(m.group(1)) for m in _D.finditer(stripped)]
-            if len(ids) >= 2:
-                for i in range(len(ids)):
-                    for j in range(i + 1, len(ids)):
-                        a, b = sorted((ids[i], ids[j]))
-                        existing_pairs.add((a, b))
-                        # Try to classify by tag+row from ctx_map
-                        info_a = ctx_map.get(a) or ctx_map.get(str(a)) or {}
-                        info_b = ctx_map.get(b) or ctx_map.get(str(b)) or {}
-                        tag_a = info_a.get("tag"); tag_b = info_b.get("tag")
-                        if tag_a == tag_b and tag_a in ("z_temporal", "x_temporal"):
-                            ca = (info_a.get("context", {}) or {})
-                            cb = (info_b.get("context", {}) or {})
-                            pa, ra = ca.get("patch"), ca.get("row")
-                            pb, rb = cb.get("patch"), cb.get("row")
-                            if isinstance(pa, str) and pa == pb and isinstance(ra, numbers.Integral) and isinstance(rb, numbers.Integral) and ra != rb:
-                                r1, r2 = (ra, rb) if ra < rb else (rb, ra)
-                                pair = (pa, int(r1), int(r2))
-                                if verbose and pair not in raw_cross_pairs[str(tag_a)]:
-                                    print(f"[DEM-CHECK] found raw pair {tag_a} {pair}")
-                                raw_cross_pairs[str(tag_a)].add(pair)
-
-        def _row_support(basis: str, patch: str, row: int) -> set[int]:
-            try:
-                return set(stab_support.get(basis, {}).get(patch, {}).get(int(row), []) or [])
-            except Exception:
-                return set()
-
-        new_lines: List[str] = []
-
-        # Helper: add zipped pairs between two temporal chains for given p
-        def _add_pairs(
-            chains: Dict[Tuple[str, int], List[int]],
-            basis: str,
-            p_edge: float,
-            limit_pairs: Optional[set[Tuple[str, int, int]]] = None,
-        ) -> None:
-            if p_edge <= 0.0 or not chains:
-                return
-            max_shared_support = 2  # heuristically, adjacent checks share ≤2 data qubits
-            # Build adjacency from shared data-qubit support
-            patches = sorted({patch for (patch, _row) in chains.keys()})
-            for patch in patches:
-                # Collect rows for this patch
-                rows = sorted({row for (p, row) in chains.keys() if p == patch})
-                # Precompute supports
-                supports = {row: _row_support(basis, patch, row) for row in rows}
-                # For each unordered pair of rows that share a data qubit, add edges
-                n = len(rows)
-                for i in range(n):
-                    for j in range(i + 1, n):
-                        r1, r2 = rows[i], rows[j]
-                        shared = supports[r1] & supports[r2]
-                        if (
-                            not supports[r1]
-                            or not supports[r2]
-                            or not shared
-                            or len(shared) > max_shared_support
-                        ):
-                            continue
-                        if limit_pairs is not None and (patch, r1, r2) not in limit_pairs:
-                            continue
-                        seq1 = chains.get((patch, r1), [])
-                        seq2 = chains.get((patch, r2), [])
-                        if not seq1 or not seq2:
-                            continue
-                        # Zip by index to align by round ordering
-                        L = min(len(seq1), len(seq2))
-                        for k in range(L):
-                            a, b = sorted((int(seq1[k]), int(seq2[k])))
-                            if (a, b) in existing_pairs:
-                                continue
-                            new_lines.append(f"error({p_edge}) D{a} D{b}")
-                            existing_pairs.add((a, b))
-
-        if verbose:
-            print(f"[DEM-CHECK] raw cross-row pairs: {raw_cross_pairs}")
-        z_limit = raw_cross_pairs.get("z_temporal") or set()
-        x_limit = raw_cross_pairs.get("x_temporal") or set()
-
-        # Always top up space-like edges based on stabilizer support. Raw cross-row
-        # pairs only tell us that *some* correlated terms exist; they don't certify
-        # that every adjacency was emitted. Without these supplemental edges the
-        # DEM collapses to independent repetition chains, so we inject edges for
-        # every supported pair (optionally mirroring the other basis when present).
-        if p_x > 0.0:
-            z_pairs_limit = {(p, r1, r2) for (p, r1, r2) in x_limit} if x_limit else None
-            _add_pairs(z_temporal, "Z", p_x, limit_pairs=z_pairs_limit)
-
-        if p_z > 0.0:
-            x_pairs_limit = {(p, r1, r2) for (p, r1, r2) in z_limit} if z_limit else None
-            _add_pairs(x_temporal, "X", p_z, limit_pairs=x_pairs_limit)
-
-        if new_lines:
-            dem_text_aug = dem_text + "\n" + "\n".join(new_lines)
-            dem = stim.DetectorErrorModel(dem_text_aug)
-            if verbose:
-                print(f"[DEM-CHECK] injected space edges: {len(new_lines)}")
-    except Exception as _exc:
-        if verbose:
-            print(f"[DEM-CHECK] space-edge augmentation skipped due to error: {_exc}")
     dem_orig = dem
     if verbose:
         try:
@@ -459,42 +287,8 @@ def _harden_and_decode_dem(
         except Exception as _exc:
             print(f"[DEM-HOOKS] initial hook scan failed: {_exc}")
 
-    # Add boundary anchors from builder metadata (if any)
-    noise_meta = (metadata.get("noise_model", {}) or {})
-    phys_rates = [
-        float(noise_meta.get("p_x_error", 0.0) or 0.0),
-        float(noise_meta.get("p_z_error", 0.0) or 0.0),
-        float(noise_meta.get("p_meas", 0.0) or 0.0),
-    ]
-    phys_floor = max(phys_rates) if phys_rates else 0.0
-
-    try:
-        ba = (metadata.get("boundary_anchors", {}) or {})
-        anchor_ids = list(ba.get("detector_ids", []) or [])
-        anchor_eps = float(ba.get("epsilon", 1e-12))
-    except Exception:
-        anchor_ids = []
-        anchor_eps = 1e-12
-    # Boundary hook edges must be much weaker than physical data errors.
-    # Clamp to a tiny range to avoid the matcher preferring hooks over real edges.
-    hook_probability = min(max(anchor_eps, 1e-12), 1e-6)
-
     pm_nodes = collect_detectors_in_errors(dem)
-    fallback_added = 0
     update_tag_stats_with_presence(metadata, pm_nodes)
-
-    anchor_ids = sorted(set(int(x) for x in anchor_ids if 0 <= int(x) < dem.num_detectors))
-    
-    # Conditionally augment DEM with boundary anchors from metadata
-    if anchor_ids and enable_boundary_anchors:
-        print(f"[BOUNDARY-ANCHORS] Using {len(anchor_ids)} boundary anchors from metadata (epsilon={hook_probability:.3e})")
-        dem = augment_dem_with_boundary_anchors(dem, anchor_ids, hook_probability)
-    elif anchor_ids and not enable_boundary_anchors:
-        print(f"[BOUNDARY-ANCHORS] Boundary anchors disabled: skipping {len(anchor_ids)} anchors from metadata")
-    elif not anchor_ids:
-        print(f"[BOUNDARY-ANCHORS] No boundary anchors found in metadata")
-    if verbose:
-        print(f"[DEM-CHECK] eligible boundary anchors={len(anchor_ids)} sample={anchor_ids[:16]}")
 
     if verbose:
         try:
@@ -526,7 +320,7 @@ def _harden_and_decode_dem(
     hist_preview = {k: size_counter[k] for k in list(size_counter.keys())[:8]}
     ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
     if verbose:
-        print(f"[DEM-CHECK] component histogram (pre-anchor): {hist_preview}")
+        print(f"[DEM-CHECK] component histogram: {hist_preview}")
         if boundaryless_components:
             sample = []
             for comp in boundaryless_components[:16]:
@@ -535,22 +329,19 @@ def _harden_and_decode_dem(
                 sample.append((rep, info.get("tag"), info.get("context")))
             print(f"[DEM-CHECK] boundaryless components (sample): {sample}")
 
-    # Do not eagerly anchor boundaryless components; handle them on-demand.
-    targeted_hooks: List[int] = []
-
-    # Post-pruning observable support snapshot (for debugging)
+    # Observable support snapshot (for debugging)
     if verbose:
         try:
             obs_support_post = _debug_obs_support(dem)
-            print(f"[OBS-SUPPORT] per-observable error terms (post-pruning): {obs_support_post}")
+            print(f"[OBS-SUPPORT] per-observable error terms: {obs_support_post}")
             if sum(obs_support_post) > 0:
                 samples = _debug_iter_observable_error_terms(dem, limit=6)
                 if samples:
-                    print("[OBS-SUPPORT] sample ERROR lines carrying observables (post-pruning):")
+                    print("[OBS-SUPPORT] sample ERROR lines carrying observables:")
                     for s in samples:
                         print("  ", s)
             else:
-                print("[OBS-SUPPORT] no ERROR terms carry any observables (post-pruning).")
+                print("[OBS-SUPPORT] no ERROR terms carry any observables.")
             try:
                 txt = str(dem)
                 c0 = txt.count(" L0")
@@ -559,32 +350,17 @@ def _harden_and_decode_dem(
             except Exception:
                 pass
         except Exception as _exc:
-            print(f"[OBS-SUPPORT] scan failed (post-pruning): {_exc}")
+            print(f"[OBS-SUPPORT] scan failed: {_exc}")
 
     actual_hooks = single_detector_hook_ids(dem)
     metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(actual_hooks)
-    log_dem_diagnostics("post-hooks", dem, metadata, enabled=dem_debug)
+    log_dem_diagnostics("post", dem, metadata, enabled=dem_debug)
 
     pm_nodes = collect_detectors_in_errors(dem)
 
     dem_sampler = dem.compile_sampler(seed=seed)
     det_samp, obs_samp, _ = dem_sampler.sample(shots)
     obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((shots, len(observable_pairs)), dtype=np.uint8)
-
-    # Before decoding, proactively check feasibility of the sampled syndromes.
-    # If any boundaryless component has odd parity in the sample set, add a
-    # single tiny-probability hook to that component and rebuild the matcher.
-    try:
-        expl = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
-        if expl is not None:
-            dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
-            if verbose:
-                print(f"[PM-CHECK] on-demand anchors added: {iso_added_retry}")
-            # Update metadata hooks for reporting
-            after_hooks = single_detector_hook_ids(dem)
-            metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(after_hooks)
-    except Exception:
-        pass
 
     try:
         if verbose:
@@ -631,96 +407,62 @@ def _harden_and_decode_dem(
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
         preds = matcher.decode_batch(det_samp.astype(bool))
-        if verbose:
-            print(f"[PM-CHECK] fallback anchors added: {fallback_added}")
     except Exception as exc_mwpm:
         if verbose:
-            print("[DECODE] Pairwise MWPM failed; hardening DEM and retrying once:", repr(exc_mwpm))
-        # Pinpoint first infeasible shot/component before retrying
-        if verbose:
-            try:
-                expl = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
-                if expl:
-                    print(f"[FEASIBILITY] first infeasible shot={expl['shot']} comp={expl['component_index']} "
-                          f"size={expl['component_size']} boundaries={expl['boundary_count']} "
-                          f"firing_in_comp={expl['total_firing_in_comp']} sample={expl['firing_nodes'][:12]}")
-                else:
-                    print("[FEASIBILITY] no infeasible shot found within scan window; failure cause may be non-parity related.")
-            except Exception as _exc:
-                print(f"[FEASIBILITY] scan failed: {_exc}")
-        try:
-            matcher = pm.Matching.from_detector_error_model(dem)
-            dem, matcher, iso_added_retry, iso_ids_retry = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
-            fallback_added = iso_added_retry
-            if verbose and iso_added_retry:
-                ctx_map = (metadata.get("mwpm_debug", {}) or {}).get("detector_context", {}) or {}
-                ctx_sample = {det_id: ctx_map.get(int(det_id)) for det_id in iso_ids_retry[:12]}
-                print(f"[DECODE] guarded fallback anchors added: {iso_added_retry} (sample {iso_ids_retry[:12]}) ctx={ctx_sample}")
-            preds = matcher.decode_batch(det_samp.astype(bool))
-        except Exception as exc_retry:
-            # Keep existing diagnostics only if decoding still fails after retry
-            print("\n[ERROR] MWPM decode failed; printing mwpm_debug summary:")
-            dbg = metadata.get("mwpm_debug", {}) or {}
-            seam_wraps = dbg.get("seam_wrap_counts", {})
-            row_wraps = dbg.get("row_wraps", {})
-            deg_viol = dbg.get("degree_violations", [])
-            odd_details = dbg.get("odd_degree_details", {}) or {}
-            edge_records_count = dbg.get("edge_records_count", 0)
-            print("[DEBUG] seam wraps:")
-            for k, v in seam_wraps.items():
-                print(f"  {k} -> {v}")
-            print("[DEBUG] Z row wraps:")
-            for q, rows in (row_wraps.get("Z", {}) or {}).items():
-                print(f"  {q}: {rows}")
-            print("[DEBUG] X row wraps:")
-            for q, rows in (row_wraps.get("X", {}) or {}).items():
-                print(f"  {q}: {rows}")
-            print(f"[DEBUG] degree violations (abs meas idx with degree!=2): {deg_viol[:200]}")
-            if deg_viol:
-                tag_counter = Counter()
-                for idx in deg_viol[:200]:
-                    for rec in odd_details.get(idx, [])[:8]:
-                        tag_counter.update([str(rec.get('tag'))])
-                print(f"[DEBUG] odd-degree provenance tags (top): {tag_counter.most_common(12)}")
-                shown = 0
-                for idx in deg_viol[:50]:
-                    recs = odd_details.get(idx, [])
-                    if not recs:
-                        continue
-                    print(f"  [ODD] idx={idx}, examples:")
-                    for rec in recs[:3]:
-                        print(f"    tag={rec.get('tag')}, neighbor={rec.get('neighbor')}, ctx={rec.get('context')}")
-                    shown += 1
-                    if shown >= 6:
-                        break
-                print(f"[DEBUG] total edge records captured: {edge_records_count}")
+            print("[DECODE] Pairwise MWPM failed:", repr(exc_mwpm))
+        print("\n[ERROR] MWPM decode failed; printing mwpm_debug summary:")
+        dbg = metadata.get("mwpm_debug", {}) or {}
+        seam_wraps = dbg.get("seam_wrap_counts", {})
+        row_wraps = dbg.get("row_wraps", {})
+        deg_viol = dbg.get("degree_violations", [])
+        odd_details = dbg.get("odd_degree_details", {}) or {}
+        edge_records_count = dbg.get("edge_records_count", 0)
+        print("[DEBUG] seam wraps:")
+        for k, v in seam_wraps.items():
+            print(f"  {k} -> {v}")
+        print("[DEBUG] Z row wraps:")
+        for q, rows in (row_wraps.get("Z", {}) or {}).items():
+            print(f"  {q}: {rows}")
+        print("[DEBUG] X row wraps:")
+        for q, rows in (row_wraps.get("X", {}) or {}).items():
+            print(f"  {q}: {rows}")
+        print(f"[DEBUG] degree violations (abs meas idx with degree!=2): {deg_viol[:200]}")
+        if deg_viol:
+            tag_counter = Counter()
+            for idx in deg_viol[:200]:
+                for rec in odd_details.get(idx, [])[:8]:
+                    tag_counter.update([str(rec.get('tag'))])
+            print(f"[DEBUG] odd-degree provenance tags (top): {tag_counter.most_common(12)}")
+            shown = 0
+            for idx in deg_viol[:50]:
+                recs = odd_details.get(idx, [])
+                if not recs:
+                    continue
+                print(f"  [ODD] idx={idx}, examples:")
+                for rec in recs[:3]:
+                    print(f"    tag={rec.get('tag')}, neighbor={rec.get('neighbor')}, ctx={rec.get('context')}")
+                shown += 1
+                if shown >= 6:
+                    break
+            print(f"[DEBUG] total edge records captured: {edge_records_count}")
 
-            # DEM component-level diagnostics and odd-parity boundaryless scan
-            try:
-                print("\n[DEM-CHECK] analyzing DEM components & boundaries...")
-                report_boundaryless_components(dem)
-                scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, shots))
-            except Exception as _exc:
-                print(f"[DEM-CHECK] diagnostics failed: {_exc}")
-            # PyMatching graph-level parity check on the actual matching graph
-            try:
-                if 'matcher' in locals():
-                    print("\n[PM-CHECK] analyzing PyMatching graph components & boundaries...")
-                    pm_find_offending_shot(matcher, det_samp, max_scan=min(2048, shots))
-                else:
-                    print("[PM-CHECK] matcher unavailable; skipping")
-            except Exception as _exc3:
-                print(f"[PM-CHECK] diagnostics failed: {_exc3}")
-            # Final explicit feasibility scan after retry hardening
-            try:
-                expl2 = scan_infeasible_shot(dem, det_samp, max_scan=min(4096, shots))
-                if expl2:
-                    print(f"[FEASIBILITY:post-retry] shot={expl2['shot']} comp={expl2['component_index']} "
-                          f"size={expl2['component_size']} boundaries={expl2['boundary_count']} "
-                          f"firing_in_comp={expl2['total_firing_in_comp']} sample={expl2['firing_nodes'][:12]}")
-            except Exception as _exc:
-                print(f"[FEASIBILITY:post-retry] scan failed: {_exc}")
-            raise
+        # DEM component-level diagnostics and odd-parity boundaryless scan
+        try:
+            print("\n[DEM-CHECK] analyzing DEM components & boundaries...")
+            report_boundaryless_components(dem)
+            scan_boundaryless_odd_shot(dem, det_samp, max_scan=min(2048, shots))
+        except Exception as _exc:
+            print(f"[DEM-CHECK] diagnostics failed: {_exc}")
+        # PyMatching graph-level parity check on the actual matching graph
+        try:
+            if 'matcher' in locals():
+                print("\n[PM-CHECK] analyzing PyMatching graph components & boundaries...")
+                pm_find_offending_shot(matcher, det_samp, max_scan=min(2048, shots))
+            else:
+                print("[PM-CHECK] matcher unavailable; skipping")
+        except Exception as _exc3:
+            print(f"[PM-CHECK] diagnostics failed: {_exc3}")
+        raise exc_mwpm
     
     preds = np.asarray(preds, dtype=np.uint8)
     if preds.ndim == 1:
@@ -1049,7 +791,6 @@ def run_logical_simulation(
     bracket_basis: str,
     corr_pairs: Optional[str] = None,
     verbose: bool = False,
-    enable_boundary_anchors: bool = True,
 ) -> SimulationResults:
     """Run full logical simulation with DEM decoding, Pauli frame tracking, and measurement extraction.
     
@@ -1070,12 +811,14 @@ def run_logical_simulation(
     Returns:
         SimulationResults containing all simulation outputs
     """
-    # Step 1: Harden DEM and decode
+    # Step 1: Decode DEM
     if verbose:
         metadata["_debug_verbose"] = True
-    dem, det_samp, obs_u8, preds = _harden_and_decode_dem(
-        dem, metadata, observable_pairs, shots, seed, verbose, enable_boundary_anchors=enable_boundary_anchors
+
+    dem, det_samp, obs_u8, preds = _decode_dem(
+        dem, metadata, observable_pairs, shots, seed, verbose
     )
+    
     
     # Step 2: Track Pauli frame and extract CNOT byproducts
     pauli_tracker, cnot_metadata, m_samples = _track_pauli_frame(

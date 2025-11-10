@@ -16,72 +16,11 @@ from surface_code import (
 )
 from surface_code.dem_diagnostics import log_dem_diagnostics, env_dem_debug_enabled
 from surface_code.dem_utils import (
-    augment_dem_with_boundary_anchors,
-    harden_dem_for_pairwise_matching,
-    anchor_pm_isolates,
     single_detector_hook_ids,
     circuit_to_graphlike_dem,
 )
 from surface_code.pauli import parse_init_label
 from surface_code.memory_layout import build_memory_layout
-
-
-def _memory_measure_flags(stim_config: PhenomenologicalStimConfig) -> Tuple[bool, bool]:
-    family = (stim_config.family or "").upper()
-    if family == "Z":
-        return True, False
-    if family == "X":
-        return False, True
-    return True, True
-
-
-def _build_surgery_memory_layout(
-    model,
-    distance: int,
-    stim_config: PhenomenologicalStimConfig,
-) -> Tuple[Layout, List[object], Dict[str, str]]:
-    measure_z, measure_x = _memory_measure_flags(stim_config)
-
-    base_patch = PatchObject.from_code_model(model, name="q0")
-    coords = list(base_patch.coords.values())
-    if coords:
-        xs = [x for x, _ in coords]
-        patch_width = (max(xs) - min(xs)) if xs else 0.0
-    else:
-        patch_width = 0.0
-    h_spacing = patch_width + 2.0
-    ancilla_patch = base_patch.with_offset(0, h_spacing, 0.0)
-
-    layout = Layout()
-    layout.add_patch("q0", base_patch)
-    layout.add_patch("ancilla_0", ancilla_patch)
-
-    seam_pairs = [(i, i) for i in range(min(distance, base_patch.n))]
-    layout.register_seam("rough", "q0", "ancilla_0", seam_pairs)
-    layout.register_seam("smooth", "ancilla_0", "q0", seam_pairs)
-
-    ops: List[object] = []
-    ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
-
-    rounds = max(1, int(stim_config.rounds or distance))
-    merge_rounds = max(1, int(distance))
-    for _ in range(rounds):
-        ops.append(Merge("rough", "q0", "ancilla_0", rounds=merge_rounds))
-        for _ in range(merge_rounds):
-            ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
-        ops.append(Split("rough", "q0", "ancilla_0"))
-        ops.append(ResetPatch("ancilla_0", basis="X"))
-        ops.append(Merge("smooth", "ancilla_0", "q0", rounds=merge_rounds))
-        for _ in range(merge_rounds):
-            ops.append(MeasureRound(measure_z=measure_z, measure_x=measure_x))
-        ops.append(Split("smooth", "ancilla_0", "q0"))
-
-    basis = (stim_config.bracket_basis or "Z").strip().upper()
-    if basis not in {"X", "Z"}:
-        raise ValueError(f"Unsupported bracket basis '{stim_config.bracket_basis}'")
-    bracket_map = {"q0": basis}
-
-    return layout, ops, bracket_map
 
 
 @dataclass
@@ -110,7 +49,6 @@ def run_logical_error_rate(
     distance: int,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
-    enable_boundary_anchors: bool = True,
 ) -> SimulationResult:
     """Run logical error rate simulation for a single-patch code model.
     
@@ -173,7 +111,7 @@ def run_logical_error_rate(
                 f"for proper logical error tracking in memory experiments."
             )
     
-    return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata, enable_boundary_anchors=enable_boundary_anchors)
+    return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
 
 
 def _run_circuit_logical_error_rate(
@@ -182,7 +120,6 @@ def _run_circuit_logical_error_rate(
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
     metadata: Optional[dict] = None,
-    enable_boundary_anchors: bool = True,
 ) -> SimulationResult:
     if metadata is None:
         metadata = {}
@@ -190,38 +127,8 @@ def _run_circuit_logical_error_rate(
     dem_debug = env_dem_debug_enabled()
     log_dem_diagnostics("memory-pre", dem, metadata, enabled=dem_debug)
 
-    # Prefer physically-motivated boundary anchoring prior to constructing the matcher.
-    boundary_meta = metadata.get("boundary_anchors") if isinstance(metadata, dict) else None
-    anchor_ids: Sequence[int] = ()
-    anchor_epsilon = 1e-12
-    if isinstance(boundary_meta, dict):
-        ids = boundary_meta.get("detector_ids", [])
-        if isinstance(ids, (list, tuple)):
-            anchor_ids = [int(k) for k in ids if isinstance(k, int) and k >= 0]
-        eps = boundary_meta.get("epsilon", anchor_epsilon)
-        try:
-            anchor_epsilon = float(eps)
-        except (TypeError, ValueError):
-            anchor_epsilon = 1e-12
-    # Use the dominant physical error rate as reference for synthetic boundary weights.
-    phys_rates = [
-        getattr(stim_config, "p_x_error", 0.0) or 0.0,
-        getattr(stim_config, "p_z_error", 0.0) or 0.0,
-        getattr(stim_config, "p_meas", 0.0) or 0.0,
-    ]
-    phys_floor = max([r for r in phys_rates if isinstance(r, (int, float))], default=0.0)
-    hook_probability = max(anchor_epsilon, phys_floor, 1e-6)
-    if anchor_ids and enable_boundary_anchors:
-        print(f"[BOUNDARY-ANCHORS] Using {len(anchor_ids)} boundary anchors from metadata (epsilon={hook_probability:.3e})")
-        dem = augment_dem_with_boundary_anchors(dem, list(anchor_ids), hook_probability)
-    elif anchor_ids and not enable_boundary_anchors:
-        print(f"[BOUNDARY-ANCHORS] Boundary anchors disabled: skipping {len(anchor_ids)} anchors from metadata")
-    elif not anchor_ids:
-        print(f"[BOUNDARY-ANCHORS] No boundary anchors found in metadata")
-    # Ensure each connected component has a boundary hook for pairwise matching.
-    dem, auto_added_hooks = harden_dem_for_pairwise_matching(dem, epsilon=hook_probability)
     metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(single_detector_hook_ids(dem))
-    log_dem_diagnostics("memory-post-harden", dem, metadata, enabled=dem_debug)
+    log_dem_diagnostics("memory-post", dem, metadata, enabled=dem_debug)
 
     # Build matcher on the raw DEM first. On well-formed memory experiments
     # (closed space-time cycles), components naturally have even parity and
@@ -250,21 +157,8 @@ def _run_circuit_logical_error_rate(
             f"and sampled observables ({logical_array.shape[1]})"
         )
 
-    # Decode, with a defensive fallback that anchors boundaryless components
-    try:
-        predictions = matcher.decode_batch(detector_samples_bool)
-    except ValueError:
-        # If PyMatching reports an odd parity in a component without a boundary,
-        # add infinitesimal boundary hooks only as a last resort and retry.
-        dem2, matcher2, added, _ = anchor_pm_isolates(dem, matcher, epsilon=hook_probability)
-        if added <= 0:
-            # Re-raise the original error if we couldn't patch the graph
-            raise
-        dem = dem2
-        matcher = matcher2
-        metadata.setdefault("boundary_anchors", {})["detector_ids"] = list(single_detector_hook_ids(dem))
-        log_dem_diagnostics("memory-post-anchor", dem, metadata, enabled=dem_debug)
-        predictions = matcher.decode_batch(detector_samples_bool)
+    # Decode
+    predictions = matcher.decode_batch(detector_samples_bool)
     predictions = np.asarray(predictions, dtype=np.uint8)
     if predictions.ndim == 1:
         predictions = predictions.reshape(-1, 1)
@@ -408,7 +302,6 @@ def run_scenario(
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
     p_meas_override: float | None = None,
     p_meas_scale: float = 1.0,
-    enable_boundary_anchors: bool = True,
 ) -> ThresholdScenarioResult:
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
@@ -444,7 +337,6 @@ def run_scenario(
                 distance,
                 stim_cfg,
                 MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
-                enable_boundary_anchors=enable_boundary_anchors,
             )
 
             points.append(

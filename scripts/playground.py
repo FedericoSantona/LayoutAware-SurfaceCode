@@ -369,10 +369,9 @@ def main() -> None:
             bracket_basis=bracket_basis,
             corr_pairs=args.corr_pairs,
             verbose=args.verbose,
-            enable_boundary_anchors=args.enable_boundary_anchors,
         )
 
-        # Post-augmentation DEM sanity (augmented graph)
+        # DEM diagnostics (post-decoding)
         if args.verbose:
             try:
                 dem_text_post = str(results.dem)

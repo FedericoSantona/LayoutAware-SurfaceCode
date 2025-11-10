@@ -13,21 +13,21 @@
         {
           "p_x": 1e-05,
           "p_z": 0.0,
-          "logical_error_rate": 7e-05,
+          "logical_error_rate": 5e-05,
           "avg_syndrome_weight": 0.0009,
           "click_rate": 0.00036
         },
         {
           "p_x": 0.0007071067811865475,
           "p_z": 0.0,
-          "logical_error_rate": 0.00562,
+          "logical_error_rate": 0.00364,
           "avg_syndrome_weight": 0.06848,
           "click_rate": 0.0277
         },
         {
           "p_x": 0.049999999999999996,
           "p_z": 0.0,
-          "logical_error_rate": 0.31936,
+          "logical_error_rate": 0.24963,
           "avg_syndrome_weight": 3.62789,
           "click_rate": 0.86257
         }
@@ -39,21 +39,21 @@
         {
           "p_x": 1e-05,
           "p_z": 0.0,
-          "logical_error_rate": 0.00093,
+          "logical_error_rate": 0.00087,
           "avg_syndrome_weight": 0.02479,
           "click_rate": 0.00603
         },
         {
           "p_x": 0.0007071067811865475,
           "p_z": 0.0,
-          "logical_error_rate": 0.05744,
+          "logical_error_rate": 0.05341,
           "avg_syndrome_weight": 1.70697,
           "click_rate": 0.34383
         },
         {
           "p_x": 0.049999999999999996,
           "p_z": 0.0,
-          "logical_error_rate": 0.49957,
+          "logical_error_rate": 0.49951,
           "avg_syndrome_weight": 70.45595,
           "click_rate": 1.0
         }

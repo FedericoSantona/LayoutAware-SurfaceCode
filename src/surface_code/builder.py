@@ -391,9 +391,20 @@ class GlobalStimBuilder:
                 measure_z = getattr(op, "measure_z", True)
                 measure_x = getattr(op, "measure_x", True)
 
+                # Check if this is the warmup round (first round with no previous measurements)
+                # The warmup round establishes reference measurements before noise, matching the old builder behavior
+                is_warmup = all(
+                    name not in state.prev.z_prev and name not in state.prev.x_prev
+                    for name in names
+                )
+
                 # Z half
                 circuit.append_operation("TICK")
-                if cfg.p_x_error:
+                # Skip noise for warmup round - it should establish clean reference measurements
+                # This matches the old builder which created reference measurements before noisy cycles
+                # CRITICAL: Warmup round must be noise-free to establish clean reference measurements
+                # Without this, reference measurements are contaminated and error correction breaks
+                if not is_warmup and cfg.p_x_error:
                     circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
                 
                 z_half = MeasurementHalf(self, "Z")
@@ -416,7 +427,8 @@ class GlobalStimBuilder:
 
                 # X half
                 circuit.append_operation("TICK")
-                if cfg.p_z_error:
+                # Skip noise for warmup round - it should establish clean reference measurements
+                if not is_warmup and cfg.p_z_error:
                     circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
                 
                 x_half = MeasurementHalf(self, "X")

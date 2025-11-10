@@ -107,14 +107,6 @@ class MeasurementHalf:
             # (No spatial detectors are emitted here; spatial connectivity is
             # captured via error hyperedges in the DEM and temporal chaining.)
             
-            # Pad state.prev dictionary to number of stabilizers for each name
-            for name in names:
-                stabs = self.builder.layout.patches[name].z_stabs if self.basis == "Z" else self.builder.layout.patches[name].x_stabs
-                if name not in prev_dict:
-                    prev_dict[name] = [None] * len(stabs)
-                elif len(prev_dict[name]) < len(stabs):
-                    prev_dict[name].extend([None] * (len(stabs) - len(prev_dict[name])))
-            
             # Process each patch
             for name in names:
                 # Segment tracking: update last seen; first is set on first temporal edge
@@ -139,8 +131,17 @@ class MeasurementHalf:
                             detector_manager.mark_row_dynamic(name, self.basis, int(skipped))
                 
                 # Record temporal detector edges (absolute measurement indices) for non-skipped rows
-                p_list = list(prev_dict.get(name, []))
+                # CRITICAL: Get prev_dict fresh from state to ensure we have the latest values
+                # After warmup round, state.prev.z_prev/x_prev gets reassigned, so we need to refresh the reference
+                # Refresh prev_dict reference to ensure we have the latest state after potential reassignment
+                prev_dict_refresh = state.prev.z_prev if self.basis == "Z" else state.prev.x_prev
+                p_list = list(prev_dict_refresh.get(name, []))
                 c_list = list(meas_curr.get(name, []))
+                
+                # Pad p_list to match c_list length if needed (for cases where stabilizer count changed)
+                # This ensures zip_longest works correctly
+                if len(p_list) < len(c_list):
+                    p_list.extend([None] * (len(c_list) - len(p_list)))
                 from itertools import zip_longest as _ziplg
                 has_history = any(val is not None for val in p_list)
                 for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):

@@ -138,7 +138,7 @@ Examples:
     main_group = parser.add_argument_group("Main execution flags")
     main_group.add_argument(
         "--benchmark",
-        default="parity_check", #simple_1q_xzh
+        default="simple_1q_xzh", #simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -267,7 +267,7 @@ Examples:
     sim_group.add_argument(
         "--shots",
         type=int,
-        default=10**5,
+        default=10**4,
         help="Number of Monte Carlo samples"
     )
     sim_group.add_argument(

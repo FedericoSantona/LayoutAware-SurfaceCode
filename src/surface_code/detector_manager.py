@@ -226,10 +226,13 @@ class DetectorManager:
         p_x = self._noise_model.get("p_x_error", 0.0) or 0.0
         p_z = self._noise_model.get("p_z_error", 0.0) or 0.0
 
+        # Temporal and wrap detectors are ALWAYS kept - they form the fundamental
+        # structure of the error correction graph, connecting measurements across time.
+        # This matches the old builder behavior where temporal detectors were always created.
         if tag in ("z_temporal", "z_wrap"):
-            return (p_meas > 0.0) or (p_x > 0.0) or self._row_is_dynamic(context, "Z")
+            return True  # Always keep - structural detectors
         if tag in ("x_temporal", "x_wrap"):
-            return (p_meas > 0.0) or (p_z > 0.0) or self._row_is_dynamic(context, "X")
+            return True  # Always keep - structural detectors
         if tag in ("rough_temporal", "smooth_temporal"):
             seam_key = self._context_seam_key(context)
             return seam_key is not None and self._seam_is_dynamic(seam_key)

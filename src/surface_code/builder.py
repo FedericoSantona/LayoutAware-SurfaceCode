@@ -315,12 +315,29 @@ class GlobalStimBuilder:
         # Track observable bracketing indices per patch
         start_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
         end_indices: Dict[str, Optional[int]] = {name: None for name in all_patches}
+        
+        # Track warmup round measurements for fallback start index capture
+        # Warmup round establishes reference measurements before noise, so it's the correct start point
+        warmup_z: Dict[str, List[Optional[int]]] = {}
+        warmup_x: Dict[str, List[Optional[int]]] = {}
+        warmup_captured = False
+        
+        # Track first round after warmup for fallback (if warmup measurements all start at 0)
+        first_round_after_warmup_z: Dict[str, List[Optional[int]]] = {}
+        first_round_after_warmup_x: Dict[str, List[Optional[int]]] = {}
+        first_round_after_warmup_captured = False
 
         # Emit explicit logical brackets only when no merges are present
         emit_explicit_logicals = not rough_merge_patches and not smooth_merge_patches
 
+        # Check if first op is a warmup round (MeasureRound)
+        # If so, defer explicit logical start capture until after warmup
+        # This ensures the start index is captured from the first noisy round, not before warmup
+        has_warmup_round = len(ops) > 0 and isinstance(ops[0], MeasureRound)
+
         pending_start: Dict[str, str] = {}
-        if emit_explicit_logicals and explicit_logical_start:
+        if emit_explicit_logicals and explicit_logical_start and not has_warmup_round:
+            # Emit explicit logical MPPs before ops (only if no warmup round)
             for name, basis in effective_basis_map.items():
                 idx = self._emit_logical_mpp(circuit, name, basis)
                 if idx is not None:
@@ -328,6 +345,10 @@ class GlobalStimBuilder:
                     observable_manager.capture_start(name, idx)
                 else:
                     pending_start[name] = basis
+        elif emit_explicit_logicals and explicit_logical_start and has_warmup_round:
+            # Defer explicit logical start capture until after warmup round
+            # This ensures start is captured from first noisy round, matching Bell state behavior
+            pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
         else:
             # Defer start capture to the first compatible stabilizer half
             pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
@@ -448,6 +469,31 @@ class GlobalStimBuilder:
                     observable_manager,
                 )
                 state.prev.x_prev = x_curr
+                
+                # Track warmup round measurements for fallback start index capture
+                # Warmup round establishes reference measurements before noise, so it's the correct start point
+                if is_warmup and not warmup_captured:
+                    warmup_z = {name: list(z_curr.get(name, [])) for name in names}
+                    warmup_x = {name: list(x_curr.get(name, [])) for name in names}
+                    warmup_captured = True
+                
+                # Track first round after warmup for fallback (if warmup measurements all start at 0)
+                if not is_warmup and warmup_captured and not first_round_after_warmup_captured:
+                    first_round_after_warmup_z = {name: list(z_curr.get(name, [])) for name in names}
+                    first_round_after_warmup_x = {name: list(x_curr.get(name, [])) for name in names}
+                    first_round_after_warmup_captured = True
+
+                # If we have explicit logical start deferred until after warmup, emit it now
+                # This ensures the start index is captured from after warmup, matching Bell state behavior
+                if emit_explicit_logicals and explicit_logical_start and has_warmup_round and is_warmup:
+                    # Warmup round just completed - emit explicit logical MPPs now
+                    for name, basis in list(pending_start.items()):
+                        if name in effective_basis_map and effective_basis_map[name] == basis:
+                            idx = self._emit_logical_mpp(circuit, name, basis)
+                            if idx is not None:
+                                start_indices[name] = idx
+                                observable_manager.capture_start(name, idx)
+                                pending_start.pop(name, None)
 
                 # Update merge countdowns and close windows when done
                 if merge_manager.active_rough is not None:
@@ -787,6 +833,62 @@ class GlobalStimBuilder:
                 end_indices[name] = end_idx
                 observable_manager.seal_end(name, basis, end_idx)
 
+        # CRITICAL FIX: Ensure all start indices are captured before finalizing observables
+        # If a start index is None or 0 (e.g., blocked by merge conflicts or captured too early),
+        # use the FIRST ROUND AFTER WARMUP (not warmup itself) as fallback.
+        # 
+        # IMPORTANT: Warmup round is noise-free and deterministic, so using warmup measurements
+        # as the start makes the observable `rec(warmup) XOR rec(end)`, where `rec(warmup)` is
+        # deterministic. This doesn't track errors from initialization correctly.
+        #
+        # Instead, we should use the FIRST ROUND AFTER WARMUP (before merges) as the start.
+        # This ensures the observable tracks from initialization: `rec(first_round) XOR rec(end)`,
+        # where `rec(first_round)` includes errors from initialization and the first round.
+        for name in effective_basis_map.keys():
+            start_idx = observable_manager.start_indices.get(name)
+            # Check if start is None or 0 - if so, use first round after warmup as fallback
+            # Index 0 is problematic, and warmup is deterministic, so use first round after warmup
+            if start_idx is None or start_idx == 0:
+                basis = effective_basis_map[name]
+                # Fallback: use FIRST ROUND AFTER WARMUP (not warmup itself)
+                # This ensures the observable tracks errors from initialization
+                if basis == "Z":
+                    if name in first_round_after_warmup_z:
+                        z_indices = [idx for idx in first_round_after_warmup_z[name] if idx is not None and idx > 0]
+                        if not z_indices:
+                            z_indices = [idx for idx in first_round_after_warmup_z[name] if idx is not None]
+                    elif name in state.prev.z_prev:
+                        z_indices = [idx for idx in state.prev.z_prev[name] if idx is not None and idx > 0]
+                        if not z_indices:
+                            z_indices = [idx for idx in state.prev.z_prev[name] if idx is not None]
+                    else:
+                        z_indices = []
+                    if z_indices:
+                        # Use the FIRST measurement from first round after warmup (tracks from initialization)
+                        selected_z = z_indices[0]
+                        observable_manager.start_indices[name] = selected_z
+                        start_indices[name] = selected_z
+                        if start_idx == 0:
+                            print(f"[OBS-FIX] Replaced start_idx=0 for {name} (Z) with first-round-after-warmup measurement {selected_z}")
+                elif basis == "X":
+                    if name in first_round_after_warmup_x:
+                        x_indices = [idx for idx in first_round_after_warmup_x[name] if idx is not None and idx > 0]
+                        if not x_indices:
+                            x_indices = [idx for idx in first_round_after_warmup_x[name] if idx is not None]
+                    elif name in state.prev.x_prev:
+                        x_indices = [idx for idx in state.prev.x_prev[name] if idx is not None and idx > 0]
+                        if not x_indices:
+                            x_indices = [idx for idx in state.prev.x_prev[name] if idx is not None]
+                    else:
+                        x_indices = []
+                    if x_indices:
+                        # Use the FIRST measurement from first round after warmup (tracks from initialization)
+                        selected_x = x_indices[0]
+                        observable_manager.start_indices[name] = selected_x
+                        start_indices[name] = selected_x
+                        if start_idx == 0:
+                            print(f"[OBS-FIX] Replaced start_idx=0 for {name} (X) with first-round-after-warmup measurement {selected_x}")
+        
         # Emit boundary anchors after all merges complete
         # Bracketing: end logicals per patch and observable includes
         # IMPORTANT: do not emit new MPPs here; reuse the last compatible
@@ -794,6 +896,18 @@ class GlobalStimBuilder:
         observable_pairs, basis_labels, deferred_observables, patch_labels = observable_manager.finalize_observables(
             circuit, state, _last_non_none
         )
+        
+        # Debug: Print observable pairs to verify they're correct
+        if observable_pairs:
+            print(f"[OBS-PAIRS] Observable pairs: {observable_pairs}")
+            print(f"[OBS-PAIRS] Patch labels: {patch_labels}")
+            print(f"[OBS-PAIRS] Basis labels: {basis_labels}")
+            for i, (start_idx, end_idx) in enumerate(observable_pairs):
+                if start_idx is not None and end_idx is not None:
+                    span = end_idx - start_idx
+                    print(f"[OBS-PAIRS] Observable {i} ({patch_labels[i]}, basis {basis_labels[i]}): start={start_idx}, end={end_idx}, span={span}")
+                else:
+                    print(f"[OBS-PAIRS] Observable {i} ({patch_labels[i]}, basis {basis_labels[i]}): start={start_idx}, end={end_idx} (WARNING: None indices!)")
 
         # Generate demo measurements
         demo_info, joint_demo_info, snapshot_info = demo_generator.generate_demos(

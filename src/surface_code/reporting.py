@@ -373,6 +373,17 @@ def print_per_qubit_results(
         error_count = int(np.sum(errors))
         ler = error_count / shots
         ler_ci = wilson_rate_ci(error_count, shots)
+        
+        # Debug: Check if obs_u8 and preds are suspiciously identical
+        obs_mean = float(obs_u8[:, i].mean())
+        pred_mean = float(preds[:, i].mean())
+        if ler == 0.0 and shots > 1000:
+            # Warn if LER is exactly 0 with many shots - this is suspicious
+            print(f"  [WARNING] LER is exactly 0.0 with {shots} shots!")
+            print(f"            obs_u8 mean: {obs_mean:.6f}, preds mean: {pred_mean:.6f}")
+            print(f"            obs_u8 unique values: {len(np.unique(obs_u8[:, i]))}, preds unique values: {len(np.unique(preds[:, i]))}")
+            if np.array_equal(obs_u8[:, i], preds[:, i]):
+                print(f"            [CRITICAL] obs_u8 and preds are IDENTICAL - observable may not be tracking errors!")
 
         # Raw distribution (pre-correction)
         raw_mean = float(obs_u8[:, i].mean())

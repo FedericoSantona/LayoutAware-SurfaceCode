@@ -361,6 +361,28 @@ def _decode_dem(
     dem_sampler = dem.compile_sampler(seed=seed)
     det_samp, obs_samp, _ = dem_sampler.sample(shots)
     obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((shots, len(observable_pairs)), dtype=np.uint8)
+    
+    # Debug: Check if observables are connected to errors in DEM
+    if verbose or (obs_u8.size > 0 and len(observable_pairs) > 0):
+        try:
+            dem_text = str(dem)
+            obs_errors = []
+            for i in range(len(observable_pairs)):
+                obs_label = f"L{i}"
+                # Count error lines that include this observable
+                import re
+                error_lines = [line for line in dem_text.splitlines() if "error(" in line.lower() and obs_label in line]
+                obs_errors.append(len(error_lines))
+            if verbose:
+                print(f"[OBS-ERRORS] Observable error term counts: {obs_errors}")
+            # If no observables are connected to errors, that's a problem!
+            if all(count == 0 for count in obs_errors) and len(obs_errors) > 0:
+                print(f"[CRITICAL] No observables are connected to ERROR terms in DEM!")
+                print(f"          This means observables are deterministic and won't track errors!")
+                print(f"          Observable pairs: {observable_pairs}")
+        except Exception as _exc:
+            if verbose:
+                print(f"[OBS-ERRORS] Check failed: {_exc}")
 
     try:
         if verbose:
@@ -407,6 +429,21 @@ def _decode_dem(
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
         preds = matcher.decode_batch(det_samp.astype(bool))
+        
+        # Debug: Check if preds and obs_u8 are suspiciously identical
+        if obs_u8.size > 0 and len(observable_pairs) > 0:
+            preds_check = np.asarray(preds, dtype=np.uint8)
+            if preds_check.ndim == 1:
+                preds_check = preds_check.reshape(-1, 1)
+            for i in range(min(len(observable_pairs), obs_u8.shape[1], preds_check.shape[1])):
+                if np.array_equal(obs_u8[:, i], preds_check[:, i]):
+                    print(f"[CRITICAL] Observable {i}: preds and obs_u8 are IDENTICAL!")
+                    print(f"          obs_u8 mean: {obs_u8[:, i].mean():.6f}, preds mean: {preds_check[:, i].mean():.6f}")
+                    print(f"          This suggests the decoder is not actually decoding from detectors!")
+                    print(f"          Observable pair: {observable_pairs[i] if i < len(observable_pairs) else 'N/A'}")
+                    # Check if detectors are actually firing
+                    det_firing_rate = det_samp.astype(bool).sum(axis=1).mean()
+                    print(f"          Average detectors firing per shot: {det_firing_rate:.2f}")
     except Exception as exc_mwpm:
         if verbose:
             print("[DECODE] Pairwise MWPM failed:", repr(exc_mwpm))

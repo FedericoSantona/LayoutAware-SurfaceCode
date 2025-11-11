@@ -138,7 +138,7 @@ Examples:
     main_group = parser.add_argument_group("Main execution flags")
     main_group.add_argument(
         "--benchmark",
-        default="simple_1q_xzh", #simple_1q_xzh
+        default="bell", #simple_1q_xzh
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -229,13 +229,13 @@ Examples:
     sim_group.add_argument(
         "--px",
         type=float,
-        default=1e-3,
+        default=1e-4,
         help="Phenomenological X error probability"
     )
     sim_group.add_argument(
         "--pz",
         type=float,
-        default=1e-3,
+        default=1e-4,
         help="Phenomenological Z error probability"
     )
     sim_group.add_argument(
@@ -267,7 +267,7 @@ Examples:
     sim_group.add_argument(
         "--shots",
         type=int,
-        default=10**4,
+        default=10**6,
         help="Number of Monte Carlo samples"
     )
     sim_group.add_argument(

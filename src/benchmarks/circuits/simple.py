@@ -17,6 +17,6 @@ class Simple1QXZHBenchmark(BenchmarkCircuit):
     def build_circuit(self) -> QuantumCircuit:
         qc = QuantumCircuit(1, name="simple_1q_xzh")
         #qc.z(0)
-        qc.x(0)
+        #qc.x(0)
 
         return qc

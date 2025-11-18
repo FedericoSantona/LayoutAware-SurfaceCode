@@ -18,6 +18,8 @@ from surface_code.dem_diagnostics import log_dem_diagnostics, env_dem_debug_enab
 from surface_code.dem_utils import (
     single_detector_hook_ids,
     circuit_to_graphlike_dem,
+    add_spatial_correlations_to_dem,
+    enforce_component_boundaries,
 )
 from surface_code.pauli import parse_init_label
 from surface_code.memory_layout import build_memory_layout
@@ -49,6 +51,8 @@ def run_logical_error_rate(
     distance: int,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
+    *,
+    use_stim_memory: bool = False,
 ) -> SimulationResult:
     """Run logical error rate simulation for a single-patch code model.
     
@@ -57,29 +61,42 @@ def run_logical_error_rate(
         stim_config: Stim circuit configuration
         mc_config: Monte Carlo configuration
     """
-    layout, ops, bracket_map = build_memory_layout(
-        model,
-        distance,
-        rounds=max(1, int(getattr(stim_config, "rounds", distance) or distance)),
-        bracket_basis=stim_config.bracket_basis or "Z",
-        family=stim_config.family,
-    )
+    rounds = max(1, int(getattr(stim_config, "rounds", distance) or distance))
+    if use_stim_memory:
+        circuit, observable_pairs, metadata, bracket_map = _build_stim_memory_circuit(
+            stim_config.bracket_basis or "Z",
+            distance,
+            rounds,
+            stim_config.p_x_error,
+            stim_config.p_z_error,
+            stim_config.p_meas,
+            stim_config.init_label,
+        )
+        layout = None
+    else:
+        layout, ops, bracket_map = build_memory_layout(
+            model,
+            distance,
+            rounds=rounds,
+            bracket_basis=stim_config.bracket_basis or "Z",
+            family=stim_config.family,
+        )
 
-    builder = GlobalStimBuilder(layout)
-    circuit, observable_pairs, metadata = builder.build(
-        ops,
-        stim_config,
-        bracket_map,
-        explicit_logical_start=True,
-    )
-    fixed_pairs: List[Tuple[int, int]] = []
-    for start_idx, end_idx in observable_pairs:
-        if end_idx is None:
-            raise RuntimeError("Observable end index missing for memory experiment.")
-        if start_idx is None:
-            start_idx = end_idx
-        fixed_pairs.append((start_idx, end_idx))
-    observable_pairs = fixed_pairs
+        builder = GlobalStimBuilder(layout)
+        circuit, observable_pairs, metadata = builder.build(
+            ops,
+            stim_config,
+            bracket_map,
+            explicit_logical_start=True,
+        )
+        fixed_pairs: List[Tuple[int, int]] = []
+        for start_idx, end_idx in observable_pairs:
+            if end_idx is None:
+                raise RuntimeError("Observable end index missing for memory experiment.")
+            if start_idx is None:
+                start_idx = end_idx
+            fixed_pairs.append((start_idx, end_idx))
+        observable_pairs = fixed_pairs
     
     # Validate that observables were properly created for single-patch memory experiments.
     # In multi-patch scenarios with merges, some patches may legitimately not have observables
@@ -93,7 +110,7 @@ def run_logical_error_rate(
             f"Note: This validation only applies to single-patch memory experiments."
         )
 
-    if len(layout.patches) == 1:
+    if not use_stim_memory and len(layout.patches) == 1:
         explicit_logicals = bool(metadata.get("explicit_logical_brackets")) if metadata else False
         if not explicit_logicals:
             raise RuntimeError(
@@ -104,13 +121,13 @@ def run_logical_error_rate(
     # Validate that observable pairs have both start and end indices.
     # This ensures proper tracking from initialization to final measurement.
     for i, (start_idx, end_idx) in enumerate(observable_pairs):
-        if start_idx is None or end_idx is None:
+        if not use_stim_memory and (start_idx is None or end_idx is None):
             raise RuntimeError(
                 f"Observable pair {i} has None indices: start={start_idx}, end={end_idx}. "
                 f"This should not happen - observables must have both start and end indices "
                 f"for proper logical error tracking in memory experiments."
             )
-    
+
     return _run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, metadata)
 
 
@@ -124,6 +141,8 @@ def _run_circuit_logical_error_rate(
     if metadata is None:
         metadata = {}
     dem = circuit_to_graphlike_dem(circuit)
+    dem = add_spatial_correlations_to_dem(dem, metadata)
+    enforce_component_boundaries(dem)
     dem_debug = env_dem_debug_enabled()
     log_dem_diagnostics("memory-pre", dem, metadata, enabled=dem_debug)
 
@@ -293,6 +312,49 @@ class SymmetricScenario(ThresholdScenario):
 class ThresholdStudyConfig:
     shots: int = 5000
     seed: int | None = None
+    use_stim_memory: bool = False
+
+
+def _build_stim_memory_circuit(
+    track: str,
+    distance: int,
+    rounds: int,
+    p_x: float,
+    p_z: float,
+    p_meas: float,
+    init_label: str | None,
+) -> tuple[stim.Circuit, List[Tuple[int, int]], Dict[str, object], Dict[str, str]]:
+    track_u = (track or "Z").strip().upper()
+    task = "surface_code:rotated_memory_z" if track_u == "Z" else "surface_code:rotated_memory_x"
+    data_prob = float(max(p_x, p_z))
+    circuit = stim.Circuit.generated(
+        task,
+        distance=int(distance),
+        rounds=int(rounds),
+        before_round_data_depolarization=data_prob,
+        before_measure_flip_probability=float(p_meas),
+        after_reset_flip_probability=float(p_meas),
+    )
+    metadata: Dict[str, object] = {
+        "observable_basis": (track_u,),
+        "observable_patches": ("q0",),
+        "boundary_anchors": {"detector_ids": []},
+        "mwpm_debug": {},
+        "explicit_logical_brackets": False,
+        "stim_generator": {
+            "task": task,
+            "distance": distance,
+            "rounds": rounds,
+        },
+        "noise_model": {
+            "p_x_error": float(p_x),
+            "p_z_error": float(p_z),
+            "p_meas": float(p_meas),
+        },
+    }
+    observable_pairs = [(0, 0)]
+    bracket_map = {"q0": track_u}
+    return circuit, observable_pairs, metadata, bracket_map
 
 
 def run_scenario(
@@ -337,6 +399,7 @@ def run_scenario(
                 distance,
                 stim_cfg,
                 MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
+                use_stim_memory=study_cfg.use_stim_memory,
             )
 
             points.append(

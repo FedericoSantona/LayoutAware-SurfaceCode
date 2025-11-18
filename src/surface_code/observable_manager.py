@@ -129,13 +129,10 @@ class ObservableManager:
             
             start_idx = self.start_indices[name]
             
-            targets: List[stim.GateTarget] = []
-            if start_idx is not None:
-                targets.append(rec_from_abs(circuit, start_idx))
-            if end_idx is not None:
-                targets.append(rec_from_abs(circuit, end_idx))
-            
-            if targets:
+            # Store absolute indices for deferred emission
+            # Relative indices will be calculated at emission time using final measurement count
+            # This matches old builder behavior: rec_from_abs uses circuit.num_measurements at emission time
+            if start_idx is not None or end_idx is not None:
                 # Defer OBSERVABLE_INCLUDE to the very end to avoid later anti-commuting MPPs
                 deferred_observables.append((start_idx, end_idx, observable_index))
                 observable_pairs.append((start_idx, end_idx))
@@ -160,6 +157,10 @@ class ObservableManager:
             final_m2 = circuit.num_measurements
             for s_idx, e_idx, obs_k in deferred_observables:
                 obs_targets: List[stim.GateTarget] = []
+                # Match old builder: [start, end] order
+                # Old builder: OBSERVABLE_INCLUDE([rec_from_abs(circuit, start), rec_from_abs(circuit, end)], 0)
+                # rec_from_abs uses: stim.target_rec(index - circuit.num_measurements)
+                # At emission time, circuit.num_measurements = final_m2
                 if s_idx is not None:
                     obs_targets.append(stim.target_rec(s_idx - final_m2))
                 if e_idx is not None:

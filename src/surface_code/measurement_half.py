@@ -49,6 +49,7 @@ class MeasurementHalf:
         start_indices: Dict[str, Optional[int]],
         _rows_touching_local_indices,
         observable_manager=None,  # Optional ObservableManager
+        round_index: int = 0,
     ) -> Dict[str, List[Optional[int]]]:
         """Measure one half (Z or X) of a round.
         
@@ -66,6 +67,7 @@ class MeasurementHalf:
             start_indices: Dict to update with start indices
             _rows_touching_local_indices: Helper function from builder
             observable_manager: Optional ObservableManager instance
+            round_index: Temporal round counter for this basis
             
         Returns:
             Dictionary mapping patch names to current measurement indices
@@ -106,7 +108,6 @@ class MeasurementHalf:
 
             # (No spatial detectors are emitted here; spatial connectivity is
             # captured via error hyperedges in the DEM and temporal chaining.)
-            
             # Process each patch
             for name in names:
                 # Segment tracking: update last seen; first is set on first temporal edge
@@ -155,19 +156,28 @@ class MeasurementHalf:
                     first_edge = segment_tracker.set_first_if_none(name, self.basis, si, a)
                     segment_tracker.update_segment(name, self.basis, si, b)
                     
-                    # Emit temporal edge and, if this is the first edge of the segment, record its detector id as an anchor
+                    # Emit temporal edge
                     temporal_type = f"{self.basis.lower()}_temporal"
-                    _det_id = detector_manager.defer_detector([a, b], temporal_type, {"patch": name, "row": si})
+                    _det_id = detector_manager.defer_detector(
+                        [a, b],
+                        temporal_type,
+                        {"patch": name, "row": si, "round": int(round_index)},
+                    )
                     segment_tracker.record_temporal_detector(name, self.basis, si, _det_id)
-                    if first_edge and not segment_tracker.has_start_anchor(name, self.basis, si):
-                        if not detector_manager.is_row_dynamic(name, self.basis, si):
-                            detector_manager.anchor_detector_ids.append(_det_id)
-                            segment_tracker.mark_start_anchor(name, self.basis, si)
+                    is_boundary_row = self.builder.is_boundary_row(name, self.basis, si)
+                    if (
+                        is_boundary_row
+                        and first_edge
+                        and not segment_tracker.has_start_anchor(name, self.basis, si)
+                        and not detector_manager.is_row_dynamic(name, self.basis, si)
+                    ):
+                        detector_manager.anchor_detector_ids.append(_det_id)
+                        segment_tracker.mark_start_anchor(name, self.basis, si)
                     if detector_manager.force_boundaries:
                         segment_tracker.ensure_seg_lists(name, self.basis, si + 1)
                         key = (name, self.basis)
                         emitted_flags = segment_tracker.seg_boundary_emitted.get(key, [])
-                        if self.builder.is_boundary_row(name, self.basis, si):
+                        if is_boundary_row:
                             if si < len(emitted_flags):
                                 emitted_flags[si] = True
                             detector_manager.anchor_detector_ids.append(_det_id)
@@ -178,7 +188,7 @@ class MeasurementHalf:
                     segment_tracker.mark_had_edge(name, self.basis, si)
 
                 curr_measurements[name] = list(meas_curr.get(name, []))
-                
+
                 # Capture start index if conditions are met
                 if (
                     name in pending_start

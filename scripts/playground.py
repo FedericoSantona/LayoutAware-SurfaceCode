@@ -11,8 +11,12 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
+import io
+import contextlib
+import stim
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 # Add the project root to Python path to enable src imports
 project_root = Path(__file__).parent.parent
@@ -58,9 +62,385 @@ from surface_code.layout import PatchObject
 from surface_code.surgery_compile import compile_circuit_to_surgery
 from surface_code.builder import GlobalStimBuilder
 from surface_code.memory_layout import build_memory_layout
-from surface_code.dem_utils import circuit_to_graphlike_dem
+from surface_code.dem_utils import (
+    circuit_to_graphlike_dem,
+    compute_dem_components,
+    component_anchor_coverage,
+    dem_error_block_histogram,
+    iter_error_blocks_with_prob,
+    add_spatial_correlations_to_dem,
+    enforce_component_boundaries,
+)
 
 from surface_code.pauli import PauliTracker, parse_init_label, sequence_from_qc
+
+
+def build_stim_memory_circuit(
+    *,
+    distance: int,
+    rounds: int,
+    px: float,
+    pz: float,
+    p_meas: float,
+    init_label: str,
+) -> Tuple[stim.Circuit, List[Tuple[Optional[int], Optional[int]]], Dict[str, object]]:
+    """Return a Stim-generated rotated-memory circuit plus minimal metadata."""
+    init = (init_label or "0").strip()
+    init_basis = "Z" if init in {"0", "1"} else "X"
+    task = "surface_code:rotated_memory_z" if init_basis == "Z" else "surface_code:rotated_memory_x"
+    data_prob = float(max(px, pz))
+    circuit = stim.Circuit.generated(
+        task,
+        distance=int(distance),
+        rounds=int(rounds),
+        before_round_data_depolarization=data_prob,
+        before_measure_flip_probability=float(p_meas),
+        after_reset_flip_probability=float(p_meas),
+    )
+    metadata: Dict[str, object] = {
+        "observable_basis": (init_basis,),
+        "observable_patches": ("q0",),
+        "boundary_anchors": {"detector_ids": []},
+        "mwpm_debug": {},
+        "cnot_operations": [],
+        "demo": {},
+        "joint_demos": {},
+        "final_snapshot": {},
+        "byproducts": [],
+        "explicit_logical_brackets": False,
+        "noise_model": {
+            "p_x_error": float(px),
+            "p_z_error": float(pz),
+            "p_meas": float(p_meas),
+        },
+        "boundary_rows": {
+            "q0": {
+                "Z": {"rows": [], "total": distance},
+                "X": {"rows": [], "total": distance},
+            }
+        },
+        "stim_generator": {
+            "task": task,
+            "distance": distance,
+            "rounds": rounds,
+        },
+    }
+    observable_pairs = [(None, None)]
+    return circuit, observable_pairs, metadata
+
+def _print_dem_health_report(dem, metadata, project_root: Path, benchmark_name: str) -> None:
+    """Pretty, verbose health report for a DEM used in threshold/scaling studies.
+
+    This groups together all existing diagnostics (metadata coverage, temporal
+    tag stats, cross-row edges, measurement vs data-like terms) and adds:
+      * error-term arity histogram (graphlike vs hypergraph)
+      * connected-component and boundary coverage check
+      * per-row cross-row degrees
+      * probability sanity for measurement-like and data-like terms
+    """
+    import re
+    from collections import Counter
+
+    print("\n[DEM-REPORT] ===== Detector Error Model Health Check (pre-decoder) =====")
+
+    # 1) Dump the DEM text for manual inspection
+    dem_text = str(dem)
+    plots_dir = project_root / "plots"
+    plots_dir.mkdir(exist_ok=True)
+    (plots_dir / f"dem_{benchmark_name}.dem.txt").write_text(dem_text)
+
+    # 2) Metadata / detector_context coverage
+    dbg = (metadata.get("mwpm_debug", {}) or {})
+    det_ctx = dbg.get("detector_context", {}) or {}  # {det_id: {"tag": "...", "context": {...}}}
+    tag_stats = dbg.get("tag_stats", {}) or {}
+
+    missing_ctx = {"x_temporal": 0, "z_temporal": 0}
+    rows_seen = {"x_temporal": set(), "z_temporal": set()}
+    wrong_keys = []
+    for did, meta in det_ctx.items():
+        tag = (meta or {}).get("tag")
+        if tag in ("x_temporal", "z_temporal"):
+            ctx = (meta or {}).get("context", {}) or {}
+            if "patch" not in ctx or "row" not in ctx:
+                missing_ctx[tag] += 1
+                wrong_keys.append((did, tag, sorted(ctx.keys())))
+            else:
+                rows_seen[tag].add((ctx.get("patch"), ctx.get("row")))
+
+    print("[DEM-REPORT] Metadata coverage:")
+    print(f"  temporal detectors missing (patch,row): {missing_ctx}")
+    print(
+        "  unique (patch,row) per temporal tag:",
+        {t: len(s) for t, s in rows_seen.items()},
+    )
+    if wrong_keys[:5]:
+        print("  sample detectors with missing/renamed context keys (up to 5):")
+        for did, tag, keys in wrong_keys[:5]:
+            print(f"    D{did} tag={tag} context_keys={keys}")
+
+    if tag_stats:
+        print("[DEM-REPORT] Detector tag statistics (temporal only):")
+        for tag, stats in tag_stats.items():
+            if "temporal" in tag:
+                print(
+                    f"  {tag}: emitted={stats.get('emitted', 0)}, "
+                    f"kept={stats.get('kept', 0)}, dropped={stats.get('dropped', 0)}"
+                )
+
+    def _info(did: int):
+        meta = det_ctx.get(int(did), {}) or {}
+        tag = meta.get("tag")
+        ctx = meta.get("context", {}) or {}
+        patch = ctx.get("patch")
+        row = ctx.get("row")
+        return tag, patch, row
+
+    # 3) Parse ERROR components via Stim's API.
+    one_det = []  # [(p, d0)]
+    multi_det_terms = []  # [(p, [d0, d1, ...])]
+    arity_hist = dem_error_block_histogram(dem)
+    for p_val, det_list in iter_error_blocks_with_prob(dem):
+        if not det_list:
+            continue
+        if len(det_list) == 1:
+            one_det.append((p_val, det_list[0]))
+        else:
+            multi_det_terms.append((p_val, det_list))
+
+    total_terms = sum(arity_hist.values())
+    print("\n[DEM-REPORT] Error-term structure:")
+    print(f"  total ERROR terms parsed: {total_terms}")
+    print(
+        f"  1-detector terms: {len(one_det)}  "
+        f"multi-detector terms: {len(multi_det_terms)}"
+    )
+    print(
+        "  arity histogram (detector count -> #terms):",
+        dict(sorted(arity_hist.items())),
+    )
+    max_arity = max(arity_hist.keys()) if arity_hist else 0
+    if max_arity > 2:
+        print("  WARNING: non-graphlike DEM detected (some terms have >2 detectors).")
+
+    # 4) Connectivity & boundary coverage
+    print("\n[DEM-REPORT] Connectivity & boundaries:")
+    components, boundary_nodes = compute_dem_components(dem)
+    anchor_meta = metadata.get("boundary_anchors", {}) or {}
+    explicit_ids = anchor_meta.get("detector_ids") or []
+    coverage = component_anchor_coverage(components, boundary_nodes, explicit_ids)
+    comp_sizes = [len(comp) for comp in components if comp]
+
+    if components:
+        print(
+            f"  connected components: {len(components)}  "
+            f"(boundaryless={coverage.get('uncovered', 0)})"
+        )
+        print(
+            f"  component sizes: min={min(comp_sizes)} max={max(comp_sizes)} "
+            f"avg={sum(comp_sizes) / len(comp_sizes):.1f}"
+        )
+        uncovered = coverage.get("uncovered_indices") or []
+        if uncovered:
+            print(f"  uncovered component indices (up to 8): {uncovered[:8]}")
+    else:
+        print("  no detector nodes found in DEM graph.")
+
+    # 5) Cross-row temporal data-fault candidates (x/z_temporal)
+    print("\n[DEM-REPORT] Cross-row temporal data-fault candidates:")
+    candidates = []  # (tag, patch, (row_i,row_j), p_val, d0, d1)
+    for p_val, ids in multi_det_terms:
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                d0, d1 = ids[i], ids[j]
+                tag0, patch0, row0 = _info(d0)
+                tag1, patch1, row1 = _info(d1)
+                # same patch, same temporal tag, different rows
+                if (
+                    tag0 in ("z_temporal", "x_temporal")
+                    and tag0 == tag1
+                    and patch0 is not None
+                    and patch0 == patch1
+                    and isinstance(row0, int)
+                    and isinstance(row1, int)
+                    and row0 != row1
+                ):
+                    r_pair = tuple(sorted((row0, row1)))
+                    candidates.append((tag0, patch0, r_pair, p_val, d0, d1))
+
+    x_candidates = [c for c in candidates if c[0] == "x_temporal"]
+    z_candidates = [c for c in candidates if c[0] == "z_temporal"]
+
+    print(f"  x_temporal cross-row pairs: {len(x_candidates)}")
+    print(f"  z_temporal cross-row pairs: {len(z_candidates)}")
+
+    if x_candidates:
+        print("  sample x_temporal edges (up to 5):")
+        for tag, patch, rpair, p_val, d0, d1 in x_candidates[:5]:
+            print(f"    {patch} rows={rpair} error({p_val}) D{d0} D{d1}")
+    if z_candidates:
+        print("  sample z_temporal edges (up to 5):")
+        for tag, patch, rpair, p_val, d0, d1 in z_candidates[:5]:
+            print(f"    {patch} rows={rpair} error({p_val}) D{d0} D{d1}")
+    if not x_candidates and not z_candidates:
+        print("  no temporal cross-row candidates found.")
+
+    # 6) Per-row cross-row degrees
+    if candidates:
+        row_deg = Counter()
+        for tag, patch, rpair, _p, _d0, _d1 in candidates:
+            for r in rpair:
+                row_deg[(tag, patch, r)] += 1
+        print("\n[DEM-REPORT] Per-row cross-row degree (top 10 rows):")
+        for (tag, patch, row), deg in row_deg.most_common(10):
+            print(f"  {tag} {patch} row={row}: degree={deg}")
+
+    # 7) Probability sanity for measurement-like vs data-like terms
+    print("\n[DEM-REPORT] Probability sanity:")
+    meas_ones = []
+    for p_val, d0 in one_det:
+        tag0, _patch0, _row0 = _info(d0)
+        if tag0 in ("z_temporal", "x_temporal") and isinstance(p_val, float):
+            meas_ones.append(p_val)
+
+    if meas_ones:
+        print(
+            "  temporal single-detector (measurement-like) prob range: "
+            f"{min(meas_ones):.3g} .. {max(meas_ones):.3g}"
+        )
+        print(f"    sample: {meas_ones[:5]}")
+    else:
+        print("  no temporal single-detector terms found (or non-numeric probabilities).")
+
+    data_ps = [p for (_tag, _patch, _rpair, p, _d0, _d1) in candidates if isinstance(p, float)]
+    if data_ps:
+        print(
+            "  cross-row (data-like) prob range: "
+            f"{min(data_ps):.3g} .. {max(data_ps):.3g}"
+        )
+    else:
+        print("  no numeric probabilities found for cross-row data-like terms.")
+
+    print("\n[DEM-REPORT] ===== End of DEM Health Check (pre-decoder) =====\n")
+
+
+def _simulate_simple_memory_run(
+    qc,
+    *,
+    distance: int,
+    px: float,
+    pz: float,
+    shots: int,
+    seed: int,
+    bracket_basis: str,
+    demo_basis,
+    init_label: str,
+    code_type: str,
+    p_meas: float,
+    use_stim_memory: bool,
+):
+    """Build and simulate a single-patch memory experiment for summary tables."""
+    rounds = distance
+    if use_stim_memory:
+        circuit, observable_pairs, metadata = build_stim_memory_circuit(
+            distance=distance,
+            rounds=rounds,
+            px=px,
+            pz=pz,
+            p_meas=p_meas,
+            init_label=init_label,
+        )
+        bracket_map = {"q0": bracket_basis}
+    else:
+        model = build_surface_code_model(distance, code_type=code_type)
+        layout, ops, bracket_map = build_memory_layout(
+            model,
+            distance=distance,
+            rounds=rounds,
+            bracket_basis=bracket_basis,
+            family=None,
+        )
+        cfg = PhenomenologicalStimConfig(
+            rounds=rounds,
+            p_x_error=float(px),
+            p_z_error=float(pz),
+            p_meas=float(p_meas),
+            init_label=init_label,
+            bracket_basis=bracket_basis,
+            demo_basis=demo_basis,
+        )
+        gb = GlobalStimBuilder(layout)
+        circuit, observable_pairs, metadata = gb.build(
+            ops,
+            cfg,
+            bracket_map,
+            qc,
+        )
+    dem = circuit_to_graphlike_dem(circuit)
+    dem = add_spatial_correlations_to_dem(dem, metadata)
+    enforce_component_boundaries(dem)
+    results = run_logical_simulation(
+        circuit=circuit,
+        dem=dem,
+        metadata=metadata,
+        observable_pairs=observable_pairs,
+        bracket_map=bracket_map,
+        qc=qc,
+        shots=int(shots),
+        seed=int(seed),
+        demo_basis=demo_basis,
+        bracket_basis=bracket_basis,
+        corr_pairs=None,
+        verbose=False,
+    )
+    return results
+
+
+def _run_scaling_summary(
+    args,
+    qc,
+    *,
+    bracket_basis: str,
+    demo_basis,
+    init_label: str,
+    code_type: str,
+) -> None:
+    """Run a quick distance-scaling sweep for simple_1q_xzh in verbose mode."""
+    if args.benchmark != "simple_1q_xzh":
+        return
+    distances = [3, 5, 7]
+    p_values = [1e-4]
+    summary_shots = 50000
+    print("\n[THRESHOLD-SUMMARY] simple_1q_xzh scaling sanity (shots="
+          f"{summary_shots}):")
+    header = "      d=" + "   ".join(f"{d:>4}" for d in distances)
+    print(header)
+    seed_base = int(args.seed) + 1000
+    for p_idx, prob in enumerate(p_values):
+        row_vals = []
+        for d_idx, dist in enumerate(distances):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    res = _simulate_simple_memory_run(
+                        qc,
+                        distance=dist,
+                        px=prob,
+                        pz=prob,
+                        shots=summary_shots,
+                        seed=seed_base + p_idx * 17 + d_idx,
+                        bracket_basis=bracket_basis,
+                        demo_basis=demo_basis,
+                        init_label=init_label,
+                        code_type=code_type,
+                        p_meas=float(args.p_meas),
+                        use_stim_memory=bool(args.stim_memory),
+                    )
+                ler = res.per_qubit_ler[0] if res.per_qubit_ler else float("nan")
+            except Exception as exc:
+                print(f"        (d={dist}, p={prob:.2e}) failed: {exc}")
+                ler = float("nan")
+            row_vals.append(ler)
+        row_str = "  ".join(f"{val:8.3e}" if math.isfinite(val) else "   n/a  " for val in row_vals)
+        print(f"  p={prob:6.2e}: {row_str}")
 
 
 def main() -> None:
@@ -154,6 +534,7 @@ def main() -> None:
                 pass
 
         use_memory_layout = (qc.num_qubits == 1)
+        use_stim_memory = bool(args.stim_memory and use_memory_layout)
         if use_memory_layout:
             layout, ops, bracket_map = build_memory_layout(
                 model,
@@ -192,8 +573,19 @@ def main() -> None:
             demo_basis=demo_basis,
         )
 
-        gb = GlobalStimBuilder(layout)
-        circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map, qc)
+        if use_stim_memory:
+            circuit, observable_pairs, metadata = build_stim_memory_circuit(
+                distance=d,
+                rounds=stim_rounds,
+                px=float(args.px),
+                pz=float(args.pz),
+                p_meas=float(args.p_meas),
+                init_label=init_label,
+            )
+            bracket_map = {"q0": bracket_basis}
+        else:
+            gb = GlobalStimBuilder(layout)
+            circuit, observable_pairs, metadata = gb.build(ops, stim_cfg, bracket_map, qc)
 
         if args.verbose:
             """
@@ -206,155 +598,17 @@ def main() -> None:
 
         # Sample DEM and decode
         dem = circuit_to_graphlike_dem(circuit)
+        dem = add_spatial_correlations_to_dem(dem, metadata)
+        enforce_component_boundaries(dem)
 
-
+        # Detailed DEM health report (only when verbose)
         if args.verbose:
-            import re
-            from collections import Counter
-
-            # 1) Dump the DEM text for manual inspection (optional but handy)
-            dem_text = str(dem)
-            (PROJECT_ROOT / "plots").mkdir(exist_ok=True)
-            (PROJECT_ROOT / "plots" / f"dem_{args.benchmark}.dem.txt").write_text(dem_text)
-
-            # 2) Map detector id -> (tag, patch, row)
-            #    This comes from your DetectorManager diagnostics.
-            dbg = (metadata.get("mwpm_debug", {}) or {})
-            det_ctx = dbg.get("detector_context", {})  # {det_id: {"tag": "...", "context": {...}}}
-
-
-            missing_ctx = {"x_temporal": 0, "z_temporal": 0}
-            wrong_keys = []
-            rows_seen = {"x_temporal": set(), "z_temporal": set()}
-            for did, meta in det_ctx.items():
-                tag = (meta or {}).get("tag")
-                if tag in ("x_temporal", "z_temporal"):
-                    ctx = (meta or {}).get("context", {}) or {}
-                    if "patch" not in ctx or "row" not in ctx:
-                        missing_ctx[tag] += 1
-                        wrong_keys.append((did, tag, sorted(ctx.keys())))
-                    else:
-                        rows_seen[tag].add((ctx.get("patch"), ctx.get("row")))
-            print("[DEM-CHECK] missing (patch,row):", missing_ctx)
-            print("[DEM-CHECK] unique rows per tag: sizes",
-                {t: len(s) for t, s in rows_seen.items()})
-            if wrong_keys[:5]:
-                print("[DEM-CHECK] sample missing/renamed ctx keys:", wrong_keys[:5])
-
-         
-            tag_stats = dbg.get("tag_stats", {})
-            if tag_stats:
-                print("[DEM-CHECK] Detector tag statistics:")
-                for tag, stats in tag_stats.items():
-                    if "temporal" in tag:
-                        print(f"  {tag}: emitted={stats.get('emitted', 0)}, kept={stats.get('kept', 0)}, dropped={stats.get('dropped', 0)}")
-
-            def _info(did: int):
-                meta = det_ctx.get(int(did), {}) or {}
-                tag = meta.get("tag")
-                ctx = meta.get("context", {}) or {}
-                patch = ctx.get("patch")
-                row = ctx.get("row")
-                return tag, patch, row
-
-            # 3) Parse ERROR(...) lines; collect 1-detector and 2-detector terms
-            err_line_re = re.compile(r"^\s*error\(([^)]+)\)\s+(.*)$")
-            D_re = re.compile(r"\bD(\d+)\b")
-
-            one_det = []     # [(p, d0)]
-            error_terms: List[Tuple[float, List[int]]] = []  # [(p, [d0,d1,...])]
-            other = 0
-
-            for line in dem_text.splitlines():
-                m = err_line_re.match(line)
-                if not m:
-                    continue
-                p_str, rhs = m.groups()
-                try:
-                    p_val = float(p_str)
-                except:
-                    # could be a named probability; keep the string
-                    p_val = p_str
-
-                Ds = [int(x) for x in D_re.findall(rhs)]
-                if len(Ds) == 1:
-                    one_det.append((p_val, Ds[0]))
-                elif len(Ds) >= 2:
-                    error_terms.append((p_val, Ds))
-                else:
-                    other += 1
-
-            # 4) Summarize two-detector terms that look like cross-row DATA faults:
-            #    both ends are temporal detectors of the same basis and same patch,
-            #    but on *different* stabilizer rows.
-            #    (That’s the signature of a single data X fault for Z-basis rows,
-            #     or a data Z fault for X-basis rows.)
-            candidates = []
-            for p_val, ids in error_terms:
-                for i in range(len(ids)):
-                    for j in range(i + 1, len(ids)):
-                        d0, d1 = ids[i], ids[j]
-                        tag0, patch0, row0 = _info(d0)
-                        tag1, patch1, row1 = _info(d1)
-                        # same patch, same temporal-basis tag, different rows
-                        if tag0 in ("z_temporal", "x_temporal") and tag0 == tag1 \
-                        and patch0 is not None and patch0 == patch1 \
-                        and isinstance(row0, int) and isinstance(row1, int) and row0 != row1:
-                            # normalize pair order
-                            r_pair = tuple(sorted((row0, row1)))
-                            candidates.append((tag0, patch0, r_pair, p_val, d0, d1))
-
-
-            x_temporal_candidates = [(tag, patch, rpair, p_val, d0, d1) 
-                                    for tag, patch, rpair, p_val, d0, d1 in candidates 
-                                    if tag == "x_temporal"]
-            if x_temporal_candidates:
-                print(f"[DEM-CHECK] Found {len(x_temporal_candidates)} x_temporal cross-row candidates")
-                for tag, patch, rpair, p_val, d0, d1 in x_temporal_candidates[:5]:
-                    print(f"  {tag} {patch} rows={rpair} error({p_val}) D{d0} D{d1}")
-            else:
-                print("[DEM-CHECK] No x_temporal cross-row candidates found")
-                # Check if x_temporal detectors appear in any error terms
-                x_temporal_in_errors = []
-                for p_val, d0, d1 in two_det:
-                    tag0, _, _ = _info(d0)
-                    tag1, _, _ = _info(d1)
-                    if tag0 == "x_temporal" or tag1 == "x_temporal":
-                        x_temporal_in_errors.append((p_val, d0, d1, tag0, tag1))
-                print(f"[DEM-CHECK] x_temporal detectors appear in {len(x_temporal_in_errors)} two-detector error terms")
-                if x_temporal_in_errors:
-                    print("[DEM-CHECK] Sample x_temporal error terms:")
-                    for p_val, d0, d1, tag0, tag1 in x_temporal_in_errors[:5]:
-                        print(f"  error({p_val}) D{d0}({tag0}) D{d1}({tag1})")
-
-            # 5) Print a compact summary
-            print(f"[DEM-CHECK] total ERROR terms: 1-det={len(one_det)}, >=2-det={len(error_terms)}, other={other}")
-
-            # Group by (basis, patch, (row_i,row_j)) and show counts
-            bucket = Counter((tag, patch, rpair) for tag, patch, rpair, _, _, _ in candidates)
-            print("[DEM-CHECK] cross-row 2-detector candidates (same patch & basis, different rows):")
-            for (tag, patch, rpair), cnt in bucket.most_common(15):
-                print(f"  {tag}  {patch} rows={rpair}  count={cnt}")
-
-            # Show a few concrete examples with probabilities
-            print("[DEM-CHECK] sample cross-row edges (up to 10):")
-            for tag, patch, rpair, p_val, d0, d1 in candidates[:10]:
-                print(f"  error({p_val}) D{d0} D{d1}   -> {tag}  {patch} rows={rpair}")
-
-            # 6) Also sanity-check the single-detector measurement-fault edges for weights
-            #    (useful to see p_meas clustered here)
-            meas_ones = []
-            for p_val, d0 in one_det:
-                tag0, patch0, row0 = _info(d0)
-                if tag0 in ("z_temporal", "x_temporal"):
-                    meas_ones.append(p_val)
-            if meas_ones:
-                # crude: just print a few and a rough min/max
-                vals = [v for v in meas_ones if isinstance(v, float)]
-                print(f"[DEM-CHECK] single-detector temporal terms (measurement-like) samples: {meas_ones[:5]}")
-                if vals:
-                    print(f"[DEM-CHECK] single-detector (temporal) prob range: {min(vals):.3g}..{max(vals):.3g}")
-
+            _print_dem_health_report(
+                dem=dem,
+                metadata=metadata,
+                project_root=PROJECT_ROOT,
+                benchmark_name=args.benchmark,
+            )
         # Run simulation
         results = run_logical_simulation(
             circuit=circuit,
@@ -420,7 +674,7 @@ def main() -> None:
                 from collections import Counter
                 bx = Counter((patch, rpair) for _p, _d0, _d1, patch, rpair in x_post)
                 bz = Counter((patch, rpair) for _p, _d0, _d1, patch, rpair in z_post)
-                print("[DEM-CHECK:POST] cross-row 2-detector candidates (augmented):")
+                print("[DEM-REPORT:POST] cross-row 2-detector candidates (augmented):")
                 if bx:
                     print("  x_temporal:")
                     for (patch, rpair), cnt in list(bx.most_common(10)):
@@ -434,7 +688,7 @@ def main() -> None:
                 else:
                     print("  z_temporal: none")
             except Exception as _exc_post:
-                print(f"[DEM-CHECK:POST] scan failed: {_exc_post}")
+                print(f"[DEM-REPORT:POST] scan failed: {_exc_post}")
 
         # Print structured report
         print_header(args, model, results.dem, metadata, {}, results.cnot_metadata, stim_rounds, int(args.shots))
@@ -504,6 +758,19 @@ def main() -> None:
         
         if args.verbose:
             print_debug_details(args, results.basis_labels, results.obs_u8, results.preds, results.corrected_obs, results.expected_flips)
+
+        if args.verbose and args.benchmark == "simple_1q_xzh":
+            try:
+                _run_scaling_summary(
+                    args,
+                    qc,
+                    bracket_basis=bracket_basis,
+                    demo_basis=demo_basis,
+                    init_label=init_label,
+                    code_type=args.code_type,
+                )
+            except Exception as _summary_exc:
+                print(f"[THRESHOLD-SUMMARY] skipped: {_summary_exc}")
 
         # Generate and save detailed JSON report
         # Add snapshot metadata to args for JSON generation

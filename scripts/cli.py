@@ -138,7 +138,7 @@ Examples:
     main_group = parser.add_argument_group("Main execution flags")
     main_group.add_argument(
         "--benchmark",
-        default="bell", #simple_1q_xzh
+        default="simple_1q_xzh", #simple_1q_xzh, bell, parity_check, ghz3, simple_1q_xzh, simulate, simulate_correlated
         choices=sorted(BENCHMARKS.keys()),
         help="Logical circuit template (used for transpile or simulation).",
     )
@@ -199,8 +199,14 @@ Examples:
     sim_group.add_argument(
         "--distance",
         type=int,
-        default=7,
+        default=3,
         help="Code distance d for the surface code"
+    )
+    sim_group.add_argument(
+        "--stim-memory",
+        type=bool,
+        default=False,
+        help="Use Stim's built-in rotated-memory circuit for single-patch benchmarks.",
     )
     sim_group.add_argument(
         "--code-type",
@@ -229,13 +235,13 @@ Examples:
     sim_group.add_argument(
         "--px",
         type=float,
-        default=1e-4,
+        default=5e-4,
         help="Phenomenological X error probability"
     )
     sim_group.add_argument(
         "--pz",
         type=float,
-        default=1e-4,
+        default=5e-4,
         help="Phenomenological Z error probability"
     )
     sim_group.add_argument(
@@ -267,7 +273,7 @@ Examples:
     sim_group.add_argument(
         "--shots",
         type=int,
-        default=10**6,
+        default=10**5,
         help="Number of Monte Carlo samples"
     )
     sim_group.add_argument(
@@ -356,4 +362,3 @@ def format_leaderboard(
             }
         )
     return formatted
-

@@ -38,12 +38,31 @@ def _is_error_instruction(inst: stim.DemInstruction) -> bool:  # type: ignore[na
         return False
 
 
-def circuit_to_graphlike_dem(circuit: stim.Circuit) -> stim.DetectorErrorModel:
-    """Return a DEM that preserves multi-detector error terms; fall back if needed."""
+def circuit_to_graphlike_dem(
+    circuit: stim.Circuit,
+    *,
+    boundary_epsilon: float = 1e-12,
+) -> stim.DetectorErrorModel:
+    """Return a DEM suitable for correlated matching.
+
+    We ask Stim to decompose multi-detector errors into a form compatible with
+    PyMatching's `enable_correlations=True` path. If decomposition fails for
+    some instructions, we fall back to allowing decomposition failures while
+    still requesting decomposition for the rest.
+    """
     try:
-        return circuit.detector_error_model()
+        dem = circuit.detector_error_model(decompose_errors=True)
     except ValueError:
-        return circuit.detector_error_model(ignore_decomposition_failures=True)
+        # In case some instructions cannot be decomposed cleanly, allow
+        # decomposition failures but still request decomposition where
+        # possible. This may still leave a few higher-arity terms but avoids
+        # completely failing.
+        dem = circuit.detector_error_model(
+            decompose_errors=True,
+            ignore_decomposition_failures=True,
+        )
+    dem = convert_dem_to_graphlike(dem)
+    return dem
 
 
 def parse_dem_errors(dem):
@@ -271,12 +290,7 @@ def single_detector_hook_ids(dem: stim.DetectorErrorModel) -> List[int]:
     and synthetic anchors; use diffs (before vs. after) to see what was added.
     """
     ids: set[int] = set()
-    for line in str(dem).splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or not s.lower().startswith("error"):
-            continue
-        dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
-        # Count only single-detector errors
+    for dets in _dem_iter_error_blocks(dem):
         if len(dets) == 1:
             ids.add(dets[0])
     return sorted(ids)
@@ -326,21 +340,283 @@ def log_hook_summary(
 
 
 # ---- DEM feasibility diagnostics (pairwise connectivity view) ----
-def _dem_iter_error_lines(dem: stim.DetectorErrorModel):
-    """Yield the detector-id list for each ERROR line in the DEM text."""
-    for line in str(dem).splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or not s.lower().startswith("error"):
+def _detector_id_from_target(target) -> Optional[int]:
+    """Extract an absolute detector id from a stim target."""
+    try:
+        if hasattr(target, "is_detector_id") and target.is_detector_id():
+            val = getattr(target, "value", None)
+            if val is None:
+                val = getattr(target, "val", None)
+            if val is not None:
+                return int(val)
+        if hasattr(target, "is_relative_detector_id") and target.is_relative_detector_id():
+            # Relative ids expose `.val` with the absolute detector index
+            val = getattr(target, "val", None)
+            if val is not None:
+                return int(val)
+    except Exception:
+        return None
+    return None
+
+
+def _dem_iter_error_blocks(dem: stim.DetectorErrorModel):
+    """
+    Yield the detector-id list for each ERROR component (between separators)
+    in the DEM. This respects stim.target_separator() so decomposed errors
+    are treated as separate graphlike terms.
+    """
+    try:
+        iterator = dem.flattened()
+    except Exception:
+        iterator = dem
+    for inst in iterator:
+        try:
+            if not _is_error_instruction(inst):
+                continue
+        except Exception:
             continue
-        dets = [int(m.group(1)) for m in _D_TOKEN_RE.finditer(s)]
-        if dets:
-            yield dets
+        try:
+            targets = list(inst.targets_copy()) if hasattr(inst, "targets_copy") else list(getattr(inst, "targets", ()))
+        except Exception:
+            targets = []
+        block: List[int] = []
+        for tgt in targets:
+            try:
+                if hasattr(tgt, "is_separator") and tgt.is_separator():
+                    if block:
+                        yield block
+                        block = []
+                    continue
+            except Exception:
+                pass
+            det_id = _detector_id_from_target(tgt)
+            if det_id is not None:
+                block.append(det_id)
+        if block:
+            yield block
+
+
+def _dem_instruction_probability(inst) -> Optional[float]:
+    """Extract the probability argument from an ERROR instruction."""
+    try:
+        if hasattr(inst, "args_copy"):
+            args = inst.args_copy()
+        else:
+            args = getattr(inst, "args", None) or getattr(inst, "arguments", None)
+        if args:
+            try:
+                return float(args[0])
+            except Exception:
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def iter_error_blocks_with_prob(
+    dem: stim.DetectorErrorModel,
+) -> Iterable[Tuple[Optional[float], List[int]]]:
+    """Yield (probability, detector_ids) for each ERROR component."""
+    try:
+        iterator = dem.flattened()
+    except Exception:
+        iterator = dem
+    for inst in iterator:
+        try:
+            if not _is_error_instruction(inst):
+                continue
+        except Exception:
+            continue
+        prob = _dem_instruction_probability(inst)
+        try:
+            targets = list(inst.targets_copy()) if hasattr(inst, "targets_copy") else list(getattr(inst, "targets", ()))
+        except Exception:
+            targets = []
+        block: List[int] = []
+        for tgt in targets:
+            try:
+                if hasattr(tgt, "is_separator") and tgt.is_separator():
+                    if block:
+                        yield prob, block
+                        block = []
+                    continue
+            except Exception:
+                pass
+            det_id = _detector_id_from_target(tgt)
+            if det_id is not None:
+                block.append(det_id)
+        if block:
+            yield prob, block
+
+
+def _graphify_error_targets(inst) -> Optional[Tuple[List[stim.DemTarget], object, str]]:
+    """Return rewritten targets/args/tag if the ERROR instruction needs graphification."""
+    try:
+        targets = list(inst.targets_copy()) if hasattr(inst, "targets_copy") else list(getattr(inst, "targets", ()))
+    except Exception:
+        targets = []
+    blocks: List[List[stim.DemTarget]] = []
+    others: List[stim.DemTarget] = []
+    current: List[stim.DemTarget] = []
+    for tgt in targets:
+        try:
+            if hasattr(tgt, "is_separator") and tgt.is_separator():
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+        except Exception:
+            pass
+        if _detector_id_from_target(tgt) is not None:
+            current.append(tgt)
+        else:
+            others.append(tgt)
+    if current:
+        blocks.append(current)
+    if not blocks or all(len(block) <= 2 for block in blocks):
+        return None
+    new_targets: List[stim.DemTarget] = []
+    for block in blocks:
+        if len(block) <= 2:
+            new_targets.extend(block)
+            new_targets.append(stim.target_separator())
+        else:
+            for i in range(len(block) - 1):
+                new_targets.append(block[i])
+                new_targets.append(block[i + 1])
+                new_targets.append(stim.target_separator())
+    if new_targets and getattr(new_targets[-1], "is_separator", lambda: False)():
+        new_targets.pop()
+    new_targets.extend(others)
+    try:
+        args = inst.args_copy() if hasattr(inst, "args_copy") else getattr(inst, "args", None)
+    except Exception:
+        args = None
+    if args is None:
+        paren_args = ()
+    elif isinstance(args, (list, tuple)):
+        paren_args = list(args)
+        if len(paren_args) == 1:
+            paren_args = paren_args[0]
+    else:
+        paren_args = args
+    tag = getattr(inst, "tag", "")
+    return new_targets, paren_args, str(tag) if tag else ""
+
+
+def convert_dem_to_graphlike(dem: stim.DetectorErrorModel) -> stim.DetectorErrorModel:
+    """Return a DEM where every ERROR component has at most two detectors."""
+    new_dem = stim.DetectorErrorModel()
+    for inst in dem:
+        try:
+            if not _is_error_instruction(inst):
+                new_dem.append(inst)
+                continue
+        except Exception:
+            new_dem.append(inst)
+            continue
+        rewrite = _graphify_error_targets(inst)
+        if rewrite is None:
+            new_dem.append(inst)
+            continue
+        new_targets, paren_args, tag = rewrite
+        if tag:
+            new_dem.append("error", paren_args, new_targets, tag=tag)
+        else:
+            new_dem.append("error", paren_args, new_targets)
+    return new_dem
+
+
+def add_spatial_correlations_to_dem(
+    dem: stim.DetectorErrorModel,
+    metadata: Dict[str, object],
+) -> stim.DetectorErrorModel:
+    """Augment the DEM with spatial edges inferred from builder metadata."""
+    dbg = (metadata.get("mwpm_debug", {}) or {})
+    spatial = dbg.get("spatial_pairs") or {}
+    if not spatial:
+        return dem
+    det_ctx = dbg.get("detector_context") or {}
+    if not det_ctx:
+        return dem
+    noise = metadata.get("noise_model", {}) or {}
+    basis_prob = {
+        "Z": float(noise.get("p_x_error", 0.0) or 0.0),
+        "X": float(noise.get("p_z_error", 0.0) or 0.0),
+    }
+
+    detectors_by_round: Dict[Tuple[str, str], Dict[int, Dict[int, int]]] = {}
+    neighbor_rows: Dict[Tuple[str, str], Dict[int, Set[int]]] = {}
+
+    for basis, per_patch in spatial.items():
+        for patch, entries in (per_patch or {}).items():
+            key = (basis, patch)
+            nbr = neighbor_rows.setdefault(key, {})
+            for entry in entries or []:
+                rows = entry.get("rows")
+                if not rows or len(rows) != 2:
+                    continue
+                ra, rb = int(rows[0]), int(rows[1])
+                nbr.setdefault(ra, set()).add(rb)
+                nbr.setdefault(rb, set()).add(ra)
+
+    for det_id, info in det_ctx.items():
+        tag = (info or {}).get("tag")
+        if tag not in ("z_temporal", "x_temporal"):
+            continue
+        ctx = (info or {}).get("context", {}) or {}
+        patch = ctx.get("patch")
+        row = ctx.get("row")
+        round_idx = ctx.get("round")
+        if patch is None or row is None or round_idx is None:
+            continue
+        basis = "Z" if tag.startswith("z_") else "X"
+        key = (basis, str(patch))
+        round_map = detectors_by_round.setdefault(key, {})
+        row_map = round_map.setdefault(int(round_idx), {})
+        row_map[int(row)] = int(det_id)
+
+    new_dem = dem.copy()
+    for (basis, patch), rounds_map in detectors_by_round.items():
+        prob = float(basis_prob.get(basis, 0.0) or 0.0)
+        if prob <= 0.0:
+            continue
+        neighbors = neighbor_rows.get((basis, patch))
+        if not neighbors:
+            continue
+        for round_idx, row_to_det in rounds_map.items():
+            for row, det_a in row_to_det.items():
+                for neigh in neighbors.get(row, ()):
+                    if row >= neigh:
+                        continue
+                    det_b = row_to_det.get(neigh)
+                    if det_a is None or det_b is None or det_a == det_b:
+                        continue
+                    new_dem.append(
+                        "error",
+                        prob,
+                        [
+                            stim.target_relative_detector_id(int(det_a)),
+                            stim.target_relative_detector_id(int(det_b)),
+                        ],
+                    )
+    return new_dem
+
+
+def dem_error_block_histogram(
+    dem: stim.DetectorErrorModel,
+) -> Dict[int, int]:
+    """Return a histogram (block_size -> count) over ERROR components."""
+    hist: Dict[int, int] = defaultdict(int)
+    for _prob, block in iter_error_blocks_with_prob(dem):
+        hist[len(block)] += 1
+    return dict(sorted(hist.items()))
 
 
 def collect_detectors_in_errors(dem: stim.DetectorErrorModel) -> Set[int]:
     """Return the set of detector ids that participate in any ERROR line."""
     nodes: Set[int] = set()
-    for dets in _dem_iter_error_lines(dem):
+    for dets in _dem_iter_error_blocks(dem):
         for d in dets:
             nodes.add(int(d))
     return nodes
@@ -349,7 +625,7 @@ def collect_detectors_in_errors(dem: stim.DetectorErrorModel) -> Set[int]:
 def collect_detectors_in_multi_errors(dem: stim.DetectorErrorModel) -> Set[int]:
     """Return detectors that participate in ERROR lines touching ≥2 detectors."""
     nodes: Set[int] = set()
-    for dets in _dem_iter_error_lines(dem):
+    for dets in _dem_iter_error_blocks(dem):
         if len(dets) < 2:
             continue
         for d in dets:
@@ -445,7 +721,7 @@ def compute_dem_components(
     boundaries: Set[int] = set()
     adj: Dict[int, Set[int]] = {}
 
-    for dets in _dem_iter_error_lines(dem):
+    for dets in _dem_iter_error_blocks(dem):
         for d in dets:
             nodes.add(d)
             adj.setdefault(d, set())
@@ -495,6 +771,26 @@ def component_anchor_coverage(
         "uncovered": sum(1 for x in covered_flags if not x),
         "uncovered_indices": [i for i, x in enumerate(covered_flags) if not x],
     }
+
+
+def enforce_component_boundaries(
+    dem: stim.DetectorErrorModel,
+    *,
+    epsilon: float = 1e-12,
+) -> List[int]:
+    """
+    Assert that every connected component already has a boundary node.
+    Raises ValueError if a boundaryless component is detected.
+    """
+    components, boundaries = compute_dem_components(dem)
+    uncovered = [comp for comp in components if comp and not (boundaries & comp)]
+    if uncovered:
+        example = sorted(list(uncovered[0]))[:8]
+        raise ValueError(
+            f"Detector error model still has boundaryless components; "
+            f"example nodes={example}"
+        )
+    return []
 
 
 def scan_infeasible_shot(

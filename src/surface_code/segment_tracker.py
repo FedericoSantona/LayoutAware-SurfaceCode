@@ -12,7 +12,10 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 class SegmentTracker:
     """Tracks stabilizer segments for wrap-around closure."""
     
-    def __init__(self, boundary_checker: Optional[Callable[[str, str, int], bool]] = None):
+    def __init__(
+        self,
+        boundary_checker: Optional[Callable[[str, str, int], bool]] = None,
+    ):
         """Initialize segment tracker with empty state."""
         # Track first/last measured indices per stabilizer (segment tracking)
         self.seg_first: Dict[Tuple[str, str], List[Optional[int]]] = {}  # key=(patch,basis)
@@ -113,6 +116,7 @@ class SegmentTracker:
         self.ensure_seg_lists(patch_name, basis, stab_idx + 1)
         if stab_idx < len(self.seg_had_edge[key]):
             self.seg_had_edge[key][stab_idx] = True
+
 
     def has_start_anchor(self, patch_name: str, basis: str, stab_idx: int) -> bool:
         key = (patch_name, basis)

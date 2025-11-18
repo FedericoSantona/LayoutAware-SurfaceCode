@@ -297,7 +297,9 @@ def _decode_dem(
             print(f"[DEM-HOOKS] summary failed: {_exc}")
 
     # Build matcher before sampling so we can ensure PM components are bounded.
-    matcher = pm.Matching.from_detector_error_model(dem)
+    if verbose:
+        print("[DECODE] PyMatching mode: correlated (enable_correlations=False)")
+    matcher = pm.Matching.from_detector_error_model(dem, enable_correlations=False)
     graph = matcher.to_networkx()
     mg = matcher._matching_graph
     det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors}
@@ -428,7 +430,7 @@ def _decode_dem(
                     print(f"[PM-GRAPH] missing node context: {sample_ctx}")
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
-        preds = matcher.decode_batch(det_samp.astype(bool))
+        preds = matcher.decode_batch(det_samp.astype(bool), enable_correlations=False)
         
         # Debug: Check if preds and obs_u8 are suspiciously identical
         if obs_u8.size > 0 and len(observable_pairs) > 0:

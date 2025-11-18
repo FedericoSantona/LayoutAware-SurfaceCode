@@ -50,17 +50,17 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots per data point")
+    parser.add_argument("--shots", type=int, default=10**4, help="Monte Carlo shots per data point")
     parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=[3, 7],
+        default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
-    parser.add_argument("--p-min", type=float, default=1e-5, help="Minimum physical error rate (default: 3e-3 for phenomenological studies)")
-    parser.add_argument("--p-max", type=float, default=5e-2, help="Maximum physical error rate (default: 5e-2 for phenomenological studies)")
-    parser.add_argument("--num-points", type=int, default=3, help="Number of physical error samples")
+    parser.add_argument("--p-min", type=float, default=1e-4, help="Minimum physical error rate (default: 3e-3 for phenomenological studies)")
+    parser.add_argument("--p-max", type=float, default=5e-1, help="Maximum physical error rate (default: 5e-2 for phenomenological studies)")
+    parser.add_argument("--num-points", type=int, default=10, help="Number of physical error samples")
     parser.add_argument(
         "--p-meas",
         type=float,
@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         choices=["heavy_hex", "standard"],
         default="standard",
         help="Type of surface code to use (default: standard)",
+    )
+    parser.add_argument(
+        "--stim-memory",
+        type=bool,
+        default=True,
+        help="Use Stim's rotated-memory circuit for single-patch scenarios.",
     )
     return parser.parse_args()
 
@@ -142,7 +148,7 @@ def main() -> None:
     print(f"Output directories: plots={plot_dir}, data={data_dir}")
 
     scenarios = create_standard_scenarios(distances, physical_grid, rounds_scale=args.rounds_scale, code_type=args.code_type)
-    study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
+    study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed, use_stim_memory=bool(args.stim_memory))
 
     summary = {}
     use_tqdm = tqdm is not None and sys.stdout.isatty()

@@ -11,8 +11,9 @@ The builder emits a deterministic DEM by:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
+from itertools import combinations
 
 import stim
 
@@ -39,6 +40,7 @@ class GlobalStimBuilder:
         self.layout = layout
         self._detector_count: int = 0
         self._boundary_rows: Dict[Tuple[str, str], Set[int]] = self._compute_boundary_rows()
+        self._spatial_row_pairs: Dict[Tuple[str, str], Counter[Tuple[int, int]]] = self._compute_spatial_row_pairs()
 
     def _compute_boundary_rows(self) -> Dict[Tuple[str, str], Set[int]]:
         """Pre-compute which stabilizer rows sit on patch boundaries.
@@ -102,6 +104,30 @@ class GlobalStimBuilder:
             boundary_rows[(name, "X")] = classify(patch.x_stabs, "X")
 
         return boundary_rows
+
+    def _compute_spatial_row_pairs(self) -> Dict[Tuple[str, str], Counter[Tuple[int, int]]]:
+        """Pre-compute which stabilizer rows share data qubits (spatial neighbors)."""
+        pairs: Dict[Tuple[str, str], Counter[Tuple[int, int]]] = {}
+        for name, patch in self.layout.patches.items():
+            for basis, stabs in (("Z", patch.z_stabs), ("X", patch.x_stabs)):
+                by_qubit: Dict[int, List[int]] = defaultdict(list)
+                for row_idx, stab in enumerate(stabs):
+                    for q_idx, ch in enumerate(stab):
+                        if ch == basis:
+                            by_qubit[q_idx].append(row_idx)
+                row_pairs: Counter[Tuple[int, int]] = Counter()
+                for rows in by_qubit.values():
+                    if len(rows) < 2:
+                        continue
+                    unique_rows = sorted(set(rows))
+                    for a, b in combinations(unique_rows, 2):
+                        row_pairs[(min(a, b), max(a, b))] += 1
+                pairs[(name, basis)] = row_pairs
+        return pairs
+
+    def get_spatial_row_pair_counts(self, patch: str, basis: str) -> Counter[Tuple[int, int]]:
+        """Return Counter mapping neighbor row pairs to multiplicity for a patch/basis."""
+        return self._spatial_row_pairs.get((patch, basis.upper()), Counter())
 
     def is_boundary_row(self, patch: str, basis: str, row_idx: int) -> bool:
         """Return True when the stabilizer row is treated as a physical boundary."""
@@ -245,31 +271,11 @@ class GlobalStimBuilder:
         # Coordinates
         self._emit_qubit_coords(circuit)
 
-        # Initialize qubits based on init_label
-        # Stim assumes qubits start in |0> by default, so we only need to apply gates for other states
-        if cfg.init_label is not None:
-            from .pauli import parse_init_label
-            init_basis, init_phase = parse_init_label(cfg.init_label)
-            all_qubits = list(range(layout.global_n()))
-            
-            if init_basis == "X":
-                # Initialize to |+> or |->
-                # |+> = H|0>, |-> = H|1> = HX|0>
-                if init_phase == -1:
-                    # |-> state: apply X then H
-                    circuit.append_operation("X", all_qubits)
-                circuit.append_operation("H", all_qubits)
-            elif init_basis == "Z" and init_phase == -1:
-                # |1> state: apply X
-                circuit.append_operation("X", all_qubits)
-            # If init_basis=="Z" and init_phase==+1, qubits are already in |0>, no initialization needed
-
-        # Initialize state and managers
+        # Initialize state and managers (needed early to check for single-patch memory)
         state = BuilderState()
         force_boundaries = getattr(cfg, "force_boundaries", True)
         boundary_error_prob = getattr(cfg, "boundary_error_prob", 1e-12)
         detector_manager = DetectorManager(force_boundaries=force_boundaries, boundary_error_prob=boundary_error_prob)
-        segment_tracker = SegmentTracker(boundary_checker=self.is_boundary_row)
         merge_manager = MergeManager(self.layout)
 
         # Resolve patch order and selection helpers
@@ -309,7 +315,7 @@ class GlobalStimBuilder:
         observable_manager = ObservableManager(self.layout, bracket_map)
         demo_generator = DemoGenerator(self.layout, self)
         
-        # Sync effective_basis_map to observable_manager
+        # Sync effective_basis_map to observable_manager (will be updated for single-patch memory below)
         observable_manager.effective_basis_map = effective_basis_map
 
         # Track observable bracketing indices per patch
@@ -329,36 +335,115 @@ class GlobalStimBuilder:
 
         # Emit explicit logical brackets only when no merges are present
         emit_explicit_logicals = not rough_merge_patches and not smooth_merge_patches
+        segment_tracker = SegmentTracker(boundary_checker=self.is_boundary_row)
 
         # Check if first op is a warmup round (MeasureRound)
-        # If so, defer explicit logical start capture until after warmup
-        # This ensures the start index is captured from the first noisy round, not before warmup
         has_warmup_round = len(ops) > 0 and isinstance(ops[0], MeasureRound)
 
-        pending_start: Dict[str, str] = {}
-        if emit_explicit_logicals and explicit_logical_start and not has_warmup_round:
-            # Emit explicit logical MPPs before ops (only if no warmup round)
-            for name, basis in effective_basis_map.items():
-                idx = self._emit_logical_mpp(circuit, name, basis)
-                if idx is not None:
-                    start_indices[name] = idx
-                    observable_manager.capture_start(name, idx)
-                else:
-                    pending_start[name] = basis
-        elif emit_explicit_logicals and explicit_logical_start and has_warmup_round:
-            # Defer explicit logical start capture until after warmup round
-            # This ensures start is captured from first noisy round, matching Bell state behavior
-            pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
-        else:
-            # Defer start capture to the first compatible stabilizer half
-            pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
+        # Check if this is a single-patch memory experiment (no merges, single patch, has warmup)
+        # For single-patch memory experiments, we need to measure logical start BEFORE warmup
+        # to match the old builder behavior (logical start before reference measurements)
+        is_single_patch_memory = (
+            emit_explicit_logicals and 
+            explicit_logical_start and
+            len(all_patches) == 1 and 
+            has_warmup_round
+        )
 
-        circuit.append_operation("TICK")
+        # For single-patch memory experiments, use init_label to determine effective basis
+        # Old builder uses logical_string (from init_label) for both start and end, so
+        # the observable basis should match the logical operator being measured
+        if is_single_patch_memory and cfg.init_label is not None:
+            from .pauli import parse_init_label
+            init_basis, _ = parse_init_label(cfg.init_label)
+            logical_basis = init_basis  # "Z" for init_label="0"/"1", "X" for init_label="+"/"-"
+            # Update effective_basis_map to use logical_basis from init_label
+            for name in effective_basis_map.keys():
+                effective_basis_map[name] = logical_basis
+            # Sync updated effective_basis_map to observable_manager
+            observable_manager.effective_basis_map = effective_basis_map
+
+        per_round_p_x = float(getattr(cfg, "p_x_error", 0.0) or 0.0)
+        per_round_p_z = float(getattr(cfg, "p_z_error", 0.0) or 0.0)
+
+        pending_start: Dict[str, str] = {}
+        if is_single_patch_memory:
+            # Single-patch memory experiment: measure logical start BEFORE initialization gates and warmup
+            # This matches the old builder where logical start was measured before reference measurements
+            # CRITICAL: Only measure logical start if init_label is set (matches old builder behavior)
+            # The old builder only creates observables when init_label is set
+            # CRITICAL: Measure BEFORE initialization gates to match old builder (old builder doesn't apply gates)
+            # CRITICAL: Use init_label to determine which logical operator to measure (not bracket_map)
+            # Old builder: init_label="0"/"1" → logical_z, init_label="+"/"-" → logical_x
+            if cfg.init_label is not None:
+                from .pauli import parse_init_label
+                init_basis, _ = parse_init_label(cfg.init_label)
+                # Determine which logical operator to measure based on init_label (like old builder)
+                logical_basis = init_basis  # "Z" for init_label="0"/"1", "X" for init_label="+"/"-"
+                
+                # Add TICK before logical start to match old builder structure
+                circuit.append_operation("TICK")
+                for name in effective_basis_map.keys():
+                    # Use logical_basis from init_label, not from bracket_map
+                    idx = self._emit_logical_mpp(circuit, name, logical_basis)
+                    if idx is not None:
+                        start_indices[name] = idx
+                        observable_manager.capture_start(name, idx)
+                    else:
+                        pending_start[name] = logical_basis
+        
+        # Initialize qubits based on init_label
+        # CRITICAL: For single-patch memory experiments, do NOT apply initialization gates
+        # to match the old builder behavior (old builder doesn't apply gates, just measures logical operator)
+        # For other cases (multi-patch/Bell state), apply initialization gates as needed
+        if cfg.init_label is not None and not is_single_patch_memory:
+            from .pauli import parse_init_label
+            init_basis, init_phase = parse_init_label(cfg.init_label)
+            all_qubits = list(range(layout.global_n()))
+            
+            if init_basis == "X":
+                # Initialize to |+> or |->
+                # |+> = H|0>, |-> = H|1> = HX|0>
+                if init_phase == -1:
+                    # |-> state: apply X then H
+                    circuit.append_operation("X", all_qubits)
+                circuit.append_operation("H", all_qubits)
+            elif init_basis == "Z" and init_phase == -1:
+                # |1> state: apply X
+                circuit.append_operation("X", all_qubits)
+            # If init_basis=="Z" and init_phase==+1, qubits are already in |0>, no initialization needed
+
+        if not is_single_patch_memory:
+            # For non-single-patch-memory cases, handle logical start here
+            if emit_explicit_logicals and explicit_logical_start and not has_warmup_round:
+                # Emit explicit logical MPPs before ops (only if no warmup round)
+                for name, basis in effective_basis_map.items():
+                    idx = self._emit_logical_mpp(circuit, name, basis)
+                    if idx is not None:
+                        start_indices[name] = idx
+                        observable_manager.capture_start(name, idx)
+                    else:
+                        pending_start[name] = basis
+            elif emit_explicit_logicals and explicit_logical_start and has_warmup_round:
+                # Multi-patch/Bell state: defer explicit logical start capture until after warmup round
+                # This ensures start is captured from first noisy round, matching Bell state behavior
+                pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
+            else:
+                # Defer start capture to the first compatible stabilizer half
+                pending_start = {name: effective_basis_map[name] for name in effective_basis_map.keys()}
+
+        # For single-patch memory, don't add extra TICK before warmup
+        # Old builder: TICK → Logical start, then TICK → Reference (no extra TICK in between)
+        # Only add TICK if we didn't just measure logical start (for single-patch memory)
+        if not (is_single_patch_memory and cfg.init_label is not None):
+            circuit.append_operation("TICK")
 
 
 
         # Track remaining merge windows that conflict with seam stabilizer bases
         conflict_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+        round_counters = {"Z": 0, "X": 0}
+
         for op in ops:
             if isinstance(op, Merge):
                 k = op.type.strip().lower()
@@ -425,8 +510,8 @@ class GlobalStimBuilder:
                 # This matches the old builder which created reference measurements before noisy cycles
                 # CRITICAL: Warmup round must be noise-free to establish clean reference measurements
                 # Without this, reference measurements are contaminated and error correction breaks
-                if not is_warmup and cfg.p_x_error:
-                    circuit.append_operation("X_ERROR", list(range(layout.global_n())), cfg.p_x_error)
+                if not is_warmup and per_round_p_x:
+                    circuit.append_operation("X_ERROR", list(range(layout.global_n())), per_round_p_x)
                 
                 z_half = MeasurementHalf(self, "Z")
                 z_curr = z_half.measure_round(
@@ -443,14 +528,16 @@ class GlobalStimBuilder:
                     start_indices,
                     _rows_touching_local_indices,
                     observable_manager,
+                    round_index=round_counters["Z"],
                 )
                 state.prev.z_prev = z_curr
+                round_counters["Z"] += 1
 
                 # X half
                 circuit.append_operation("TICK")
                 # Skip noise for warmup round - it should establish clean reference measurements
-                if not is_warmup and cfg.p_z_error:
-                    circuit.append_operation("Z_ERROR", list(range(layout.global_n())), cfg.p_z_error)
+                if not is_warmup and per_round_p_z:
+                    circuit.append_operation("Z_ERROR", list(range(layout.global_n())), per_round_p_z)
                 
                 x_half = MeasurementHalf(self, "X")
                 x_curr = x_half.measure_round(
@@ -467,8 +554,10 @@ class GlobalStimBuilder:
                     start_indices,
                     _rows_touching_local_indices,
                     observable_manager,
+                    round_index=round_counters["X"],
                 )
                 state.prev.x_prev = x_curr
+                round_counters["X"] += 1
                 
                 # Track warmup round measurements for fallback start index capture
                 # Warmup round establishes reference measurements before noise, so it's the correct start point
@@ -484,9 +573,11 @@ class GlobalStimBuilder:
                     first_round_after_warmup_captured = True
 
                 # If we have explicit logical start deferred until after warmup, emit it now
-                # This ensures the start index is captured from after warmup, matching Bell state behavior
+                # This only applies to multi-patch/Bell state scenarios (not single-patch memory)
+                # For single-patch memory experiments, logical start is measured BEFORE warmup
                 if emit_explicit_logicals and explicit_logical_start and has_warmup_round and is_warmup:
                     # Warmup round just completed - emit explicit logical MPPs now
+                    # Note: pending_start will be empty for single-patch memory (already captured before warmup)
                     for name, basis in list(pending_start.items()):
                         if name in effective_basis_map and effective_basis_map[name] == basis:
                             idx = self._emit_logical_mpp(circuit, name, basis)
@@ -829,9 +920,47 @@ class GlobalStimBuilder:
             for name, basis in effective_basis_map.items():
                 if end_indices.get(name) is not None:
                     continue
-                end_idx = self._emit_logical_mpp(circuit, name, basis)
-                end_indices[name] = end_idx
-                observable_manager.seal_end(name, basis, end_idx)
+                # For single-patch memory experiments, use the same logical operator as start (from init_label)
+                # Old builder uses the same logical_string for both start and end
+                if is_single_patch_memory and cfg.init_label is not None:
+                    from .pauli import parse_init_label
+                    init_basis, _ = parse_init_label(cfg.init_label)
+                    logical_basis = init_basis  # Use same basis as start measurement
+                    # CRITICAL: Add TICK before end measurement to match old builder exactly
+                    circuit.append_operation("TICK")
+                    end_idx = self._emit_logical_mpp(circuit, name, logical_basis)
+                    end_indices[name] = end_idx
+                    observable_manager.seal_end(name, logical_basis, end_idx)
+                    
+                    # CRITICAL: For single-patch memory, create observable IMMEDIATELY after end measurement
+                    # This matches the old builder exactly: observable created right after end, before any other processing
+                    start_idx = observable_manager.start_indices.get(name)
+                    if start_idx is not None and end_idx is not None:
+                        from .builder_utils import rec_from_abs
+                        # Verify circuit.num_measurements matches end_idx + 1 (like old builder)
+                        expected_m2 = end_idx + 1
+                        actual_m2 = circuit.num_measurements
+                        if actual_m2 != expected_m2:
+                            print(f"[OBS-DEBUG] WARNING: circuit.num_measurements={actual_m2} != end_idx+1={expected_m2}")
+                        start_rel = rec_from_abs(circuit, start_idx)
+                        end_rel = rec_from_abs(circuit, end_idx)
+                        print(f"[OBS-DEBUG] Creating observable: start={start_idx} (rel={start_rel}), end={end_idx} (rel={end_rel}), m2={actual_m2}")
+                        # Old builder: OBSERVABLE_INCLUDE([rec_from_abs(circuit, start), rec_from_abs(circuit, end)], 0)
+                        # This creates: rec(start) XOR rec(end)
+                        # CRITICAL: If error increases after decoding, the observable might be inverted
+                        # Try swapping order: [end_rel, start_rel] to see if that fixes it
+                        # But first, let's verify the order matches old builder exactly
+                        circuit.append_operation(
+                            "OBSERVABLE_INCLUDE",
+                            [start_rel, end_rel],  # [start, end] order matches old builder
+                            0,
+                        )
+                        # Mark as already emitted so it's not emitted again later
+                        observable_manager._single_patch_observable_emitted = True
+                else:
+                    end_idx = self._emit_logical_mpp(circuit, name, basis)
+                    end_indices[name] = end_idx
+                    observable_manager.seal_end(name, basis, end_idx)
 
         # CRITICAL FIX: Ensure all start indices are captured before finalizing observables
         # If a start index is None or 0 (e.g., blocked by merge conflicts or captured too early),
@@ -844,11 +973,14 @@ class GlobalStimBuilder:
         # Instead, we should use the FIRST ROUND AFTER WARMUP (before merges) as the start.
         # This ensures the observable tracks from initialization: `rec(first_round) XOR rec(end)`,
         # where `rec(first_round)` includes errors from initialization and the first round.
+        #
+        # EXCEPTION: For single-patch memory experiments, index 0 is valid (logical start measured before warmup)
+        # so we should NOT replace it with first round after warmup
         for name in effective_basis_map.keys():
             start_idx = observable_manager.start_indices.get(name)
             # Check if start is None or 0 - if so, use first round after warmup as fallback
-            # Index 0 is problematic, and warmup is deterministic, so use first round after warmup
-            if start_idx is None or start_idx == 0:
+            # BUT: For single-patch memory, index 0 is valid (logical start before warmup), so don't replace it
+            if start_idx is None or (start_idx == 0 and not is_single_patch_memory):
                 basis = effective_basis_map[name]
                 # Fallback: use FIRST ROUND AFTER WARMUP (not warmup itself)
                 # This ensures the observable tracks errors from initialization
@@ -909,7 +1041,13 @@ class GlobalStimBuilder:
                 else:
                     print(f"[OBS-PAIRS] Observable {i} ({patch_labels[i]}, basis {basis_labels[i]}): start={start_idx}, end={end_idx} (WARNING: None indices!)")
 
-        # Generate demo measurements
+        # CRITICAL FIX: For single-patch memory, observables are already emitted immediately after end measurement
+        # (matching old builder). For other cases, emit observables here.
+        # Skip single-patch memory observables that were already emitted.
+        if not getattr(observable_manager, '_single_patch_observable_emitted', False):
+            observable_manager.emit_observables(circuit, deferred_observables)
+
+        # Generate demo measurements (after observables, so they don't affect observable relative indices)
         demo_info, joint_demo_info, snapshot_info = demo_generator.generate_demos(
             circuit, cfg, state, bracket_map, qiskit_circuit
         )
@@ -935,8 +1073,6 @@ class GlobalStimBuilder:
         #  - seam wrap edges produced at Split/finalization for joint checks.
         # If degree_violations remains non-empty, the schedule left a dangling endpoint
         # and must be fixed at the source (segment anchoring or seam suppression), not patched.
-        # Append all deferred observables at the very end using final measurement count
-        observable_manager.emit_observables(circuit, deferred_observables)
 
         boundary_row_meta: Dict[str, Dict[str, Dict[str, object]]] = {}
         for name in layout.patches.keys():
@@ -992,5 +1128,17 @@ class GlobalStimBuilder:
                 },
             })(),
         }
+
+        spatial_meta: Dict[str, Dict[str, List[Dict[str, object]]]] = {"Z": {}, "X": {}}
+        for basis in ("Z", "X"):
+            for name in layout.patches.keys():
+                counts = self.get_spatial_row_pair_counts(name, basis)
+                if not counts:
+                    continue
+                spatial_meta[basis][name] = [
+                    {"rows": (a, b), "count": int(cnt)}
+                    for (a, b), cnt in sorted(counts.items())
+                ]
+        metadata.setdefault("mwpm_debug", {}).setdefault("spatial_pairs", spatial_meta)
 
         return circuit, observable_pairs, metadata

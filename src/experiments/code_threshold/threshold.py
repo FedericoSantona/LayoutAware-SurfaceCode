@@ -142,7 +142,8 @@ def _run_circuit_logical_error_rate(
         metadata = {}
     dem = circuit_to_graphlike_dem(circuit)
     dem = add_spatial_correlations_to_dem(dem, metadata)
-    enforce_component_boundaries(dem)
+    boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
+    enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
     dem_debug = env_dem_debug_enabled()
     log_dem_diagnostics("memory-pre", dem, metadata, enabled=dem_debug)
 

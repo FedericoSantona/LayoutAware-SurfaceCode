@@ -112,9 +112,21 @@ class MeasurementHalf:
             for name in names:
                 # Segment tracking: update last seen; first is set on first temporal edge
                 meas_list = list(meas_curr.get(name, []))
+                prev_lookup = list(prev_dict.get(name, []))
                 segment_tracker.ensure_seg_lists(name, self.basis, len(meas_list))
                 for si, idx_abs in enumerate(meas_list):
                     if idx_abs is not None:
+                        prev_val = prev_lookup[si] if si < len(prev_lookup) else None
+                        if prev_val is None or prev_val != idx_abs:
+                            detector_manager.record_measurement_context(
+                                idx_abs,
+                                {
+                                    "patch": name,
+                                    "basis": self.basis,
+                                    "row": int(si),
+                                    "round": int(round_index),
+                                },
+                            )
                         segment_tracker.update_segment(name, self.basis, si, idx_abs)
                 
                 # Suppress temporal detectors while this patch is in an active conflicting merge window
@@ -133,38 +145,31 @@ class MeasurementHalf:
                 
                 # Record temporal detector edges (absolute measurement indices) for non-skipped rows
                 # CRITICAL: Get prev_dict fresh from state to ensure we have the latest values
-                # After warmup round, state.prev.z_prev/x_prev gets reassigned, so we need to refresh the reference
-                # Refresh prev_dict reference to ensure we have the latest state after potential reassignment
                 prev_dict_refresh = state.prev.z_prev if self.basis == "Z" else state.prev.x_prev
                 p_list = list(prev_dict_refresh.get(name, []))
                 c_list = list(meas_curr.get(name, []))
                 
-                # Pad p_list to match c_list length if needed (for cases where stabilizer count changed)
-                # This ensures zip_longest works correctly
                 if len(p_list) < len(c_list):
                     p_list.extend([None] * (len(c_list) - len(p_list)))
                 from itertools import zip_longest as _ziplg
-                has_history = any(val is not None for val in p_list)
-                for si, (a, b) in enumerate(_ziplg(p_list, c_list, fillvalue=None)):
-                    if si in row_skip:
+                row_pairs = list(_ziplg(p_list, c_list, fillvalue=None))
+                segment_tracker.ensure_seg_lists(name, self.basis, max(len(p_list), len(c_list)))
+                temporal_type = f"{self.basis.lower()}_temporal"
+                for si, (a, b) in enumerate(row_pairs):
+                    if si in row_skip or b is None or a is None or a == b:
                         continue
-                    if a is None or b is None or a == b:
-                        continue
-                    
-                    # On first edge within a fresh segment, set first=a so wrap uses [a,last]
-                    segment_tracker.ensure_seg_lists(name, self.basis, max(len(p_list), len(c_list)))
+
+                    is_boundary_row = self.builder.is_boundary_row(name, self.basis, si)
                     first_edge = segment_tracker.set_first_if_none(name, self.basis, si, a)
                     segment_tracker.update_segment(name, self.basis, si, b)
-                    
-                    # Emit temporal edge
-                    temporal_type = f"{self.basis.lower()}_temporal"
+
                     _det_id = detector_manager.defer_detector(
                         [a, b],
                         temporal_type,
                         {"patch": name, "row": si, "round": int(round_index)},
                     )
                     segment_tracker.record_temporal_detector(name, self.basis, si, _det_id)
-                    is_boundary_row = self.builder.is_boundary_row(name, self.basis, si)
+
                     if (
                         is_boundary_row
                         and first_edge
@@ -188,6 +193,48 @@ class MeasurementHalf:
                     segment_tracker.mark_had_edge(name, self.basis, si)
 
                 curr_measurements[name] = list(meas_curr.get(name, []))
+
+                # Emit butterfly detectors tying spatial row pairs together when both rows are live this round
+                row_live_flags: List[bool] = []
+                for si, (_prev_idx, curr_idx) in enumerate(row_pairs):
+                    live = curr_idx is not None and si not in row_skip
+                    row_live_flags.append(live)
+
+                pair_counts = self.builder.get_spatial_row_pair_counts(name, self.basis)
+                if pair_counts:
+                    tag = f"{self.basis.lower()}_butterfly"
+                    for (row_a, row_b), count in pair_counts.items():
+                        if row_a >= len(row_pairs) or row_b >= len(row_pairs):
+                            continue
+                        if not (row_live_flags[row_a] and row_live_flags[row_b]):
+                            continue
+                        prev_a, curr_a = row_pairs[row_a]
+                        prev_b, curr_b = row_pairs[row_b]
+                        if None in (prev_a, curr_a, prev_b, curr_b):
+                            continue
+                        indices = [curr_a, prev_a, curr_b, prev_b]
+                        # Remove duplicate indices while preserving order for determinism
+                        seen_targets: Set[int] = set()
+                        dedup_targets: List[int] = []
+                        for idx_abs in indices:
+                            if idx_abs in seen_targets:
+                                continue
+                            seen_targets.add(idx_abs)
+                            dedup_targets.append(idx_abs)
+                        if len(dedup_targets) < 4:
+                            # Need both temporal legs; skip if anything collapsed unexpectedly
+                            continue
+                        detector_manager.defer_detector(
+                            dedup_targets,
+                            tag,
+                            {
+                                "patch": name,
+                                "basis": self.basis,
+                                "rows": (int(row_a), int(row_b)),
+                                "round": int(round_index),
+                                "shared_qubits": int(count),
+                            },
+                        )
 
                 # Capture start index if conditions are met
                 if (

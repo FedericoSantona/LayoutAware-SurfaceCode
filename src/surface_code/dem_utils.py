@@ -537,6 +537,15 @@ def add_spatial_correlations_to_dem(
     if not spatial:
         return dem
     det_ctx = dbg.get("detector_context") or {}
+    # New builders emit explicit butterfly detectors; if they are present the
+    # DEM already has the correct spatial structure and no augmentation is
+    # necessary.
+    for info in det_ctx.values():
+        if not isinstance(info, dict):
+            continue
+        tag = info.get("tag")
+        if tag in {"z_butterfly", "x_butterfly"}:
+            return dem
     if not det_ctx:
         return dem
     noise = metadata.get("noise_model", {}) or {}
@@ -561,6 +570,10 @@ def add_spatial_correlations_to_dem(
                 nbr.setdefault(rb, set()).add(ra)
 
     for det_id, info in det_ctx.items():
+        try:
+            det_idx = int(det_id)
+        except Exception:
+            continue
         tag = (info or {}).get("tag")
         if tag not in ("z_temporal", "x_temporal"):
             continue
@@ -574,7 +587,7 @@ def add_spatial_correlations_to_dem(
         key = (basis, str(patch))
         round_map = detectors_by_round.setdefault(key, {})
         row_map = round_map.setdefault(int(round_idx), {})
-        row_map[int(row)] = int(det_id)
+        row_map[int(row)] = det_idx
 
     new_dem = dem.copy()
     for (basis, patch), rounds_map in detectors_by_round.items():
@@ -660,9 +673,18 @@ def remap_metadata_detectors(metadata: Dict[str, object], mapping: Dict[int, int
     if isinstance(mwpm_dbg, dict):
         ctx = mwpm_dbg.get("detector_context")
         if isinstance(ctx, dict):
-            remapped_ctx: Dict[int, Dict[str, object]] = {}
+            remapped_ctx: Dict[object, Dict[str, object]] = {}
+            measurements = ctx.get("__measurements__")
+            if isinstance(measurements, dict):
+                remapped_ctx["__measurements__"] = dict(measurements)
             for k, v in ctx.items():
-                mk = mapping.get(int(k))
+                if k == "__measurements__":
+                    continue
+                try:
+                    old_idx = int(k)
+                except Exception:
+                    continue
+                mk = mapping.get(old_idx)
                 if mk is not None:
                     remapped_ctx[int(mk)] = dict(v)
             mwpm_dbg["detector_context"] = remapped_ctx
@@ -777,13 +799,21 @@ def enforce_component_boundaries(
     dem: stim.DetectorErrorModel,
     *,
     epsilon: float = 1e-12,
+    explicit_anchor_ids: Optional[Sequence[int]] = None,
 ) -> List[int]:
     """
     Assert that every connected component already has a boundary node.
     Raises ValueError if a boundaryless component is detected.
     """
     components, boundaries = compute_dem_components(dem)
-    uncovered = [comp for comp in components if comp and not (boundaries & comp)]
+    boundary_set: Set[int] = set(boundaries)
+    if explicit_anchor_ids:
+        for idx in explicit_anchor_ids:
+            try:
+                boundary_set.add(int(idx))
+            except Exception:
+                continue
+    uncovered = [comp for comp in components if comp and not (boundary_set & comp)]
     if uncovered:
         example = sorted(list(uncovered[0]))[:8]
         raise ValueError(

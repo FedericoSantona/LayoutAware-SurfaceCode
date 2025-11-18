@@ -235,13 +235,13 @@ Examples:
     sim_group.add_argument(
         "--px",
         type=float,
-        default=5e-4,
+        default=1e-4,
         help="Phenomenological X error probability"
     )
     sim_group.add_argument(
         "--pz",
         type=float,
-        default=5e-4,
+        default=1e-4,
         help="Phenomenological Z error probability"
     )
     sim_group.add_argument(

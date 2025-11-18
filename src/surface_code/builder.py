@@ -39,22 +39,16 @@ class GlobalStimBuilder:
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
         self._detector_count: int = 0
-        self._boundary_rows: Dict[Tuple[str, str], Set[int]] = self._compute_boundary_rows()
         self._spatial_row_pairs: Dict[Tuple[str, str], Counter[Tuple[int, int]]] = self._compute_spatial_row_pairs()
+        self._boundary_rows: Dict[Tuple[str, str], Set[int]] = self._compute_boundary_rows()
 
     def _compute_boundary_rows(self) -> Dict[Tuple[str, str], Set[int]]:
-        """Pre-compute which stabilizer rows sit on patch boundaries.
+        """Pre-compute which stabilizer rows sit on patch boundaries."""
 
-        We classify a stabilizer row as a boundary when the participating data
-        qubits live near the geometric edge of the patch (within a tolerance).
-        For models without coordinate metadata we fall back to a degree-based
-        heuristic (qubits appearing in only one stabilizer are treated as edges).
-        """
-        boundary_rows: Dict[Tuple[str, str], Set[int]] = {}
-        for name, patch in self.layout.patches.items():
+        def classify_by_geometry(patch_obj, stabs: List[str], pauli: str) -> Set[int]:
             coords = {
                 q: (float(x), float(y))
-                for q, (x, y) in patch.coords.items()
+                for q, (x, y) in patch_obj.coords.items()
             }
             if coords:
                 xs = [x for x, _ in coords.values()]
@@ -62,46 +56,66 @@ class GlobalStimBuilder:
                 xmin, xmax = min(xs), max(xs)
                 ymin, ymax = min(ys), max(ys)
                 tolerance = 0.6
+                rows: Set[int] = set()
+                for si, stab in enumerate(stabs):
+                    points = [
+                        (coords[idx][0], coords[idx][1])
+                        for idx, char in enumerate(stab)
+                        if char == pauli and idx in coords
+                    ]
+                    if not points:
+                        continue
+                    avg_x = sum(px for px, _ in points) / len(points)
+                    avg_y = sum(py for _, py in points) / len(points)
+                    dist = min(
+                        abs(avg_x - xmin),
+                        abs(avg_x - xmax),
+                        abs(avg_y - ymin),
+                        abs(avg_y - ymax),
+                    )
+                    if dist <= tolerance:
+                        rows.add(si)
+                return rows
+            n = patch_obj.n
+            counts = [0] * n
+            for stab in stabs:
+                for qi, char in enumerate(stab):
+                    if char == pauli:
+                        counts[qi] += 1
+            rows: Set[int] = set()
+            for si, stab in enumerate(stabs):
+                boundary = False
+                for qi, char in enumerate(stab):
+                    if char == pauli and counts[qi] <= 1:
+                        boundary = True
+                        break
+                if boundary:
+                    rows.add(si)
+            return rows
 
-                def classify(stabs: List[str], pauli: str) -> Set[int]:
-                    rows: Set[int] = set()
-                    for si, stab in enumerate(stabs):
-                        points = [(coords[idx][0], coords[idx][1]) for idx, char in enumerate(stab) if char == pauli and idx in coords]
-                        if not points:
-                            continue
-                        avg_x = sum(px for px, _ in points) / len(points)
-                        avg_y = sum(py for _, py in points) / len(points)
-                        dist = min(
-                            abs(avg_x - xmin),
-                            abs(avg_x - xmax),
-                            abs(avg_y - ymin),
-                            abs(avg_y - ymax),
-                        )
-                        if dist <= tolerance:
-                            rows.add(si)
-                    return rows
-            else:
-                n = patch.n
+        adjacency: Dict[Tuple[str, str], Dict[int, Set[int]]] = {}
+        for key, counter in self._spatial_row_pairs.items():
+            neighbor_map: Dict[int, Set[int]] = defaultdict(set)
+            for (row_a, row_b), _ in counter.items():
+                neighbor_map.setdefault(int(row_a), set()).add(int(row_b))
+                neighbor_map.setdefault(int(row_b), set()).add(int(row_a))
+            adjacency[key] = neighbor_map
 
-                def classify(stabs: List[str], pauli: str) -> Set[int]:
-                    counts = [0] * n
-                    for stab in stabs:
-                        for qi, char in enumerate(stab):
-                            if char == pauli:
-                                counts[qi] += 1
-                    rows: Set[int] = set()
-                    for si, stab in enumerate(stabs):
-                        boundary = False
-                        for qi, char in enumerate(stab):
-                            if char == pauli and counts[qi] <= 1:
-                                boundary = True
-                                break
-                        if boundary:
-                            rows.add(si)
-                    return rows
-
-            boundary_rows[(name, "Z")] = classify(patch.z_stabs, "Z")
-            boundary_rows[(name, "X")] = classify(patch.x_stabs, "X")
+        boundary_rows: Dict[Tuple[str, str], Set[int]] = {}
+        for name, patch in self.layout.patches.items():
+            for basis, stabs in (("Z", patch.z_stabs), ("X", patch.x_stabs)):
+                key = (name, basis)
+                neighbor_map = adjacency.get(key, {})
+                degree_based: Set[int] = set()
+                for row_idx in range(len(stabs)):
+                    deg = len(neighbor_map.get(row_idx, set()))
+                    if deg <= 1:
+                        degree_based.add(row_idx)
+                if degree_based:
+                    boundary_rows[key] = degree_based
+                    continue
+                pauli = "Z" if basis == "Z" else "X"
+                boundary_rows[key] = classify_by_geometry(patch, stabs, pauli)
 
         return boundary_rows
 
@@ -136,6 +150,7 @@ class GlobalStimBuilder:
         if not rows:
             return False
         return row_idx in rows
+
 
     def _emit_qubit_coords(self, circuit: stim.Circuit) -> None:
         coords = self.layout.global_coords()

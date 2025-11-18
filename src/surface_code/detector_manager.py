@@ -40,6 +40,7 @@ class DetectorManager:
         self.deferred_detectors: List[List[int]] = []
         self.edge_records: List[Dict[str, object]] = []
         self.detector_context: Dict[int, Dict[str, object]] = {}
+        self._measurement_context: Dict[int, Dict[str, object]] = {}
         
         # Boundary anchor tracking
         self.anchor_detector_ids: List[int] = []
@@ -59,6 +60,32 @@ class DetectorManager:
         self.boundary_counts_z: Dict[str, int] = {}
         self.boundary_counts_x: Dict[str, int] = {}
         self.seam_boundary_counts: Dict[Tuple[str, str, str, int], int] = {}
+
+    def record_measurement_context(
+        self,
+        measurement_index: Optional[int],
+        context: Optional[Dict[str, object]] = None,
+    ) -> None:
+        """Record metadata describing a particular stabilizer measurement.
+
+        Measurement indices are absolute stim ``rec`` slots. We only record a
+        measurement once (the first time it is produced). Subsequent reuse of
+        the same index during seam suppression should not overwrite the
+        original round metadata.
+        """
+        if measurement_index is None:
+            return
+        try:
+            idx = int(measurement_index)
+        except Exception:
+            return
+        if idx < 0:
+            return
+        if idx in self._measurement_context:
+            return
+        info = dict(context or {})
+        info.setdefault("tag", f"{str(info.get('basis', '')).lower()}_measurement")
+        self._measurement_context[idx] = info
 
     def mark_row_dynamic(self, patch: str, basis: str, row: int) -> None:
         """Mark that a stabilizer row participates in a dynamic check event."""
@@ -244,6 +271,10 @@ class DetectorManager:
             return p_x > 0.0 or self._row_is_dynamic(context, "Z")
         if tag == "x_spatial":
             return p_z > 0.0 or self._row_is_dynamic(context, "X")
+        if tag == "z_butterfly":
+            return p_x > 0.0 or self._rows_are_dynamic(context, "Z")
+        if tag == "x_butterfly":
+            return p_z > 0.0 or self._rows_are_dynamic(context, "X")
         # Conservatively keep unknown tags.
         return True
 
@@ -253,6 +284,17 @@ class DetectorManager:
         if not isinstance(patch, str) or not isinstance(row, int):
             return False
         return (patch, basis_hint.upper(), int(row)) in self._row_dynamic
+
+    def _rows_are_dynamic(self, context: Dict[str, object], basis_hint: str) -> bool:
+        patch = context.get("patch")
+        rows = context.get("rows")
+        if not isinstance(patch, str) or not isinstance(rows, (list, tuple)):
+            return False
+        basis = basis_hint.upper()
+        for row in rows:
+            if isinstance(row, int) and (patch, basis, int(row)) in self._row_dynamic:
+                return True
+        return False
 
     def _context_seam_key(self, context: Dict[str, object]) -> Optional[Tuple[str, str, str]]:
         seam = context.get("seam")
@@ -355,6 +397,12 @@ class DetectorManager:
         """
         degree_violations, odd_degree_details = self.compute_diagnostics()
         
+        det_ctx = {int(k): dict(v) for k, v in self.detector_context.items()}
+        if self._measurement_context:
+            det_ctx["__measurements__"] = {
+                int(k): dict(v) for k, v in self._measurement_context.items()
+            }
+
         return {
             "seam_wrap_counts": {str(k): v for k, v in seam_wrap_counts.items()},
             "row_wraps": {
@@ -369,6 +417,6 @@ class DetectorManager:
                 "X": {k: int(v) for k, v in self.boundary_counts_x.items()},
                 "seam": {str(k): int(v) for k, v in self.seam_boundary_counts.items()},
             },
-            "detector_context": {int(k): dict(v) for k, v in self.detector_context.items()},
+            "detector_context": det_ctx,
             "tag_stats": self.get_tag_stats(),
         }

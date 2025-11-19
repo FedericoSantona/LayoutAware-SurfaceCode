@@ -199,7 +199,7 @@ Examples:
     sim_group.add_argument(
         "--distance",
         type=int,
-        default=7,
+        default=3,
         help="Code distance d for the surface code"
     )
     sim_group.add_argument(

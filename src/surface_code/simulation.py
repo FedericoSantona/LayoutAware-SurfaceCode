@@ -31,6 +31,10 @@ from .dem_utils import (
     scan_infeasible_shot,
     collect_detectors_in_errors,
     update_tag_stats_with_presence,
+    sample_circuit_dem_data,
+    add_boundary_hooks_to_dem,
+    enforce_component_boundaries,
+    circuit_to_graphlike_dem,
 )
 from .pauli import PauliTracker, sequence_from_qc
 from .utils import compute_two_qubit_correlations, compute_joint_correlations, wilson_rate_ci
@@ -253,6 +257,8 @@ def _decode_dem(
     shots: int,
     seed: int,
     verbose: bool = False,
+    det_samp_override: Optional[np.ndarray] = None,
+    obs_samp_override: Optional[np.ndarray] = None,
 ) -> Tuple[stim.DetectorErrorModel, np.ndarray, np.ndarray, np.ndarray]:
     """Decode DEM using MWPM. Returns (dem, det_samp, obs_u8, preds)."""
     dem_debug = verbose or env_dem_debug_enabled()
@@ -298,8 +304,8 @@ def _decode_dem(
 
     # Build matcher before sampling so we can ensure PM components are bounded.
     if verbose:
-        print("[DECODE] PyMatching mode: correlated (enable_correlations=False)")
-    matcher = pm.Matching.from_detector_error_model(dem, enable_correlations=False)
+        print("[DECODE] PyMatching mode: correlated (enable_correlations=True)")
+    matcher = pm.Matching.from_detector_error_model(dem, enable_correlations=True)
     graph = matcher.to_networkx()
     mg = matcher._matching_graph
     det_nodes = {int(n) for n in graph.nodes() if isinstance(n, int) and 0 <= int(n) < matcher.num_detectors}
@@ -360,8 +366,15 @@ def _decode_dem(
 
     pm_nodes = collect_detectors_in_errors(dem)
 
-    dem_sampler = dem.compile_sampler(seed=seed)
-    det_samp, obs_samp, _ = dem_sampler.sample(shots)
+    if det_samp_override is not None:
+        det_samp = np.asarray(det_samp_override, dtype=np.bool_)
+        if obs_samp_override is not None:
+            obs_samp = np.asarray(obs_samp_override, dtype=np.bool_)
+        else:
+            obs_samp = None
+    else:
+        dem_sampler = dem.compile_sampler(seed=seed)
+        det_samp, obs_samp, _ = dem_sampler.sample(shots)
     obs_u8 = np.asarray(obs_samp, dtype=np.uint8) if obs_samp is not None and obs_samp.size > 0 else np.zeros((shots, len(observable_pairs)), dtype=np.uint8)
     
     # Debug: Check if observables are connected to errors in DEM
@@ -430,7 +443,7 @@ def _decode_dem(
                     print(f"[PM-GRAPH] missing node context: {sample_ctx}")
             except Exception as _exc:
                 print(f"[PM-GRAPH] diagnostics failed: {_exc}")
-        preds = matcher.decode_batch(det_samp.astype(bool), enable_correlations=False)
+        preds = matcher.decode_batch(det_samp.astype(bool), enable_correlations=True)
         
         # Debug: Check if preds and obs_u8 are suspiciously identical
         if obs_u8.size > 0 and len(observable_pairs) > 0:
@@ -517,16 +530,20 @@ def _track_pauli_frame(
     shots: int,
     seed: int,
     demo_basis: Optional[str],
+    m_samples: Optional[np.ndarray] = None,
 ) -> Tuple[PauliTracker, List[Dict[str, Any]], np.ndarray]:
     """Extract CNOT byproducts and track Pauli frame. Returns (pauli_tracker, cnot_metadata, m_samples)."""
     # Sample raw measurements for merge byproduct extraction
-    circ_sampler = circuit.compile_sampler(seed=seed)
-    m_samples = circ_sampler.sample(shots=shots)
+    if m_samples is None:
+        circ_sampler = circuit.compile_sampler(seed=seed)
+        m_samples = circ_sampler.sample(shots=shots)
+    else:
+        m_samples = np.asarray(m_samples, dtype=np.bool_)
+    shots_count = int(m_samples.shape[0]) if m_samples is not None else int(shots)
 
     # Extract CNOT parity bits directly from single-shot MPPs and update Pauli frame
     pfm = PauliTracker(qc.num_qubits)
     # Initialize frame bits with correct shots dimension
-    shots_count = shots
     for i in range(qc.num_qubits):
         qname = f"q{i}"
         pfm.frame[qname]["fx"] = np.zeros(shots_count, dtype=np.uint8)
@@ -854,14 +871,38 @@ def run_logical_simulation(
     if verbose:
         metadata["_debug_verbose"] = True
 
+    dem = circuit_to_graphlike_dem(circuit)
+    dem = add_boundary_hooks_to_dem(dem, metadata)
+    boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
+    enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
+
+    det_samp_bool, obs_bool, m_samples = sample_circuit_dem_data(
+        circuit,
+        shots,
+        seed=seed,
+        return_measurements=True,
+    )
     dem, det_samp, obs_u8, preds = _decode_dem(
-        dem, metadata, observable_pairs, shots, seed, verbose
+        dem,
+        metadata,
+        observable_pairs,
+        shots,
+        seed,
+        verbose,
+        det_samp_override=det_samp_bool,
+        obs_samp_override=obs_bool,
     )
     
     
     # Step 2: Track Pauli frame and extract CNOT byproducts
     pauli_tracker, cnot_metadata, m_samples = _track_pauli_frame(
-        circuit, metadata, qc, shots, seed, demo_basis
+        circuit,
+        metadata,
+        qc,
+        shots,
+        seed,
+        demo_basis,
+        m_samples=m_samples,
     )
     
     # Step 3: Apply corrections to observables

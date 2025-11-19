@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from typing import Iterable, List, Tuple, Sequence, Optional, Set, Dict
+import os
 import numbers
 
 import numpy as np
@@ -38,31 +39,81 @@ def _is_error_instruction(inst: stim.DemInstruction) -> bool:  # type: ignore[na
         return False
 
 
+def _env_graphlike_preference() -> Optional[bool]:
+    """Return env-controlled preference for graphlike DEMs, if set."""
+    for name in ("SC_USE_GRAPHLIKE_DEM", "SC_USE_GRAPHIKE_DEM"):
+        flag = os.getenv(name)
+        if flag is not None:
+            text = str(flag).strip().lower()
+            return text in {"1", "true", "yes", "on"}
+    return None
+
+
 def circuit_to_graphlike_dem(
     circuit: stim.Circuit,
     *,
     boundary_epsilon: float = 1e-12,
+    force_graphlike: Optional[bool] = None,
 ) -> stim.DetectorErrorModel:
-    """Return a DEM suitable for correlated matching.
-
-    We ask Stim to decompose multi-detector errors into a form compatible with
-    PyMatching's `enable_correlations=True` path. If decomposition fails for
-    some instructions, we fall back to allowing decomposition failures while
-    still requesting decomposition for the rest.
-    """
+    """Return Stim's detector error model, optionally graphified for legacy runs."""
     try:
         dem = circuit.detector_error_model(decompose_errors=True)
     except ValueError:
-        # In case some instructions cannot be decomposed cleanly, allow
-        # decomposition failures but still request decomposition where
-        # possible. This may still leave a few higher-arity terms but avoids
-        # completely failing.
         dem = circuit.detector_error_model(
             decompose_errors=True,
             ignore_decomposition_failures=True,
         )
-    dem = convert_dem_to_graphlike(dem)
+    env_pref = _env_graphlike_preference()
+    if force_graphlike is not None:
+        use_graphlike = force_graphlike
+    elif env_pref is not None:
+        use_graphlike = env_pref
+    else:
+        use_graphlike = True
+    if use_graphlike:
+        dem = convert_dem_to_graphlike(dem)
     return dem
+
+
+def sample_circuit_dem_data(
+    circuit: stim.Circuit,
+    shots: int,
+    *,
+    seed: Optional[int] = None,
+    return_measurements: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Sample measurement data once and derive detector/observable arrays.
+
+    Returns
+    -------
+    det: np.ndarray
+        Detection event bits with shape (shots, circuit.num_detectors).
+    obs: np.ndarray
+        Observable bits with shape (shots, circuit.num_observables).
+    measurements: Optional[np.ndarray]
+        Raw measurement record (shots, circuit.num_measurements) when
+        ``return_measurements`` is True, else ``None``.
+    """
+
+    # Stim's measurement sampler includes all noise present in the circuit.
+    circ_sampler = circuit.compile_sampler(seed=seed)
+    meas = circ_sampler.sample(shots=int(shots))
+    meas = np.asarray(meas, dtype=np.bool_)
+
+    converter = circuit.compile_m2d_converter()
+    det_bits, obs_bits = converter.convert(
+        measurements=meas,
+        separate_observables=True,
+    )
+    det_bits = np.asarray(det_bits, dtype=np.bool_)
+    if obs_bits is None:
+        obs_bits = np.zeros((meas.shape[0], 0), dtype=np.bool_)
+    else:
+        obs_bits = np.asarray(obs_bits, dtype=np.bool_)
+
+    if return_measurements:
+        return det_bits, obs_bits, meas
+    return det_bits, obs_bits, None
 
 
 def add_boundary_hooks_to_dem(

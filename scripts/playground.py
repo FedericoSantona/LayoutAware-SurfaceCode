@@ -68,9 +68,6 @@ from surface_code.dem_utils import (
     component_anchor_coverage,
     dem_error_block_histogram,
     iter_error_blocks_with_prob,
-    add_spatial_correlations_to_dem,
-    add_boundary_hooks_to_dem,
-    enforce_component_boundaries,
 )
 
 from surface_code.pauli import PauliTracker, parse_init_label, sequence_from_qc
@@ -377,10 +374,6 @@ def _simulate_simple_memory_run(
             qc,
         )
     dem = circuit_to_graphlike_dem(circuit)
-    dem = add_spatial_correlations_to_dem(dem, metadata)
-    dem = add_boundary_hooks_to_dem(dem, metadata)
-    boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
-    enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
     results = run_logical_simulation(
         circuit=circuit,
         dem=dem,
@@ -601,10 +594,6 @@ def main() -> None:
 
         # Sample DEM and decode
         dem = circuit_to_graphlike_dem(circuit)
-        dem = add_spatial_correlations_to_dem(dem, metadata)
-        dem = add_boundary_hooks_to_dem(dem, metadata)
-        boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
-        enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
 
         # Detailed DEM health report (only when verbose)
         if args.verbose:

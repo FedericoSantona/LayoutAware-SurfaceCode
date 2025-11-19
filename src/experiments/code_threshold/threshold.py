@@ -18,7 +18,7 @@ from surface_code.dem_diagnostics import log_dem_diagnostics, env_dem_debug_enab
 from surface_code.dem_utils import (
     single_detector_hook_ids,
     circuit_to_graphlike_dem,
-    add_spatial_correlations_to_dem,
+    sample_circuit_dem_data,
     add_boundary_hooks_to_dem,
     enforce_component_boundaries,
 )
@@ -142,7 +142,6 @@ def _run_circuit_logical_error_rate(
     if metadata is None:
         metadata = {}
     dem = circuit_to_graphlike_dem(circuit)
-    dem = add_spatial_correlations_to_dem(dem, metadata)
     dem = add_boundary_hooks_to_dem(dem, metadata)
     boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
     enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
@@ -155,22 +154,26 @@ def _run_circuit_logical_error_rate(
     # Build matcher on the raw DEM first. On well-formed memory experiments
     # (closed space-time cycles), components naturally have even parity and
     # decoding is feasible without synthetic boundaries.
-    matcher = pm.Matching.from_detector_error_model(dem)
+    matcher = pm.Matching.from_detector_error_model(dem, enable_correlations=True)
 
-    # Sample detector and observable data
-    dem_sampler = dem.compile_sampler(seed=mc_config.seed)
-    detector_samples, observable_samples, _ = dem_sampler.sample(mc_config.shots)
-    detector_samples_bool = np.asarray(detector_samples, dtype=np.bool_)
-    
+    # Sample detector and observable data from the noisy circuit once
+    det_bool, obs_bool, measurement_samples = sample_circuit_dem_data(
+        circuit,
+        mc_config.shots,
+        seed=mc_config.seed,
+        return_measurements=True,
+    )
+    detector_samples_bool = np.asarray(det_bool, dtype=np.bool_)
+
     # Validate that observables were sampled correctly
-    if observable_samples is None or observable_samples.size == 0:
+    if obs_bool is None or obs_bool.size == 0:
         raise RuntimeError(
             f"No observable samples were generated! "
             f"This indicates that no OBSERVABLE_INCLUDE operations were emitted in the circuit. "
             f"Observable pairs count: {len(observable_pairs)}"
         )
-    
-    logical_array = np.asarray(observable_samples, dtype=np.uint8)
+
+    logical_array = np.asarray(obs_bool, dtype=np.uint8)
     
     # Ensure we have the expected number of observables
     if logical_array.shape[1] != len(observable_pairs):
@@ -208,15 +211,9 @@ def _run_circuit_logical_error_rate(
     demo_basis: Optional[str] = None
     if metadata is not None and "demo_index" in metadata:
         demo_basis = metadata.get("demo_basis")
-        # Compile a circuit sampler to sample raw measurements including the demo.
-        circ_sampler = circuit.compile_sampler(seed=mc_config.seed)
-        # Sample measurements only (detector samples not needed here).
-        m_samples = circ_sampler.sample(shots=mc_config.shots)
-        # The returned array is [shots, num_measurements]; pick the column at demo_index.
-        # Stim returns booleans; convert to uint8 for consistency.
         demo_col = int(metadata["demo_index"]) if metadata["demo_index"] is not None else None
-        if demo_col is not None:
-            demo_bits = np.asarray(m_samples[:, demo_col], dtype=np.uint8)
+        if demo_col is not None and measurement_samples is not None:
+            demo_bits = np.asarray(measurement_samples[:, demo_col], dtype=np.uint8)
 
     return SimulationResult(
         logical_error_rate=float(logical_error_rate),

@@ -65,6 +65,52 @@ def circuit_to_graphlike_dem(
     return dem
 
 
+def add_boundary_hooks_to_dem(
+    dem: stim.DetectorErrorModel,
+    metadata: Dict[str, object],
+) -> stim.DetectorErrorModel:
+    """Append 1-detector ERROR hooks for true boundaries described in metadata.
+
+    Hooks inherit a probability comparable to the physical error rates specified
+    in ``metadata['noise_model']`` (fallback to the boundary ``epsilon`` field or
+    1e-4 when no noise data is present).
+    """
+    if not isinstance(metadata, dict):
+        return dem
+    anchors_conf = metadata.get("boundary_anchors", {}) or {}
+    anchors = anchors_conf.get("detector_ids")
+    if not anchors:
+        return dem
+    noise = metadata.get("noise_model", {}) or {}
+    prob_candidates: List[float] = []
+    for key in ("p_x_error", "p_z_error", "p_meas"):
+        val = noise.get(key)
+        try:
+            if val is not None:
+                prob_candidates.append(float(val))
+        except Exception:
+            continue
+    prob = max(prob_candidates) if prob_candidates else 0.0
+    if prob <= 0.0:
+        try:
+            prob = float(anchors_conf.get("epsilon", 1e-4))
+        except Exception:
+            prob = 1e-4
+    prob = max(prob, 1e-6)
+    new_dem = dem.copy()
+    seen: Set[int] = set()
+    for det_id in anchors:
+        try:
+            idx = int(det_id)
+        except Exception:
+            continue
+        if idx < 0 or idx in seen:
+            continue
+        seen.add(idx)
+        new_dem.append("error", prob, [stim.target_relative_detector_id(idx)])
+    return new_dem
+
+
 def parse_dem_errors(dem):
     """
     Return a list of elementary faults as dicts:

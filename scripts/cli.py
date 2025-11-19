@@ -199,7 +199,7 @@ Examples:
     sim_group.add_argument(
         "--distance",
         type=int,
-        default=3,
+        default=7,
         help="Code distance d for the surface code"
     )
     sim_group.add_argument(
@@ -217,7 +217,7 @@ Examples:
     sim_group.add_argument(
         "--rounds",
         type=int,
-        default=None,
+        default=7,
         help="Number of measurement rounds (default: distance)"
     )
     sim_group.add_argument(
@@ -235,13 +235,13 @@ Examples:
     sim_group.add_argument(
         "--px",
         type=float,
-        default=1e-4,
+        default=1e-3,
         help="Phenomenological X error probability"
     )
     sim_group.add_argument(
         "--pz",
         type=float,
-        default=1e-4,
+        default=1e-3,
         help="Phenomenological Z error probability"
     )
     sim_group.add_argument(

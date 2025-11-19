@@ -69,6 +69,7 @@ from surface_code.dem_utils import (
     dem_error_block_histogram,
     iter_error_blocks_with_prob,
     add_spatial_correlations_to_dem,
+    add_boundary_hooks_to_dem,
     enforce_component_boundaries,
 )
 
@@ -179,9 +180,9 @@ def _print_dem_health_report(dem, metadata, project_root: Path, benchmark_name: 
             print(f"    D{did} tag={tag} context_keys={keys}")
 
     if tag_stats:
-        print("[DEM-REPORT] Detector tag statistics (temporal only):")
+        print("[DEM-REPORT] Detector tag statistics (temporal and butterfly):")
         for tag, stats in tag_stats.items():
-            if "temporal" in tag:
+            if "temporal" in tag or "butterfly" in tag:
                 print(
                     f"  {tag}: emitted={stats.get('emitted', 0)}, "
                     f"kept={stats.get('kept', 0)}, dropped={stats.get('dropped', 0)}"
@@ -377,6 +378,7 @@ def _simulate_simple_memory_run(
         )
     dem = circuit_to_graphlike_dem(circuit)
     dem = add_spatial_correlations_to_dem(dem, metadata)
+    dem = add_boundary_hooks_to_dem(dem, metadata)
     boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
     enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
     results = run_logical_simulation(
@@ -409,7 +411,7 @@ def _run_scaling_summary(
     if args.benchmark != "simple_1q_xzh":
         return
     distances = [3, 5, 7]
-    p_values = [1e-4]
+    p_values = [args.px]
     summary_shots = 50000
     print("\n[THRESHOLD-SUMMARY] simple_1q_xzh scaling sanity (shots="
           f"{summary_shots}):")
@@ -600,6 +602,7 @@ def main() -> None:
         # Sample DEM and decode
         dem = circuit_to_graphlike_dem(circuit)
         dem = add_spatial_correlations_to_dem(dem, metadata)
+        dem = add_boundary_hooks_to_dem(dem, metadata)
         boundary_meta = (metadata.get("boundary_anchors", {}) or {}).get("detector_ids")
         enforce_component_boundaries(dem, explicit_anchor_ids=boundary_meta)
 

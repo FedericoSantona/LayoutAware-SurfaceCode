@@ -87,6 +87,27 @@ class PhaseSpec:
 # ---------------------------------------------------------------------------
 
 
+# Helper to strip Xs on specified qubits from a Pauli string
+from typing import Sequence
+
+def _strip_x_on_qubits(pauli_str: str, qubits: Sequence[int]) -> str:
+    """Return a Pauli string with Xs removed on the given local qubits.
+
+    This is used to modify X-type stabilizers near the C–INT smooth
+    boundary so that, during the smooth-merge phase, the joint Z checks
+    added along the seam do not anti-commute with any X stabilizers.
+
+    The input `pauli_str` is in the single-patch index space; the caller
+    is responsible for embedding it into the combined index space.
+    """
+    chars = list(pauli_str)
+    n = len(chars)
+    for q in qubits:
+        if 0 <= q < n and chars[q] == "X":
+            chars[q] = "I"
+    return "".join(chars)
+
+
 def _run_phase(
     circuit: stim.Circuit,
     builder: PhenomenologicalStimBuilder,
@@ -270,18 +291,16 @@ def build_cnot_surgery_circuit(
         premerge_z.append(embed_patch(s, offset_T))
 
     for s in x_single:
-        premerge_x.append(embed_patch(s, offset_C))
-        premerge_x.append(embed_patch(s, offset_INT))
+        # Remove X support on the smooth boundary data qubits for C and INT.
+        # This ensures that, when we later add joint Z checks along the seam
+        # involving these boundary qubits, those joint Z stabilizers commute
+        # with all X stabilizers in *every* phase of the protocol.
+        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
+        premerge_x.append(embed_patch(s_stripped, offset_C))
+        premerge_x.append(embed_patch(s_stripped, offset_INT))
+        # The target patch keeps the full X stabilizers; it is unaffected by
+        # the C–INT smooth merge along the seam.
         premerge_x.append(embed_patch(s, offset_T))
-    # Stabilize the seam ancilla line in the X-basis so they behave like
-    # |+> states in our phenomenological model during the pre-merge memory
-    # phase (ancillas initialised in |+>). These X checks will be *dropped*
-    # in the smooth-merge phase so that the seam is governed purely by Z-type
-    # joint checks tying C, seam, and INT.
-    for q in seam_C_INT:
-        chars = ["I"] * n_total
-        chars[q] = "X"
-        premerge_x.append("".join(chars))
 
     # --- Smooth-merge phase stabilizers ---------------------------------
     #
@@ -297,11 +316,14 @@ def build_cnot_surgery_circuit(
     merge_z: List[str] = list(premerge_z)
     merge_x: List[str] = []
 
-    # Keep only the embedded X stabilizers of the three patches (no seam X
-    # checks) during the merge window.
+    # Keep embedded X stabilizers for the three patches, but with X support
+    # removed on the smooth boundary data qubits of C and INT. This ensures
+    # that the joint C–seam–INT Z checks added below commute with all X
+    # stabilizers measured during the smooth-merge phase.
     for s in x_single:
-        merge_x.append(embed_patch(s, offset_C))
-        merge_x.append(embed_patch(s, offset_INT))
+        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
+        merge_x.append(embed_patch(s_stripped, offset_C))
+        merge_x.append(embed_patch(s_stripped, offset_INT))
         merge_x.append(embed_patch(s, offset_T))
 
     # Add distance-many joint Z checks tying C, seam, and INT along the smooth

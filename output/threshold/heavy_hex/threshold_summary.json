@@ -1,0 +1,62 @@
+{
+  "x_only": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/x_only_d3.csv",
+      "5": "output/threshold/heavy_hex/x_only_d5.csv",
+      "7": "output/threshold/heavy_hex/x_only_d7.csv",
+      "9": "output/threshold/heavy_hex/x_only_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/x_only.png",
+    "crossings": {
+      "3-5": 0.014788058208474631,
+      "5-7": 0.01531069113619623,
+      "7-9": 0.00540239104162796
+    },
+    "json": "output/threshold/heavy_hex/x_only.json"
+  },
+  "z_only": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/z_only_d3.csv",
+      "5": "output/threshold/heavy_hex/z_only_d5.csv",
+      "7": "output/threshold/heavy_hex/z_only_d7.csv",
+      "9": "output/threshold/heavy_hex/z_only_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/z_only.png",
+    "crossings": {
+      "3-5": 0.04361396887248837,
+      "5-7": 0.05985997017670396,
+      "7-9": 0.056976898517880126
+    },
+    "json": "output/threshold/heavy_hex/z_only.json"
+  },
+  "symmetric_Zinit": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/symmetric_Zinit_d3.csv",
+      "5": "output/threshold/heavy_hex/symmetric_Zinit_d5.csv",
+      "7": "output/threshold/heavy_hex/symmetric_Zinit_d7.csv",
+      "9": "output/threshold/heavy_hex/symmetric_Zinit_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/symmetric_Zinit.png",
+    "crossings": {
+      "3-5": 0.0013398365075498059,
+      "5-7": 0.0160723057872777,
+      "7-9": 0.0052152888886507764
+    },
+    "json": "output/threshold/heavy_hex/symmetric_Zinit.json"
+  },
+  "symmetric_Xinit": {
+    "csv": {
+      "3": "output/threshold/heavy_hex/symmetric_Xinit_d3.csv",
+      "5": "output/threshold/heavy_hex/symmetric_Xinit_d5.csv",
+      "7": "output/threshold/heavy_hex/symmetric_Xinit_d7.csv",
+      "9": "output/threshold/heavy_hex/symmetric_Xinit_d9.csv"
+    },
+    "plot": "plots/threshold/heavy_hex/symmetric_Xinit.png",
+    "crossings": {
+      "3-5": 0.04618461797247305,
+      "5-7": 0.05092829622412404,
+      "7-9": 0.007139911989121913
+    },
+    "json": "output/threshold/heavy_hex/symmetric_Xinit.json"
+  }
+}

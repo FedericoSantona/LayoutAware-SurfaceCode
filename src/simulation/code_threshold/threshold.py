@@ -9,7 +9,7 @@ import numpy as np
 from surface_code import (
     PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
-    build_heavy_hex_model,
+    build_surface_code_model,
 )
 
 from ..runner import MonteCarloConfig, SimulationResult, run_logical_error_rate
@@ -86,10 +86,11 @@ def run_scenario(
     scenario: ThresholdScenario,
     study_cfg: ThresholdStudyConfig,
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
+    code_type: str = "heavy_hex",
 ) -> ThresholdScenarioResult:
     sweeps: List[DistanceSweepResult] = []
     for distance in scenario.distances:
-        model = build_heavy_hex_model(distance)
+        model = build_surface_code_model(distance, code_type=code_type)
         builder = PhenomenologicalStimBuilder(
             code=model.code,
             z_stabilizers=model.z_stabilizers,

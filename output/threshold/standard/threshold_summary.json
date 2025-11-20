@@ -1,0 +1,62 @@
+{
+  "x_only": {
+    "csv": {
+      "3": "output/threshold/standard/x_only_d3.csv",
+      "5": "output/threshold/standard/x_only_d5.csv",
+      "7": "output/threshold/standard/x_only_d7.csv",
+      "9": "output/threshold/standard/x_only_d9.csv"
+    },
+    "plot": "plots/threshold/standard/x_only.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": 0.09925599472450743,
+      "7-9": 0.0030951617362994744
+    },
+    "json": "output/threshold/standard/x_only.json"
+  },
+  "z_only": {
+    "csv": {
+      "3": "output/threshold/standard/z_only_d3.csv",
+      "5": "output/threshold/standard/z_only_d5.csv",
+      "7": "output/threshold/standard/z_only_d7.csv",
+      "9": "output/threshold/standard/z_only_d9.csv"
+    },
+    "plot": "plots/threshold/standard/z_only.png",
+    "crossings": {
+      "3-5": 0.04614285772097147,
+      "5-7": 0.06577342136100991,
+      "7-9": null
+    },
+    "json": "output/threshold/standard/z_only.json"
+  },
+  "symmetric_Zinit": {
+    "csv": {
+      "3": "output/threshold/standard/symmetric_Zinit_d3.csv",
+      "5": "output/threshold/standard/symmetric_Zinit_d5.csv",
+      "7": "output/threshold/standard/symmetric_Zinit_d7.csv",
+      "9": "output/threshold/standard/symmetric_Zinit_d9.csv"
+    },
+    "plot": "plots/threshold/standard/symmetric_Zinit.png",
+    "crossings": {
+      "3-5": null,
+      "5-7": null,
+      "7-9": 0.0008943718704409133
+    },
+    "json": "output/threshold/standard/symmetric_Zinit.json"
+  },
+  "symmetric_Xinit": {
+    "csv": {
+      "3": "output/threshold/standard/symmetric_Xinit_d3.csv",
+      "5": "output/threshold/standard/symmetric_Xinit_d5.csv",
+      "7": "output/threshold/standard/symmetric_Xinit_d7.csv",
+      "9": "output/threshold/standard/symmetric_Xinit_d9.csv"
+    },
+    "plot": "plots/threshold/standard/symmetric_Xinit.png",
+    "crossings": {
+      "3-5": 0.04512248027756728,
+      "5-7": 0.07880348452212865,
+      "7-9": 0.08070892367854396
+    },
+    "json": "output/threshold/standard/symmetric_Xinit.json"
+  }
+}

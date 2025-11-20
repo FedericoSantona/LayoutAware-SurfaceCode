@@ -50,7 +50,7 @@ def make_physical_grid(p_min: float, p_max: float, num: int) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shots", type=int, default=10**6, help="Monte Carlo shots per data point")
+    parser.add_argument("--shots", type=int, default=10**4, help="Monte Carlo shots per data point")
     parser.add_argument("--seed", type=int, default=46, help="Random seed for Stim samplers")
     parser.add_argument(
         "--distances",
@@ -62,16 +62,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--p-max", type=float, default=0.1, help="Maximum physical error rate")
     parser.add_argument("--num-points", type=int, default=20, help="Number of physical error samples")
     parser.add_argument(
+        "--layout",
+        type=str,
+        choices=["heavy_hex", "standard"],
+        default="heavy_hex",
+        help="Surface code layout type: 'heavy_hex' or 'standard' (default: heavy_hex)",
+    )
+    parser.add_argument(
         "--plot-dir",
         type=Path,
-        default=PROJECT_ROOT / "plots" / "threshold",
-        help="Directory to store generated plots",
+        default=None,
+        help="Directory to store generated plots (default: plots/threshold/{layout})",
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=PROJECT_ROOT / "output" / "threshold",
-        help="Directory to store CSV/JSON results",
+        default=None,
+        help="Directory to store CSV/JSON results (default: output/threshold/{layout})",
     )
     return parser.parse_args()
 
@@ -107,8 +114,9 @@ def main() -> None:
     distances = parse_distances(args.distances or [])
     physical_grid = make_physical_grid(args.p_min, args.p_max, args.num_points)
 
-    plot_dir: Path = args.plot_dir
-    data_dir: Path = args.data_dir
+    # Set default directories based on layout type if not provided
+    plot_dir: Path = args.plot_dir or (PROJECT_ROOT / "plots" / "threshold" / args.layout)
+    data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / args.layout)
     plot_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +157,7 @@ def main() -> None:
             scenario,
             study_cfg,
             progress=update_progress if progress_bar is not None else None,
+            code_type=args.layout,
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)

@@ -1,10 +1,11 @@
-"""CLI entry point for running heavy-hex phenomenological simulations."""
+"""CLI entry point for running surface code phenomenological simulations."""
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
+
  
 # Ensure the src/ directory is available for imports when executed as a script
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,19 +18,21 @@ from qiskit_qec.operators.pauli_list import PauliList
 from surface_code import (
     PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
-    build_heavy_hex_model,
+    build_surface_code_model,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d of the heavy-hex code")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--code-type", type=str, default="heavy_hex", choices=["heavy_hex", "standard"],
+                        help="Type of surface code: 'heavy_hex' or 'standard' (default: heavy_hex)")
     parser.add_argument("--rounds", type=int, default=None, help="Number of measurement rounds (default: distance)")
-    parser.add_argument("--px", type=float, default=1e-4, help="Phenomenological X error probability")
-    parser.add_argument("--pz", type=float, default=1e-4, help="Phenomenological Z error probability")
+    parser.add_argument("--px", type=float, default=1e-3, help="Phenomenological X error probability")
+    parser.add_argument("--pz", type=float, default=1e-3, help="Phenomenological Z error probability")
     parser.add_argument("--init", type=str, default="0", help="Logical initialization: one of {0,1,+,-}")
-    parser.add_argument("--shots", type=int, default=10**4, help="Number of Monte Carlo samples")
+    parser.add_argument("--shots", type=int, default=10**5, help="Number of Monte Carlo samples")
     parser.add_argument("--seed", type=int, default=46, help="Seed for Stim samplers")
 
     return parser.parse_args()
@@ -37,6 +40,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_experiment(
     distance: int,
+    code_type: str,
     rounds: int | None,
     p_x: float,
     p_z: float,
@@ -45,10 +49,13 @@ def run_experiment(
     seed: int | None,
     spatial: bool = True,
 ):
-    model = build_heavy_hex_model(distance)
+    model = build_surface_code_model(distance, code_type)
 
+    # Determine code name for display and file naming
+    code_name = "heavy-hex" if code_type == "heavy_hex" else "surface-code"
+    code_name_short = "heavy_hex" if code_type == "heavy_hex" else "surface_code"
 
-    # save the heavy-hex tiling
+    # save the code tiling
     plot_dir = PROJECT_ROOT / "plots"
     plot_dir.mkdir(exist_ok=True)
     fig = model.code.draw(
@@ -57,12 +64,12 @@ def run_experiment(
         zcolor="skyblue",
         figsize=(5, 5),
     )
-    plt.savefig(plot_dir / f"heavy_hex_d{distance}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(plot_dir / f"{code_name_short}_d{distance}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    print(f"Heavy-hex tiling saved to {plot_dir}/heavy_hex_d{distance}.png")
+    print(f"{code_name.capitalize()} tiling saved to {plot_dir}/{code_name_short}_d{distance}.png")
 
-    print(f"Heavy-hex code with d={distance} has {model.code.n} physical qubits.")
+    print(f"{code_name.capitalize()} code with d={distance} has {model.code.n} physical qubits.")
     print(f"Number of gauge generators: {len(model.generators)}")
     print("Gauge Generators:")
     for i, gen in enumerate(model.generators):
@@ -110,8 +117,6 @@ def run_experiment(
     )
 
     circuit, observable_pairs = builder.build(stim_config)
-    dem = circuit.detector_error_model()
-    print("detectors:", dem.num_detectors)
 
     mc_config = MonteCarloConfig(shots=shots, seed=seed)
     result = run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config)
@@ -132,6 +137,7 @@ def main() -> None:
     args = parse_args()
     run_experiment(
         distance=args.distance,
+        code_type=args.code_type,
         rounds=args.rounds,
         p_x=args.px,
         p_z=args.pz,

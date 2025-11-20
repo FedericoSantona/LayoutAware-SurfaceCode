@@ -1,0 +1,173 @@
+{
+  "name": "symmetric_Zinit",
+  "init_label": "0",
+  "track": "Z",
+  "distances": [
+    3,
+    5,
+    7,
+    9
+  ],
+  "sweeps": [
+    {
+      "distance": 3,
+      "points": [
+        {
+          "p_x": 0.0004999999999999999,
+          "p_z": 0.0004999999999999999,
+          "logical_error_rate": 0.0,
+          "avg_syndrome_weight": 0.0741,
+          "click_rate": 0.039
+        },
+        {
+          "p_x": 0.0018803015465431966,
+          "p_z": 0.0018803015465431966,
+          "logical_error_rate": 0.0001,
+          "avg_syndrome_weight": 0.2567,
+          "click_rate": 0.1389
+        },
+        {
+          "p_x": 0.0070710678118654745,
+          "p_z": 0.0070710678118654745,
+          "logical_error_rate": 0.0031,
+          "avg_syndrome_weight": 0.954,
+          "click_rate": 0.4213
+        },
+        {
+          "p_x": 0.026591479484724942,
+          "p_z": 0.026591479484724942,
+          "logical_error_rate": 0.0425,
+          "avg_syndrome_weight": 3.368,
+          "click_rate": 0.8781
+        },
+        {
+          "p_x": 0.1,
+          "p_z": 0.1,
+          "logical_error_rate": 0.3295,
+          "avg_syndrome_weight": 10.1194,
+          "click_rate": 0.9996
+        }
+      ]
+    },
+    {
+      "distance": 5,
+      "points": [
+        {
+          "p_x": 0.0004999999999999999,
+          "p_z": 0.0004999999999999999,
+          "logical_error_rate": 0.0069,
+          "avg_syndrome_weight": 0.4533,
+          "click_rate": 0.1876
+        },
+        {
+          "p_x": 0.0018803015465431966,
+          "p_z": 0.0018803015465431966,
+          "logical_error_rate": 0.0252,
+          "avg_syndrome_weight": 1.6636,
+          "click_rate": 0.5327
+        },
+        {
+          "p_x": 0.0070710678118654745,
+          "p_z": 0.0070710678118654745,
+          "logical_error_rate": 0.1024,
+          "avg_syndrome_weight": 6.1683,
+          "click_rate": 0.9439
+        },
+        {
+          "p_x": 0.026591479484724942,
+          "p_z": 0.026591479484724942,
+          "logical_error_rate": 0.3099,
+          "avg_syndrome_weight": 21.2691,
+          "click_rate": 1.0
+        },
+        {
+          "p_x": 0.1,
+          "p_z": 0.1,
+          "logical_error_rate": 0.4925,
+          "avg_syndrome_weight": 61.163,
+          "click_rate": 1.0
+        }
+      ]
+    },
+    {
+      "distance": 7,
+      "points": [
+        {
+          "p_x": 0.0004999999999999999,
+          "p_z": 0.0004999999999999999,
+          "logical_error_rate": 0.0002,
+          "avg_syndrome_weight": 1.3305,
+          "click_rate": 0.4475
+        },
+        {
+          "p_x": 0.0018803015465431966,
+          "p_z": 0.0018803015465431966,
+          "logical_error_rate": 0.002,
+          "avg_syndrome_weight": 5.0341,
+          "click_rate": 0.8956
+        },
+        {
+          "p_x": 0.0070710678118654745,
+          "p_z": 0.0070710678118654745,
+          "logical_error_rate": 0.0259,
+          "avg_syndrome_weight": 18.5433,
+          "click_rate": 0.9998
+        },
+        {
+          "p_x": 0.026591479484724942,
+          "p_z": 0.026591479484724942,
+          "logical_error_rate": 0.2691,
+          "avg_syndrome_weight": 64.5165,
+          "click_rate": 1.0
+        },
+        {
+          "p_x": 0.1,
+          "p_z": 0.1,
+          "logical_error_rate": 0.4851,
+          "avg_syndrome_weight": 184.0384,
+          "click_rate": 1.0
+        }
+      ]
+    },
+    {
+      "distance": 9,
+      "points": [
+        {
+          "p_x": 0.0004999999999999999,
+          "p_z": 0.0004999999999999999,
+          "logical_error_rate": 0.0004,
+          "avg_syndrome_weight": 3.0428,
+          "click_rate": 0.7278
+        },
+        {
+          "p_x": 0.0018803015465431966,
+          "p_z": 0.0018803015465431966,
+          "logical_error_rate": 0.0015,
+          "avg_syndrome_weight": 11.3256,
+          "click_rate": 0.9933
+        },
+        {
+          "p_x": 0.0070710678118654745,
+          "p_z": 0.0070710678118654745,
+          "logical_error_rate": 0.0279,
+          "avg_syndrome_weight": 41.4413,
+          "click_rate": 1.0
+        },
+        {
+          "p_x": 0.026591479484724942,
+          "p_z": 0.026591479484724942,
+          "logical_error_rate": 0.3044,
+          "avg_syndrome_weight": 144.753,
+          "click_rate": 1.0
+        },
+        {
+          "p_x": 0.1,
+          "p_z": 0.1,
+          "logical_error_rate": 0.5022,
+          "avg_syndrome_weight": 410.5361,
+          "click_rate": 1.0
+        }
+      ]
+    }
+  ]
+}

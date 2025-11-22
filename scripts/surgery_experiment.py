@@ -370,6 +370,7 @@ def build_cnot_surgery_circuit(
 
     for s in x_single:
         s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
+        #s_stripped = s
         base_x.append(embed_patch(s_stripped, offset_C))
         base_x.append(embed_patch(s_stripped, offset_INT))
         base_x.append(embed_patch(s, offset_T))
@@ -386,16 +387,7 @@ def build_cnot_surgery_circuit(
     # in |+> (via the pre-merge X checks), then governed by Z-type joint
     # checks that effectively measure Z_L^C Z_L^INT over the merge window.
     smooth_merge_z: List[str] = list(base_z)
-    smooth_merge_x: List[str] = []
-    
-    # Strip X stabilizers on smooth boundary for C and INT (the patches
-    # involved in the smooth merge), but keep T unchanged (similar to how
-    # Z is stripped for INT and T in the rough merge, but not for C).
-    for s in x_single:
-        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
-        smooth_merge_x.append(embed_patch(s_stripped, offset_C))
-        smooth_merge_x.append(embed_patch(s_stripped, offset_INT))
-        smooth_merge_x.append(embed_patch(s, offset_T))
+    smooth_merge_x: List[str] = list(base_x)
 
     # Add distance-many joint Z checks tying C, seam, and INT along the smooth
     # boundary identified by `smooth_boundary_qubits`.
@@ -439,13 +431,15 @@ def build_cnot_surgery_circuit(
         rough_merge_z.append(embed_patch(s_rough, offset_INT))
         rough_merge_z.append(embed_patch(s_rough, offset_T))
 
+    
     for s in x_single:
         s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
         rough_merge_x.append(embed_patch(s, offset_C))
         if not _touches_boundary(s_stripped, rough_boundary_qubits):
-            rough_merge_x.append(embed_patch(s_stripped, offset_INT))
+           rough_merge_x.append(embed_patch(s, offset_INT))
         if not _touches_boundary(s, rough_boundary_qubits):
-            rough_merge_x.append(embed_patch(s, offset_T))
+           rough_merge_x.append(embed_patch(s, offset_T))
+    
 
     # Add distance-many joint X checks tying INT, seam_INT_T, and T along the
     # rough boundary identified by `rough_boundary_qubits`.
@@ -480,7 +474,7 @@ def build_cnot_surgery_circuit(
     for q in range(code.n):
         circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
-    """
+    
     # Build a logical Z observable for the control patch by embedding the
     # single-patch logical_Z operator at the control offset. We measure it
     # once at the beginning and once at the end, and include their parity
@@ -489,27 +483,31 @@ def build_cnot_surgery_circuit(
     if single_model.logical_z is not None:
         logical_z_control = embed_patch(single_model.logical_z, offset_C)
 
-    # Build a logical Z observable for the target patch by embedding the
-    # single-patch logical_Z operator at the target offset. We measure it
+    # Build a logical X observable for the target patch by embedding the
+    # single-patch logical_X operator at the target offset. We measure it
     # once at the beginning and once at the end, and include their parity
     # as OBSERVABLE 1.
-    logical_z_target: str | None = None
-    if single_model.logical_z is not None:
-        logical_z_target = embed_patch(single_model.logical_z, offset_T)
+    logical_x_target: str | None = None
+    if single_model.logical_x is not None:
+        logical_x_target = embed_patch(single_model.logical_x, offset_T)
 
+    # Define the observable pairs for the logical Z and X measurements
     observable_pairs: List[Tuple[int, int]] = []
-    start_idx: int | None = None
+
+    #Measure logical Z on the control patch
+    start_idx_control: int | None = None
     if logical_z_control is not None:
         circuit.append_operation("TICK")
-        start_idx = builder._mpp_from_string(circuit, logical_z_control)
+        start_idx_control = builder._mpp_from_string(circuit, logical_z_control)
 
+
+    #Measure logical X on the target patch
     start_idx_target: int | None = None
-    if logical_z_target is not None:
+    if logical_x_target is not None:
         circuit.append_operation("TICK")
-        start_idx_target = builder._mpp_from_string(circuit, logical_z_target)
-    """
+        start_idx_target = builder._mpp_from_string(circuit, logical_x_target)
     
-
+    
     # Run the pre-merge phase using the same phenomenological noise model
     # used in the memory experiment.
     stim_config = PhenomenologicalStimConfig(
@@ -534,28 +532,27 @@ def build_cnot_surgery_circuit(
             sx_prev=sx_prev,
         )
 
-    observable_pairs = []
-    """
+    
     # Final logical Z measurement on the control patch.
-    end_idx: int | None = None
+    end_idx_control: int | None = None
     if logical_z_control is not None:
         circuit.append_operation("TICK")
-        end_idx = builder._mpp_from_string(circuit, logical_z_control)
-        if start_idx is not None and end_idx is not None:
+        end_idx_control = builder._mpp_from_string(circuit, logical_z_control)
+        if start_idx_control is not None and end_idx_control is not None:
             circuit.append_operation(
                 "OBSERVABLE_INCLUDE",
-                [builder._rec_from_abs(circuit, start_idx),
-                 builder._rec_from_abs(circuit, end_idx)],
+                [builder._rec_from_abs(circuit, start_idx_control),
+                 builder._rec_from_abs(circuit, end_idx_control)],
                 0,
             )
-            observable_pairs.append((start_idx, end_idx))
+            observable_pairs.append((start_idx_control, end_idx_control))
 
-    
-    # Final logical Z measurement on the target patch.
+    """
+    # Final logical X measurement on the target patch.
     end_idx_target: int | None = None
-    if logical_z_target is not None:
+    if logical_x_target is not None:
         circuit.append_operation("TICK")
-        end_idx_target = builder._mpp_from_string(circuit, logical_z_target)
+        end_idx_target = builder._mpp_from_string(circuit, logical_x_target)
         if start_idx_target is not None and end_idx_target is not None:
             circuit.append_operation(
                 "OBSERVABLE_INCLUDE",
@@ -605,7 +602,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
@@ -651,6 +648,7 @@ def run_cnot_experiment(
         rounds_post=rounds_post,
     )
 
+    """
     # Write SVG diagram to file - focus on detector D297
     # D297 involves qubits 13, 15, 17 (from error message), problem at tick 38
     svg_content = str(circuit.diagram(
@@ -676,6 +674,8 @@ def run_cnot_experiment(
     ops = list(circuit)
     for i in range(125, 140):
         print(i, ops[i])
+    """
+
 
     # We reuse PhenomenologicalStimConfig purely for its noise parameters and
     # CSS-family selector; the `rounds` field is ignored by the multi-phase

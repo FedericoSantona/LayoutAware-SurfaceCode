@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Any
 
 import stim
 
@@ -41,6 +41,10 @@ class PhenomenologicalStimBuilder:
         self.x_stabilizers = list(x_stabilizers)
         self.logical_z = logical_z
         self.logical_x = logical_x
+
+        # Debug metadata: maps absolute measurement index -> info dict
+        # (family, round, stabilizer index, and Pauli string).
+        self._meas_meta: Dict[int, Dict[str, Any]] = {}
 
     # ----- helpers -----------------------------------------------------
 
@@ -81,12 +85,35 @@ class PhenomenologicalStimBuilder:
     def _rec_from_abs(circuit: stim.Circuit, index: int) -> stim.GateTarget:
         return stim.target_rec(index - circuit.num_measurements)
 
-    def _measure_list(self, circuit: stim.Circuit, paulies: Sequence[str]) -> list[int]:
+    def _measure_list(
+        self,
+        circuit: stim.Circuit,
+        paulies: Sequence[str],
+        *,
+        family: str,
+        round_index: int,
+    ) -> list[int]:
+        """Measure a list of Paulis and record debug metadata per measurement.
+
+        Args:
+            circuit: The Stim circuit to append operations into.
+            paulies: Sequence of Pauli strings to measure with MPP.
+            family: Stabilizer family label, e.g. "Z" or "X".
+            round_index: Logical round index for this measurement pass. Use -1
+                for pre-round reference measurements.
+        """
         indices: list[int] = []
-        for pauli in paulies:
+        for stab_index, pauli in enumerate(paulies):
             idx = self._mpp_from_string(circuit, pauli)
             if idx is not None:
                 indices.append(idx)
+                # Record debug metadata for this measurement index.
+                self._meas_meta[idx] = {
+                    "family": family,
+                    "round": round_index,
+                    "stab_index": stab_index,
+                    "pauli": pauli,
+                }
         return indices
 
     def _add_detectors(self, circuit: stim.Circuit, prev: Sequence[int], curr: Sequence[int]) -> None:
@@ -145,18 +172,33 @@ class PhenomenologicalStimBuilder:
         sx_prev: Optional[list[int]] = None
         if measure_Z:
             circuit.append_operation("TICK")
-            sz_prev = self._measure_list(circuit, self.z_stabilizers)
+            sz_prev = self._measure_list(
+                circuit,
+                self.z_stabilizers,
+                family="Z",
+                round_index=-1,
+            )
         if measure_X:
             circuit.append_operation("TICK")
-            sx_prev = self._measure_list(circuit, self.x_stabilizers)
+            sx_prev = self._measure_list(
+                circuit,
+                self.x_stabilizers,
+                family="X",
+                round_index=-1,
+            )
 
-        for _round in range(config.rounds):
+        for round_index in range(config.rounds):
             # Z half
             if measure_Z:
                 circuit.append_operation("TICK")
               
                 apply_x_noise()
-                sz_curr = self._measure_list(circuit, self.z_stabilizers)
+                sz_curr = self._measure_list(
+                    circuit,
+                    self.z_stabilizers,
+                    family="Z",
+                    round_index=round_index,
+                )
                 if sz_prev is not None:
                     self._add_detectors(circuit, sz_prev, sz_curr)
 
@@ -167,7 +209,12 @@ class PhenomenologicalStimBuilder:
                 circuit.append_operation("TICK")
 
                 apply_z_noise()
-                sx_curr = self._measure_list(circuit, self.x_stabilizers)
+                sx_curr = self._measure_list(
+                    circuit,
+                    self.x_stabilizers,
+                    family="X",
+                    round_index=round_index,
+                )
                 if sx_prev is not None:
                     self._add_detectors(circuit, sx_prev, sx_curr)
         

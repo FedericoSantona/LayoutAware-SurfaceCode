@@ -192,19 +192,25 @@ def _run_phase(
     # behaviour of `PhenomenologicalStimBuilder.build` in the memory experiment.
     if measure_Z and phase.z_stabilizers and sz_prev is None:
         circuit.append_operation("TICK")
-        sz_prev = builder._measure_list(circuit, phase.z_stabilizers)
+        sz_prev = builder._measure_list(
+            circuit, phase.z_stabilizers, family="Z", round_index=-1
+        )
 
     if measure_X and phase.x_stabilizers and sx_prev is None:
         circuit.append_operation("TICK")
-        sx_prev = builder._measure_list(circuit, phase.x_stabilizers)
+        sx_prev = builder._measure_list(
+            circuit, phase.x_stabilizers, family="X", round_index=-1
+        )
 
     # Repeat this phase's stabilizers for the requested number of rounds.
-    for _ in range(phase.rounds):
+    for round_idx in range(phase.rounds):
         # Z half
         if measure_Z and phase.z_stabilizers:
             circuit.append_operation("TICK")
             apply_x_noise()
-            sz_curr = builder._measure_list(circuit, phase.z_stabilizers)
+            sz_curr = builder._measure_list(
+                circuit, phase.z_stabilizers, family="Z", round_index=round_idx
+            )
             if sz_prev is not None:
                 builder._add_detectors(circuit, sz_prev, sz_curr)
             sz_prev = sz_curr
@@ -213,7 +219,9 @@ def _run_phase(
         if measure_X and phase.x_stabilizers:
             circuit.append_operation("TICK")
             apply_z_noise()
-            sx_curr = builder._measure_list(circuit, phase.x_stabilizers)
+            sx_curr = builder._measure_list(
+                circuit, phase.x_stabilizers, family="X", round_index=round_idx
+            )
             if sx_prev is not None:
                 builder._add_detectors(circuit, sx_prev, sx_curr)
             sx_prev = sx_curr
@@ -433,13 +441,12 @@ def build_cnot_surgery_circuit(
 
     
     for s in x_single:
-        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
         rough_merge_x.append(embed_patch(s, offset_C))
-        # Skip INT/T checks that touch the rough boundary; use the *original*
+        # Skip INT/T checks that touch the rough boundary; use the original
         # stabilizer when deciding, otherwise shared corner qubits (on both
         # smooth and rough boundaries) can slip through after stripping.
         if not _touches_boundary(s, rough_boundary_qubits):
-            rough_merge_x.append(embed_patch(s_stripped, offset_INT))
+            rough_merge_x.append(embed_patch(s, offset_INT))
         if not _touches_boundary(s, rough_boundary_qubits):
             rough_merge_x.append(embed_patch(s, offset_T))
     
@@ -605,7 +612,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")

@@ -263,6 +263,10 @@ def build_cnot_surgery_circuit(
     # (for rough merge).
     smooth_boundary_qubits = find_smooth_boundary_data_qubits(single_model)
     rough_boundary_qubits = find_rough_boundary_data_qubits(single_model)
+    
+
+    #smooth_boundary_qubits = [0, 1, 2]
+    #rough_boundary_qubits = [0, 5, 10]
 
     print(f"Smooth boundary qubits: {smooth_boundary_qubits}")
     print(f"Rough boundary qubits: {rough_boundary_qubits}")
@@ -300,50 +304,75 @@ def build_cnot_surgery_circuit(
         return left + mid + right
 
     # Offsets for the three logical patches in the combined code.
+    # Ordering: C, seam_C_INT, INT, seam_INT_T, T
     offset_C = 0
-    offset_INT = n_single
-    offset_T = 2 * n_single
-    # Seam ancilla qubits between C and INT (smooth merge) and between INT
-    # and T (rough merge). For now, both seams are appended after the three
-    # patches in the global index space.
-    offset_seam_C_INT = 3 * n_single
+    # Seam ancilla qubits between C and INT (smooth merge) placed right after C
+    offset_seam_C_INT = n_single
     seam_C_INT = list(range(offset_seam_C_INT, offset_seam_C_INT + n_seam_C_INT))
-
-    offset_seam_INT_T = offset_seam_C_INT + n_seam_C_INT
+    
+    # Patch INT comes after the C-INT seam
+    offset_INT = n_single + n_seam_C_INT
+    
+    # Seam ancilla qubits between INT and T (rough merge) placed right after INT
+    offset_seam_INT_T = n_single + n_seam_C_INT + n_single
     seam_INT_T = list(range(offset_seam_INT_T, offset_seam_INT_T + n_seam_INT_T))
+    
+    # Patch T comes after the INT-T seam
+    offset_T = n_single + n_seam_C_INT + n_single + n_seam_INT_T
+    
+    # Verification print: show the qubit layout ordering
+    print("\n" + "="*60)
+    print("Qubit Layout Verification:")
+    print("="*60)
+    print(f"Patch C:        qubits [{offset_C:4d}, {offset_C + n_single:4d})")
+    print(f"Seam C_INT:     qubits [{offset_seam_C_INT:4d}, {offset_seam_C_INT + n_seam_C_INT:4d})")
+    print(f"Patch INT:      qubits [{offset_INT:4d}, {offset_INT + n_single:4d})")
+    print(f"Seam INT_T:     qubits [{offset_seam_INT_T:4d}, {offset_seam_INT_T + n_seam_INT_T:4d})")
+    print(f"Patch T:        qubits [{offset_T:4d}, {offset_T + n_single:4d})")
+    print(f"Total qubits:   {n_total}")
+    print(f"Expected total: {offset_T + n_single}")
+
+    # Show boundary qubits in global coordinate system
+    print("\nBoundary Qubits (in global coordinates):")
+    # Smooth boundary qubits: used for C-INT seam
+    smooth_C = [offset_C + q for q in smooth_boundary_qubits]
+    smooth_INT = [offset_INT + q for q in smooth_boundary_qubits]
+    smooth_T = [offset_T + q for q in smooth_boundary_qubits]
+    print(f"  Smooth boundary (C-INT seam):")
+    print(f"    Patch C:   {smooth_C}")
+    print(f"    Patch INT: {smooth_INT}")
+    print(f"    Patch T:   {smooth_T}")
+    
+    # Rough boundary qubits: used for INT-T seam
+    rough_C = [offset_C + q for q in rough_boundary_qubits]
+    rough_INT = [offset_INT + q for q in rough_boundary_qubits]
+    rough_T = [offset_T + q for q in rough_boundary_qubits]
+    print(f"  Rough boundary (INT-T seam):")
+    print(f"    Patch C:   {rough_C}")
+    print(f"    Patch INT: {rough_INT}")
+    print(f"    Patch T:   {rough_T}")
+    
+    print("="*60 + "\n")
 
 
-    # Build pre-merge stabilizers: three disjoint copies of the single patch.
+    # Build stabilizers for the disjoint three-patch configuration.
     z_single = list(single_model.z_stabilizers)
     x_single = list(single_model.x_stabilizers)
 
-    pre_merge_z: List[str] = []
-    pre_merge_x: List[str] = []
+    # Base (commuting) Z/X sets used in all phases except the INT+T rough merge.
+    base_z: List[str] = []
+    base_x: List[str] = []
 
     for s in z_single:
-        # The control patch keeps its full Z stabilizers. For INT and T, we
-        # remove Z support on rough-boundary data qubits so that the X-type
-        # joint checks used in the INT–T rough-merge phase commute with all
-        # Z stabilizers in every phase.
-        pre_merge_z.append(embed_patch(s, offset_C))
-
-        s_rough_stripped = _strip_z_on_qubits(s, rough_boundary_qubits)
-        #s_rough_stripped = s
-        pre_merge_z.append(embed_patch(s_rough_stripped, offset_INT))
-        pre_merge_z.append(embed_patch(s_rough_stripped, offset_T))
+        base_z.append(embed_patch(s, offset_C))
+        base_z.append(embed_patch(s, offset_INT))
+        base_z.append(embed_patch(s, offset_T))
 
     for s in x_single:
-        # Remove X support on the smooth boundary data qubits for C and INT.
-        # This ensures that, when we later add joint Z checks along the seam
-        # involving these boundary qubits, those joint Z stabilizers commute
-        # with all X stabilizers in *every* phase of the protocol.
         s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
-        #s_stripped = s
-        pre_merge_x.append(embed_patch(s_stripped, offset_C))
-        pre_merge_x.append(embed_patch(s_stripped, offset_INT))
-        # The target patch keeps the full X stabilizers; it is unaffected by
-        # the C–INT smooth merge along the seam.
-        pre_merge_x.append(embed_patch(s, offset_T))
+        base_x.append(embed_patch(s_stripped, offset_C))
+        base_x.append(embed_patch(s_stripped, offset_INT))
+        base_x.append(embed_patch(s, offset_T))
 
     # --- Smooth-merge phase stabilizers ---------------------------------
     #
@@ -356,13 +385,12 @@ def build_cnot_surgery_circuit(
     # This realises a smooth merge between C and INT: ancillas are prepared
     # in |+> (via the pre-merge X checks), then governed by Z-type joint
     # checks that effectively measure Z_L^C Z_L^INT over the merge window.
-    smooth_merge_z: List[str] = list(pre_merge_z)
+    smooth_merge_z: List[str] = list(base_z)
     smooth_merge_x: List[str] = []
-
-    # Keep embedded X stabilizers for the three patches, but with X support
-    # removed on the smooth boundary data qubits of C and INT. This ensures
-    # that the joint C–seam–INT Z checks added below commute with all X
-    # stabilizers measured during the smooth-merge phase.
+    
+    # Strip X stabilizers on smooth boundary for C and INT (the patches
+    # involved in the smooth merge), but keep T unchanged (similar to how
+    # Z is stripped for INT and T in the rough merge, but not for C).
     for s in x_single:
         s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
         smooth_merge_x.append(embed_patch(s_stripped, offset_C))
@@ -396,8 +424,28 @@ def build_cnot_surgery_circuit(
     # This realises a rough merge between INT and T: joint X checks effectively
     # measure X_L^INT X_L^T along the rough boundary where X stabilizers
     # terminate.
-    rough_merge_z: List[str] = list(pre_merge_z)
-    rough_merge_x: List[str] = list(pre_merge_x)
+    # Rough-merge stabilizers: strip Z support on INT/T rough boundaries and
+    # drop INT/T X stabilizers that touch that boundary, replacing them with
+    # joint INT–seam–T X checks. This keeps the rough-merge CSS set commuting.
+    rough_merge_z: List[str] = []
+    rough_merge_x: List[str] = []
+
+    def _touches_boundary(pauli: str, boundary: Sequence[int]) -> bool:
+        return any((0 <= q < len(pauli)) and pauli[q] != "I" for q in boundary)
+
+    for s in z_single:
+        rough_merge_z.append(embed_patch(s, offset_C))
+        s_rough = _strip_z_on_qubits(s, rough_boundary_qubits)
+        rough_merge_z.append(embed_patch(s_rough, offset_INT))
+        rough_merge_z.append(embed_patch(s_rough, offset_T))
+
+    for s in x_single:
+        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
+        rough_merge_x.append(embed_patch(s, offset_C))
+        if not _touches_boundary(s_stripped, rough_boundary_qubits):
+            rough_merge_x.append(embed_patch(s_stripped, offset_INT))
+        if not _touches_boundary(s, rough_boundary_qubits):
+            rough_merge_x.append(embed_patch(s, offset_T))
 
     # Add distance-many joint X checks tying INT, seam_INT_T, and T along the
     # rough boundary identified by `rough_boundary_qubits`.
@@ -418,12 +466,12 @@ def build_cnot_surgery_circuit(
     # phases: pre-merge memory, a smooth-merge window, a smooth-split window,
     # an INT+T rough-merge window, and a post-merge memory phase.
     phases = [
-        PhaseSpec("pre-merge", pre_merge_z, pre_merge_x, rounds_pre),
+        PhaseSpec("pre-merge", base_z, base_x, rounds_pre),
         PhaseSpec("C+INT smooth merge", smooth_merge_z, smooth_merge_x, rounds_merge, measure_z=True, measure_x=True),
-        PhaseSpec("C|INT smooth split", pre_merge_z, pre_merge_x, rounds_merge),
-        #PhaseSpec("INT+T rough merge", rough_merge_z, rough_merge_x, rounds_merge, measure_z=True, measure_x=True),
-        #PhaseSpec("INT+T rough split", pre_merge_z, pre_merge_x, rounds_merge),
-        PhaseSpec("post-merge", pre_merge_z, pre_merge_x, rounds_post),
+        PhaseSpec("C|INT smooth split", base_z, base_x, rounds_merge),
+        PhaseSpec("INT+T rough merge", rough_merge_z, rough_merge_x, rounds_merge, measure_z=True, measure_x=True),
+        PhaseSpec("INT+T rough split", base_z, base_x, rounds_merge),
+        PhaseSpec("post-merge", base_z, base_x, rounds_post),
     ]
 
     circuit = stim.Circuit()
@@ -432,6 +480,7 @@ def build_cnot_surgery_circuit(
     for q in range(code.n):
         circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
+    """
     # Build a logical Z observable for the control patch by embedding the
     # single-patch logical_Z operator at the control offset. We measure it
     # once at the beginning and once at the end, and include their parity
@@ -458,6 +507,8 @@ def build_cnot_surgery_circuit(
     if logical_z_target is not None:
         circuit.append_operation("TICK")
         start_idx_target = builder._mpp_from_string(circuit, logical_z_target)
+    """
+    
 
     # Run the pre-merge phase using the same phenomenological noise model
     # used in the memory experiment.
@@ -471,6 +522,9 @@ def build_cnot_surgery_circuit(
     sz_prev: List[int] | None = None
     sx_prev: List[int] | None = None
     for phase in phases:
+        if phase.name in {"INT+T rough merge", "INT+T rough split"}:
+            sz_prev = None
+            sx_prev = None
         sz_prev, sx_prev = _run_phase(
             circuit=circuit,
             builder=builder,
@@ -480,6 +534,8 @@ def build_cnot_surgery_circuit(
             sx_prev=sx_prev,
         )
 
+    observable_pairs = []
+    """
     # Final logical Z measurement on the control patch.
     end_idx: int | None = None
     if logical_z_control is not None:
@@ -494,6 +550,7 @@ def build_cnot_surgery_circuit(
             )
             observable_pairs.append((start_idx, end_idx))
 
+    
     # Final logical Z measurement on the target patch.
     end_idx_target: int | None = None
     if logical_z_target is not None:
@@ -507,7 +564,7 @@ def build_cnot_surgery_circuit(
                 1,
             )
             observable_pairs.append((start_idx_target, end_idx_target))
-
+    """
     return circuit, observable_pairs
 
 # ---------------------------------------------------------------------------
@@ -593,6 +650,32 @@ def run_cnot_experiment(
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
     )
+
+    # Write SVG diagram to file - focus on detector D297
+    # D297 involves qubits 13, 15, 17 (from error message), problem at tick 38
+    svg_content = str(circuit.diagram(
+        "detslice-with-ops-svg",
+        tick=range(36, 40),     # Narrow range around problem tick (38)
+        filter_coords=["D297"],  # Focus on the problematic detector
+    ))
+    with open("circuit_diagram_d297.svg", "w") as f:
+        f.write(svg_content)
+    
+    # Also create a text timeline which is more readable
+    # Note: timeline-text doesn't support tick parameter, shows full circuit
+    text_diagram = str(circuit.diagram("timeline-text"))
+    with open("circuit_diagram_d297.txt", "w") as f:
+        f.write(text_diagram)
+    
+    print("Diagrams saved:")
+    print("  SVG: circuit_diagram_d297.svg (open in browser)")
+    print("  Text: circuit_diagram_d297.txt (more readable)")
+    print("  Detector D297 (qubits 13, 15, 17), ticks 36-39")
+
+
+    ops = list(circuit)
+    for i in range(125, 140):
+        print(i, ops[i])
 
     # We reuse PhenomenologicalStimConfig purely for its noise parameters and
     # CSS-family selector; the `rounds` field is ignored by the multi-phase

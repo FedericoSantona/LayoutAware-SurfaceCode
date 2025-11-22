@@ -8,9 +8,9 @@
     },
     "plot": "plots/threshold/standard/x_only.png",
     "crossings": {
-      "3-5": null,
-      "5-7": 0.09925599472450743,
-      "7-9": 0.0030951617362994744
+      "3-5": 0.06239342384360165,
+      "5-7": 0.06327981705779803,
+      "7-9": 0.011175403075618793
     },
     "json": "output/threshold/standard/x_only.json"
   },
@@ -23,9 +23,9 @@
     },
     "plot": "plots/threshold/standard/z_only.png",
     "crossings": {
-      "3-5": 0.04614285772097147,
-      "5-7": 0.06577342136100991,
-      "7-9": null
+      "3-5": 0.059824457002637874,
+      "5-7": 0.06701167754960849,
+      "7-9": 0.0753286646222569
     },
     "json": "output/threshold/standard/z_only.json"
   },
@@ -38,9 +38,9 @@
     },
     "plot": "plots/threshold/standard/symmetric_Zinit.png",
     "crossings": {
-      "3-5": null,
-      "5-7": null,
-      "7-9": 0.0008943718704409133
+      "3-5": 0.06006619071001725,
+      "5-7": 0.06564867645584195,
+      "7-9": 0.07327038074233455
     },
     "json": "output/threshold/standard/symmetric_Zinit.json"
   },
@@ -53,9 +53,9 @@
     },
     "plot": "plots/threshold/standard/symmetric_Xinit.png",
     "crossings": {
-      "3-5": 0.04512248027756728,
-      "5-7": 0.07880348452212865,
-      "7-9": 0.08070892367854396
+      "3-5": 0.054962832332690156,
+      "5-7": 0.06680860266852184,
+      "7-9": 0.0770345421702976
     },
     "json": "output/threshold/standard/symmetric_Xinit.json"
   }

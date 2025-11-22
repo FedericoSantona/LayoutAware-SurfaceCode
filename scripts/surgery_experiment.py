@@ -435,10 +435,13 @@ def build_cnot_surgery_circuit(
     for s in x_single:
         s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
         rough_merge_x.append(embed_patch(s, offset_C))
-        if not _touches_boundary(s_stripped, rough_boundary_qubits):
-           rough_merge_x.append(embed_patch(s, offset_INT))
+        # Skip INT/T checks that touch the rough boundary; use the *original*
+        # stabilizer when deciding, otherwise shared corner qubits (on both
+        # smooth and rough boundaries) can slip through after stripping.
         if not _touches_boundary(s, rough_boundary_qubits):
-           rough_merge_x.append(embed_patch(s, offset_T))
+            rough_merge_x.append(embed_patch(s_stripped, offset_INT))
+        if not _touches_boundary(s, rough_boundary_qubits):
+            rough_merge_x.append(embed_patch(s, offset_T))
     
 
     # Add distance-many joint X checks tying INT, seam_INT_T, and T along the
@@ -547,7 +550,7 @@ def build_cnot_surgery_circuit(
             )
             observable_pairs.append((start_idx_control, end_idx_control))
 
-    """
+    
     # Final logical X measurement on the target patch.
     end_idx_target: int | None = None
     if logical_x_target is not None:
@@ -561,7 +564,7 @@ def build_cnot_surgery_circuit(
                 1,
             )
             observable_pairs.append((start_idx_target, end_idx_target))
-    """
+    
     return circuit, observable_pairs
 
 # ---------------------------------------------------------------------------

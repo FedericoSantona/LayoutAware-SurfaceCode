@@ -33,6 +33,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
+import matplotlib.pyplot as plt
 
 import stim
 
@@ -265,6 +266,27 @@ def build_cnot_surgery_circuit(
     # patch, laid out in a single index space [0, ..., n_total-1].
     single_model = build_surface_code_model(distance, code_type)
     
+
+     # Determine code name for display and file naming
+    code_name = "heavy-hex" if code_type == "heavy_hex" else "surface-code"
+    code_name_short = "heavy_hex" if code_type == "heavy_hex" else "surface_code"
+
+    # save the code tiling
+    plot_dir = PROJECT_ROOT / "plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig = single_model.code.draw(
+        face_colors=False,
+        xcolor="lightcoral",
+        zcolor="skyblue",
+        figsize=(5, 5),
+        show_index=True,
+
+    )
+    plt.savefig(plot_dir / f"{code_name_short}_d{distance}.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"{code_name.capitalize()} tiling saved to {plot_dir}/{code_name_short}_d{distance}.png")
+
     # Identify smooth and rough boundary data qubits for correct seam placement.
     # The seam between C and INT should be placed on the smooth boundary
     # (for smooth merge), and the seam between INT and T on a rough boundary

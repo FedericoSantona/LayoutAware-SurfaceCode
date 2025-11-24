@@ -1,11 +1,64 @@
 """Geometry utilities for surface code boundary identification."""
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 import numpy as np
 
 from .model import SurfaceCodeModel
+
+
+def _get_qubit_coordinates(model: SurfaceCodeModel) -> Optional[np.ndarray]:
+    """Extract qubit coordinates from the code object.
+    
+    Accesses coordinates via code.shell.vertices, where each vertex has a pos
+    attribute containing [x, y] coordinates. Maps vertices to qubit indices
+    using code.qubit_data.index[vertex.id] (PauliList index).
+    
+    Args:
+        model: Surface code model (HeavyHexModel or StandardSurfaceCodeModel)
+        
+    Returns:
+        Array of shape (n, 2) with [x, y] coordinates for each qubit, or None
+        if coordinates cannot be extracted (e.g., code doesn't have shell/qubit_data)
+    """
+    code = model.code
+    
+    # Check if code has shell and qubit_data attributes
+    if not hasattr(code, 'shell') or code.shell is None:
+        raise ValueError("Code object does not have a shell attribute")
+    if not hasattr(code, 'qubit_data') or code.qubit_data is None:
+        raise ValueError("Code object does not have a qubit_data attribute")
+    
+    n = code.n
+    coords = np.full((n, 2), np.nan, dtype=float)
+    
+    # Iterate through vertices and map to qubit indices
+    # Use qubit_data.index which maps to PauliList index (qubit index in our code)
+    vertices_mapped = 0
+    for vertex in code.shell.vertices:
+        if vertex.id in code.qubit_data.index:
+            qubit_idx = code.qubit_data.index[vertex.id]
+            if 0 <= qubit_idx < n:
+                coords[qubit_idx] = np.array(vertex.pos, dtype=float)
+                vertices_mapped += 1
+    
+    # Check if we successfully extracted coordinates for at least some qubits
+    # Not all qubits may be represented as vertices (e.g., ancilla qubits)
+    if vertices_mapped == 0:
+        raise ValueError("No qubit coordinates could be mapped from vertices")
+    
+    # Check if we have coordinates for a reasonable fraction of qubits
+    # For surface codes, most data qubits should be in the shell
+    coords_found = (~np.isnan(coords)).sum()
+    if coords_found < n // 2:
+        raise ValueError(
+            f"Too few qubit coordinates found: {coords_found}/{n}. "
+            "Expected at least half of qubits to have coordinates."
+        )
+    
+    return coords
+
 
 
 def find_boundary_data_qubits(
@@ -14,16 +67,18 @@ def find_boundary_data_qubits(
 ) -> List[int]:
     """Return the list of data qubit indices that lie on a specified boundary type.
     
-    In surface codes:
-    - Smooth boundaries are where Z stabilizers terminate.
-      The logical Z operator runs along smooth boundaries.
-    - Rough boundaries are where X stabilizers terminate.
-      The logical X operator runs along rough boundaries.
+    Uses geometry-based boundary detection by:
+    1. Extracting qubit coordinates from the code object
+    2. Identifying the four outermost sides (left, right, top, bottom) based on coordinate bounds
+    3. Using stabilizer deficits (missing X or Z stabilizers) to determine which sides are smooth vs rough
+    4. Returning only qubits on the true outermost boundaries
     
-    This function identifies boundary qubits by:
-    1. Finding qubits in the appropriate logical operator (Z for smooth, X for rough)
-    2. Identifying which of those are on boundaries (participate in fewer stabilizers)
-    3. Verifying they're on the correct boundary type by checking stabilizer patterns
+    In surface codes:
+    - Smooth boundaries are where Z stabilizers terminate (sides with Z stabilizer deficit)
+    - Rough boundaries are where X stabilizers terminate (sides with X stabilizer deficit)
+    
+    This geometry-based approach avoids mislabeling interior logical strings as boundaries,
+    which can occur when using logical operators alone.
     
     Args:
         model: Surface code model (HeavyHexModel or StandardSurfaceCodeModel)
@@ -34,71 +89,94 @@ def find_boundary_data_qubits(
     """
     n = model.code.n
     
-    # Get qubits involved in the appropriate logical operator
-    if boundary_type == "smooth":
-        # Smooth boundaries: logical Z operator runs along them
-        logical_qubits = set()
-        if model.logical_z:
-            logical_qubits = {i for i, char in enumerate(model.logical_z) if char == 'Z'}
-    else:  # rough
-        # Rough boundaries: logical X operator runs along them
-        logical_qubits = set()
-        if model.logical_x:
-            logical_qubits = {i for i, char in enumerate(model.logical_x) if char == 'X'}
+    # --- 1) Get coordinates for each data qubit ---
+    coords = _get_qubit_coordinates(model)
+    if coords is None:
+        # Fallback: if coordinates cannot be extracted, return empty list
+        raise ValueError("Qubit coordinates cannot be extracted from the code object")
     
-    # If no logical operator qubits, return empty list
-    if not logical_qubits:
-        return []
+    # Filter to only qubits with valid coordinates
+    valid_mask = ~np.isnan(coords).any(axis=1)
+    valid_indices = np.where(valid_mask)[0]
     
-    # Count how many stabilizers each qubit participates in
-    # Boundary qubits participate in fewer stabilizers than bulk qubits
-    qubit_stabilizer_count = np.zeros(n, dtype=int)
+    if len(valid_indices) == 0:
+        raise ValueError("No qubits with valid coordinates found")
     
-    # Count Z stabilizers
-    for stab in model.z_stabilizers:
-        for i, char in enumerate(stab):
-            if char == 'Z':
-                qubit_stabilizer_count[i] += 1
+    xs = coords[valid_mask, 0]
+    ys = coords[valid_mask, 1]
     
-    # Count X stabilizers
+    x_min, x_max = xs.min(), xs.max()
+    y_min, y_max = ys.min(), ys.max()
+    
+    # --- 2) Count X and Z stabilizers per qubit separately ---
+    num_x = np.zeros(n, dtype=int)
+    num_z = np.zeros(n, dtype=int)
+    
     for stab in model.x_stabilizers:
         for i, char in enumerate(stab):
-            if char == 'X':
-                qubit_stabilizer_count[i] += 1
+            if char == "X":
+                num_x[i] += 1
     
-    # Find boundary qubits: those with fewer stabilizers than the maximum
-    # In a well-formed surface code, bulk qubits participate in more stabilizers
-    # than boundary qubits
-    max_stabilizer_count = qubit_stabilizer_count.max()
-    if max_stabilizer_count == 0:
-        # Fallback: if we can't determine from stabilizers, use logical operator qubits
-        return sorted(logical_qubits)
+    for stab in model.z_stabilizers:
+        for i, char in enumerate(stab):
+            if char == "Z":
+                num_z[i] += 1
     
-    # Boundary qubits are those with significantly fewer stabilizers
-    # Use a threshold: boundary qubits have at most (max_count - 1) stabilizers
-    # This handles cases where boundary qubits might still participate in some stabilizers
-    boundary_threshold = max(1, max_stabilizer_count - 1)
-    boundary_qubits = {i for i in range(n) if qubit_stabilizer_count[i] <= boundary_threshold}
+    max_x = num_x.max() if num_x.size > 0 else 0
+    max_z = num_z.max() if num_z.size > 0 else 0
     
-    # Boundary qubits of the specified type are those that are both:
-    # 1. In the appropriate logical operator (runs along that boundary type)
-    # 2. On a boundary (fewer stabilizers)
-    boundary_type_qubits = logical_qubits & boundary_qubits
+    # --- 3) Define the four geometric sides of the patch ---
+    # Use a small tolerance in case coords are floats
+    tol = 1e-6
     
-    # If we didn't find enough boundary qubits using the threshold,
-    # fall back to using all logical operator qubits (they should be on the correct boundary)
-    if len(boundary_type_qubits) < len(logical_qubits) // 2:
-        # Try a more lenient threshold
-        boundary_threshold = max_stabilizer_count
-        boundary_qubits = {i for i in range(n) if qubit_stabilizer_count[i] <= boundary_threshold}
-        boundary_type_qubits = logical_qubits & boundary_qubits
+    # Map side indices back to global qubit indices
+    sides: dict[str, np.ndarray] = {
+        "left":   valid_indices[np.where(np.abs(xs - x_min) < tol)[0]],
+        "right":  valid_indices[np.where(np.abs(xs - x_max) < tol)[0]],
+        "bottom": valid_indices[np.where(np.abs(ys - y_min) < tol)[0]],
+        "top":    valid_indices[np.where(np.abs(ys - y_max) < tol)[0]],
+    }
     
-    # Final fallback: if still not enough, use all logical operator qubits
-    # (they should be on the correct boundary by definition)
-    if not boundary_type_qubits:
-        boundary_type_qubits = logical_qubits
+    # --- 4) For each side, measure how many X/Z stabilizers are "missing" ---
+    side_deficits = {}
+    for name, idxs in sides.items():
+        if len(idxs) == 0:
+            continue
+        mean_x = num_x[idxs].mean() if len(idxs) > 0 else 0
+        mean_z = num_z[idxs].mean() if len(idxs) > 0 else 0
+        side_deficits[name] = {
+            "def_x": max_x - mean_x,
+            "def_z": max_z - mean_z,
+        }
     
-    return sorted(boundary_type_qubits)
+    # --- 5) Decide which side is smooth/rough ---
+    if boundary_type == "smooth":
+        # Smooth boundaries: Z stabilizers terminate -> big deficit in Z
+        sorted_sides = sorted(
+            side_deficits.items(),
+            key=lambda kv: kv[1]["def_z"],
+            reverse=True,
+        )
+    else:  # rough
+        # Rough boundaries: X stabilizers terminate -> big deficit in X
+        sorted_sides = sorted(
+            side_deficits.items(),
+            key=lambda kv: kv[1]["def_x"],
+            reverse=True,
+        )
+    
+    # Pick only the single best-matching side (one boundary = one side)
+    if len(sorted_sides) < 1:
+        # Fallback: if we can't find any sides, return empty list
+        raise ValueError("Cannot find any sides for boundary detection")
+    
+    chosen_side_name = sorted_sides[0][0]
+    
+    # --- 6) Collect all qubits on that side ---
+    boundary_qubits = sides[chosen_side_name].tolist()
+    boundary_qubits = sorted(set(boundary_qubits))
+    
+    return boundary_qubits
 
 
 def find_smooth_boundary_data_qubits(model: SurfaceCodeModel) -> List[int]:
@@ -106,8 +184,8 @@ def find_smooth_boundary_data_qubits(model: SurfaceCodeModel) -> List[int]:
     
     Convenience wrapper around find_boundary_data_qubits(model, boundary_type="smooth").
     
-    In surface codes, smooth boundaries are where Z stabilizers terminate.
-    The logical Z operator runs along smooth boundaries.
+    Uses geometry-based boundary detection to identify qubits on the outermost
+    edges where Z stabilizers terminate (sides with Z stabilizer deficit).
     
     Args:
         model: Surface code model (HeavyHexModel or StandardSurfaceCodeModel)
@@ -123,8 +201,8 @@ def find_rough_boundary_data_qubits(model: SurfaceCodeModel) -> List[int]:
     
     Convenience wrapper around find_boundary_data_qubits(model, boundary_type="rough").
     
-    In surface codes, rough boundaries are where X stabilizers terminate.
-    The logical X operator runs along rough boundaries.
+    Uses geometry-based boundary detection to identify qubits on the outermost
+    edges where X stabilizers terminate (sides with X stabilizer deficit).
     
     Args:
         model: Surface code model (HeavyHexModel or StandardSurfaceCodeModel)

@@ -459,8 +459,8 @@ def build_cnot_surgery_circuit(
     rough_boundary_qubits = find_rough_boundary_data_qubits(single_model)
     
 
-    smooth_boundary_qubits = [2, 1 , 0 , 22 , 21 , 36 , 35]
-    rough_boundary_qubits = [2, 7, 8 ,13 , 14 , 19 , 20]
+    #smooth_boundary_qubits = [2, 1 , 0 , 22 , 21 , 36 , 35]
+    #rough_boundary_qubits = [2, 7, 8 ,13 , 14 , 19 , 20]
 
     print(f"Smooth boundary qubits: {smooth_boundary_qubits}")
     print(f"Rough boundary qubits: {rough_boundary_qubits}")
@@ -834,9 +834,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
-    parser.add_argument("--px", type=float, default=3e-3, help="X error probability")
-    parser.add_argument("--pz", type=float, default=3e-3, help="Z error probability")
+    parser.add_argument("--distance", type=int, default=5, help="Code distance d")
+    parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
+    parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(

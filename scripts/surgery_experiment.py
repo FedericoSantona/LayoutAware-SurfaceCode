@@ -137,18 +137,36 @@ def _commuting_boundary_mask(
     x_stabilizers: Sequence[str],
     boundary: Sequence[int],
     *,
+    strip_pauli: str = "Z",
     verbose: bool = False,
 ) -> tuple[list[str], list[str]]:
-    """Strip only what is needed at a boundary while keeping Z/X commuting.
+    """Strip only what is needed at a boundary while keeping CSS checks commuting.
+
+    The routine is symmetric:
+      * `strip_pauli="Z"`: strip Z on the boundary (for rough merge) and adjust X.
+      * `strip_pauli="X"`: strip X on the boundary (for smooth merge) and adjust Z.
 
     Strategy (least destructive first):
-      1) Strip Z support on the boundary (needed so joint X checks commute).
-         Keep X stabilizers untouched if they already commute.
-      2) If commutation is broken, try adding X support *off* the boundary
-         to restore commutation without removing boundary information.
+      1) Strip boundary support of the requested Pauli.
+      2) If commutation is broken, try toggling the *other* Pauli off-boundary
+         to restore commutation without throwing away boundary information.
       3) As a last resort, strip overlapping Paulis (prefer off-boundary)
          until everything commutes.
     """
+    strip_pauli = strip_pauli.upper()
+    if strip_pauli not in {"X", "Z"}:
+        raise ValueError("strip_pauli must be 'X' or 'Z'")
+
+    primary_char = strip_pauli
+    secondary_char = "X" if primary_char == "Z" else "Z"
+    strip_fn = _strip_z_on_qubits if primary_char == "Z" else _strip_x_on_qubits
+    primary = z_stabilizers if primary_char == "Z" else x_stabilizers
+    secondary = x_stabilizers if primary_char == "Z" else z_stabilizers
+
+    def _return_order(primary_list: list[str], secondary_list: list[str]) -> tuple[list[str], list[str]]:
+        if primary_char == "Z":
+            return primary_list, secondary_list
+        return secondary_list, primary_list
 
     def _commutes(p: str, q: str) -> bool:
         anti = 0
@@ -194,78 +212,88 @@ def _commuting_boundary_mask(
             delta[col] = rhs
         return delta
 
-    z_masked = [_strip_z_on_qubits(s, boundary) for s in z_stabilizers]
-    x_preserved = list(x_stabilizers)
+    primary_masked = [strip_fn(s, boundary) for s in primary]
+    secondary_preserved = list(secondary)
 
-    z_boundary_removed = sum(
-        1 for s, sm in zip(z_stabilizers, z_masked) for a, b in zip(s, sm) if a != b
+    boundary_removed = sum(
+        1 for s, sm in zip(primary, primary_masked) for a, b in zip(s, sm) if a != b
     )
 
     # Fast path: if keeping X intact still commutes with masked Z, return early.
-    if all(_commutes(z, x) for z in z_masked for x in x_preserved):
+    if all(_commutes(p, s) for p in primary_masked for s in secondary_preserved):
         if verbose:
-            print(f"[boundary-mask] stripped Z@boundary={z_boundary_removed}, X preserved (already commuting)")
-        return z_masked, x_preserved
+            print(
+                f"[boundary-mask] stripped {primary_char}@boundary={boundary_removed}, "
+                f"{secondary_char} preserved (already commuting)"
+            )
+        return _return_order(primary_masked, secondary_preserved)
 
     if verbose:
-        print(f"[boundary-mask] stripped Z@boundary={z_boundary_removed}, X needs adjustment to commute")
+        print(
+            f"[boundary-mask] stripped {primary_char}@boundary={boundary_removed}, "
+            f"{secondary_char} needs adjustment to commute"
+        )
 
-    z_matrix = [[1 if c == "Z" else 0 for c in z] for z in z_masked]
-    x_adjusted: list[str] = []
+    primary_matrix = [[1 if c == primary_char else 0 for c in row] for row in primary_masked]
+    secondary_adjusted: list[str] = []
     additive_ok = True
-    for x in x_preserved:
-        x_vec = [1 if c == "X" else 0 for c in x]
-        b_vec = [sum(a * b for a, b in zip(row, x_vec)) % 2 for row in z_matrix]
-        free_cols = [i for i, val in enumerate(x_vec) if i not in boundary]
-        delta = _solve_add_only(z_matrix, b_vec, free_cols) if free_cols else None
+    for stab in secondary_preserved:
+        sec_vec = [1 if c == secondary_char else 0 for c in stab]
+        b_vec = [sum(a * b for a, b in zip(row, sec_vec)) % 2 for row in primary_matrix]
+        free_cols = [i for i in range(len(sec_vec)) if i not in boundary]
+        delta = _solve_add_only(primary_matrix, b_vec, free_cols) if free_cols else None
         if delta is None:
             additive_ok = False
             break
         for col, val in zip(free_cols, delta):
             if val:
-                x_vec[col] ^= 1
-        x_adjusted.append("".join("X" if v else "I" for v in x_vec))
+                sec_vec[col] ^= 1
+        secondary_adjusted.append("".join(secondary_char if v else "I" for v in sec_vec))
 
-    if additive_ok and all(_commutes(z, x) for z in z_masked for x in x_adjusted):
+    if additive_ok and all(_commutes(p, s) for p in primary_masked for s in secondary_adjusted):
         if verbose:
             added = sum(
-                1 for s_old, s_new in zip(x_preserved, x_adjusted) for a, b in zip(s_old, s_new) if a != b
+                1 for s_old, s_new in zip(secondary_preserved, secondary_adjusted) for a, b in zip(s_old, s_new) if a != b
             )
-            print(f"[boundary-mask] additive solution used, X added off-boundary={added}")
-        return z_masked, x_adjusted
+            print(f"[boundary-mask] additive solution used, {secondary_char} added off-boundary={added}")
+        return _return_order(primary_masked, secondary_adjusted)
 
     # Fallback: strip overlapping Paulis until everything commutes.
-    z_chars = [list(s) for s in z_masked]
-    x_chars = [list(s) for s in x_preserved]
+    primary_chars = [list(s) for s in primary_masked]
+    secondary_chars = [list(s) for s in secondary_preserved]
     changed = True
-    fallback_z_strips = 0
-    fallback_x_strips = 0
+    fallback_primary_strips = 0
+    fallback_secondary_strips = 0
     while changed:
         changed = False
-        for zi, z in enumerate(z_chars):
-            for xi, x in enumerate(x_chars):
-                if _commutes("".join(z), "".join(x)):
+        for pi, p in enumerate(primary_chars):
+            for si, s in enumerate(secondary_chars):
+                if _commutes("".join(p), "".join(s)):
                     continue
                 overlap = [
                     q
-                    for q, (a, b) in enumerate(zip(z, x))
+                    for q, (a, b) in enumerate(zip(p, s))
                     if a != "I" and b != "I" and a != b
                 ]
                 if not overlap:
                     continue
                 target = next((q for q in overlap if q not in boundary), overlap[0])
-                if _pauli_weight(z) <= 1 and _pauli_weight(x) > 1:
-                    x[target] = "I"
-                    x_chars[xi] = x
-                    fallback_x_strips += 1
+                if _pauli_weight(p) <= 1 and _pauli_weight(s) > 1:
+                    s[target] = "I"
+                    secondary_chars[si] = s
+                    fallback_secondary_strips += 1
                 else:
-                    z[target] = "I"
-                    fallback_z_strips += 1
+                    p[target] = "I"
+                    fallback_primary_strips += 1
                 changed = True
 
     if verbose:
-        print(f"[boundary-mask] fallback used, extra Z stripped={fallback_z_strips}, extra X stripped={fallback_x_strips}")
-    return ["".join(z) for z in z_chars], ["".join(x) for x in x_chars]
+        print(
+            "[boundary-mask] fallback used, "
+            f"extra {primary_char} stripped={fallback_primary_strips}, "
+            f"extra {secondary_char} stripped={fallback_secondary_strips}"
+        )
+    return _return_order(["".join(p) for p in primary_chars], ["".join(s) for s in secondary_chars])
 
 
 def _run_phase(
@@ -431,7 +459,7 @@ def build_cnot_surgery_circuit(
     rough_boundary_qubits = find_rough_boundary_data_qubits(single_model)
     
 
-    smooth_boundary_qubits = [2 ,1 , 0 , 22 , 21 , 36 , 35]
+    smooth_boundary_qubits = [2, 1 , 0 , 22 , 21 , 36 , 35]
     rough_boundary_qubits = [2, 7, 8 ,13 , 14 , 19 , 20]
 
     print(f"Smooth boundary qubits: {smooth_boundary_qubits}")
@@ -525,20 +553,27 @@ def build_cnot_surgery_circuit(
     z_single = list(single_model.z_stabilizers)
     x_single = list(single_model.x_stabilizers)
 
+    # Mask the smooth boundary using the commuting helper (strip X, adjust Z)
+    smooth_z_masked, smooth_x_masked = _commuting_boundary_mask(
+        z_stabilizers=z_single,
+        x_stabilizers=x_single,
+        boundary=smooth_boundary_qubits,
+        strip_pauli="X",
+        verbose=verbose_boundary_mask,
+    )
+
     # Base (commuting) Z/X sets used in all phases except the INT+T rough merge.
     base_z: List[str] = []
     base_x: List[str] = []
 
-    for s in z_single:
-        base_z.append(embed_patch(s, offset_C))
-        base_z.append(embed_patch(s, offset_INT))
+    for s, s_masked in zip(z_single, smooth_z_masked):
+        base_z.append(embed_patch(s_masked, offset_C))
+        base_z.append(embed_patch(s_masked, offset_INT))
         base_z.append(embed_patch(s, offset_T))
 
-    for s in x_single:
-        s_stripped = _strip_x_on_qubits(s, smooth_boundary_qubits)
-        #s_stripped = s
-        base_x.append(embed_patch(s_stripped, offset_C))
-        base_x.append(embed_patch(s_stripped, offset_INT))
+    for s, s_masked in zip(x_single, smooth_x_masked):
+        base_x.append(embed_patch(s_masked, offset_C))
+        base_x.append(embed_patch(s_masked, offset_INT))
         base_x.append(embed_patch(s, offset_T))
 
     # --- Smooth-merge phase stabilizers ---------------------------------

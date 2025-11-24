@@ -132,6 +132,141 @@ def _strip_z_on_qubits(pauli_str: str, qubits: Sequence[int]) -> str:
             chars[q] = "I"
     return "".join(chars)
 
+def _commuting_boundary_mask(
+    z_stabilizers: Sequence[str],
+    x_stabilizers: Sequence[str],
+    boundary: Sequence[int],
+    *,
+    verbose: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Strip only what is needed at a boundary while keeping Z/X commuting.
+
+    Strategy (least destructive first):
+      1) Strip Z support on the boundary (needed so joint X checks commute).
+         Keep X stabilizers untouched if they already commute.
+      2) If commutation is broken, try adding X support *off* the boundary
+         to restore commutation without removing boundary information.
+      3) As a last resort, strip overlapping Paulis (prefer off-boundary)
+         until everything commutes.
+    """
+
+    def _commutes(p: str, q: str) -> bool:
+        anti = 0
+        for a, b in zip(p, q):
+            if a == "I" or b == "I":
+                continue
+            if a != b:
+                anti ^= 1
+        return anti == 0
+
+    def _pauli_weight(chars: Sequence[str]) -> int:
+        return sum(c != "I" for c in chars)
+
+    def _solve_add_only(z_matrix: list[list[int]], b_vec: list[int], free_cols: list[int]) -> list[int] | None:
+        """Solve z_matrix[:, free_cols] * delta = b_vec over GF(2)."""
+        if not z_matrix:
+            return [0] * len(free_cols)
+        m = len(z_matrix)
+        n = len(free_cols)
+        aug = [[z_matrix[r][c] for c in free_cols] + [b_vec[r] % 2] for r in range(m)]
+        row = 0
+        pivots: list[int] = []
+        for col in range(n):
+            pivot = next((r for r in range(row, m) if aug[r][col]), None)
+            if pivot is None:
+                continue
+            aug[row], aug[pivot] = aug[pivot], aug[row]
+            pivots.append(col)
+            for r in range(m):
+                if r != row and aug[r][col]:
+                    for c in range(col, n + 1):
+                        aug[r][c] ^= aug[row][c]
+            row += 1
+        for r in range(row, m):
+            if aug[r][n]:
+                return None
+        delta = [0] * n
+        for r in range(row - 1, -1, -1):
+            col = pivots[r]
+            rhs = aug[r][n]
+            for c in range(col + 1, n):
+                rhs ^= aug[r][c] & delta[c]
+            delta[col] = rhs
+        return delta
+
+    z_masked = [_strip_z_on_qubits(s, boundary) for s in z_stabilizers]
+    x_preserved = list(x_stabilizers)
+
+    z_boundary_removed = sum(
+        1 for s, sm in zip(z_stabilizers, z_masked) for a, b in zip(s, sm) if a != b
+    )
+
+    # Fast path: if keeping X intact still commutes with masked Z, return early.
+    if all(_commutes(z, x) for z in z_masked for x in x_preserved):
+        if verbose:
+            print(f"[boundary-mask] stripped Z@boundary={z_boundary_removed}, X preserved (already commuting)")
+        return z_masked, x_preserved
+
+    if verbose:
+        print(f"[boundary-mask] stripped Z@boundary={z_boundary_removed}, X needs adjustment to commute")
+
+    z_matrix = [[1 if c == "Z" else 0 for c in z] for z in z_masked]
+    x_adjusted: list[str] = []
+    additive_ok = True
+    for x in x_preserved:
+        x_vec = [1 if c == "X" else 0 for c in x]
+        b_vec = [sum(a * b for a, b in zip(row, x_vec)) % 2 for row in z_matrix]
+        free_cols = [i for i, val in enumerate(x_vec) if i not in boundary]
+        delta = _solve_add_only(z_matrix, b_vec, free_cols) if free_cols else None
+        if delta is None:
+            additive_ok = False
+            break
+        for col, val in zip(free_cols, delta):
+            if val:
+                x_vec[col] ^= 1
+        x_adjusted.append("".join("X" if v else "I" for v in x_vec))
+
+    if additive_ok and all(_commutes(z, x) for z in z_masked for x in x_adjusted):
+        if verbose:
+            added = sum(
+                1 for s_old, s_new in zip(x_preserved, x_adjusted) for a, b in zip(s_old, s_new) if a != b
+            )
+            print(f"[boundary-mask] additive solution used, X added off-boundary={added}")
+        return z_masked, x_adjusted
+
+    # Fallback: strip overlapping Paulis until everything commutes.
+    z_chars = [list(s) for s in z_masked]
+    x_chars = [list(s) for s in x_preserved]
+    changed = True
+    fallback_z_strips = 0
+    fallback_x_strips = 0
+    while changed:
+        changed = False
+        for zi, z in enumerate(z_chars):
+            for xi, x in enumerate(x_chars):
+                if _commutes("".join(z), "".join(x)):
+                    continue
+                overlap = [
+                    q
+                    for q, (a, b) in enumerate(zip(z, x))
+                    if a != "I" and b != "I" and a != b
+                ]
+                if not overlap:
+                    continue
+                target = next((q for q in overlap if q not in boundary), overlap[0])
+                if _pauli_weight(z) <= 1 and _pauli_weight(x) > 1:
+                    x[target] = "I"
+                    x_chars[xi] = x
+                    fallback_x_strips += 1
+                else:
+                    z[target] = "I"
+                    fallback_z_strips += 1
+                changed = True
+
+    if verbose:
+        print(f"[boundary-mask] fallback used, extra Z stripped={fallback_z_strips}, extra X stripped={fallback_x_strips}")
+    return ["".join(z) for z in z_chars], ["".join(x) for x in x_chars]
+
 
 def _run_phase(
     circuit: stim.Circuit,
@@ -238,6 +373,7 @@ def build_cnot_surgery_circuit(
     rounds_pre: int,
     rounds_merge: int,
     rounds_post: int,
+    verbose_boundary_mask: bool = False,
 ) -> Tuple[stim.Circuit, List[Tuple[int, int]]]:
     """Return a Stim circuit implementing a *lattice-surgery* CNOT scaffold.
 
@@ -295,8 +431,8 @@ def build_cnot_surgery_circuit(
     rough_boundary_qubits = find_rough_boundary_data_qubits(single_model)
     
 
-    #smooth_boundary_qubits = [0, 1, 2]
-    #rough_boundary_qubits = [0, 5, 10]
+    smooth_boundary_qubits = [2 ,1 , 0 , 22 , 21 , 36 , 35]
+    rough_boundary_qubits = [2, 7, 8 ,13 , 14 , 19 , 20]
 
     print(f"Smooth boundary qubits: {smooth_boundary_qubits}")
     print(f"Rough boundary qubits: {rough_boundary_qubits}")
@@ -447,30 +583,29 @@ def build_cnot_surgery_circuit(
     # measure X_L^INT X_L^T along the rough boundary where X stabilizers
     # terminate.
     # Rough-merge stabilizers: strip Z support on INT/T rough boundaries and
-    # drop INT/T X stabilizers that touch that boundary, replacing them with
-    # joint INT–seam–T X checks. This keeps the rough-merge CSS set commuting.
+    # mask INT/T X stabilizers on that boundary (rather than dropping them),
+    # then add joint INT–seam–T X checks. This keeps the rough-merge CSS set
+    # commuting while preserving syndrome data near the merge.
     rough_merge_z: List[str] = []
     rough_merge_x: List[str] = []
 
-    def _touches_boundary(pauli: str, boundary: Sequence[int]) -> bool:
-        return any((0 <= q < len(pauli)) and pauli[q] != "I" for q in boundary)
+    rough_z_masked, rough_x_masked = _commuting_boundary_mask(
+        z_stabilizers=z_single,
+        x_stabilizers=x_single,
+        boundary=rough_boundary_qubits,
+        verbose=verbose_boundary_mask,
+    )
 
-    for s in z_single:
+    for s, s_masked in zip(z_single, rough_z_masked):
         rough_merge_z.append(embed_patch(s, offset_C))
-        s_rough = _strip_z_on_qubits(s, rough_boundary_qubits)
-        rough_merge_z.append(embed_patch(s_rough, offset_INT))
-        rough_merge_z.append(embed_patch(s_rough, offset_T))
+        rough_merge_z.append(embed_patch(s_masked, offset_INT))
+        rough_merge_z.append(embed_patch(s_masked, offset_T))
 
     
-    for s in x_single:
+    for s, s_masked in zip(x_single, rough_x_masked):
         rough_merge_x.append(embed_patch(s, offset_C))
-        # Skip INT/T checks that touch the rough boundary; use the original
-        # stabilizer when deciding, otherwise shared corner qubits (on both
-        # smooth and rough boundaries) can slip through after stripping.
-        if not _touches_boundary(s, rough_boundary_qubits):
-            rough_merge_x.append(embed_patch(s, offset_INT))
-        if not _touches_boundary(s, rough_boundary_qubits):
-            rough_merge_x.append(embed_patch(s, offset_T))
+        rough_merge_x.append(embed_patch(s_masked, offset_INT))
+        rough_merge_x.append(embed_patch(s_masked, offset_T))
     
 
     # Add distance-many joint X checks tying INT, seam_INT_T, and T along the
@@ -634,11 +769,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
-    parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
-    parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
+    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
+    parser.add_argument("--px", type=float, default=5e-3, help="X error probability")
+    parser.add_argument("--pz", type=float, default=5e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose output.",
+    )
     return parser.parse_args()
 
 
@@ -652,6 +792,7 @@ def run_cnot_experiment(
     p_z: float,
     shots: int,
     seed: int | None,
+    verbose_boundary_mask: bool = False,
 ):
     """Top-level driver for the CNOT experiment.
 
@@ -678,6 +819,7 @@ def run_cnot_experiment(
         rounds_pre=rounds_pre,
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
+        verbose_boundary_mask=verbose_boundary_mask,
     )
 
     """
@@ -750,6 +892,7 @@ def main() -> None:
         p_z=args.pz,
         shots=args.shots,
         seed=args.seed,
+        verbose_boundary_mask=args.verbose,
     )
 
 

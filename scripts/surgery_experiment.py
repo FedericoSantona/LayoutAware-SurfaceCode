@@ -553,27 +553,18 @@ def build_cnot_surgery_circuit(
     z_single = list(single_model.z_stabilizers)
     x_single = list(single_model.x_stabilizers)
 
-    # Mask the smooth boundary using the commuting helper (strip X, adjust Z)
-    smooth_z_masked, smooth_x_masked = _commuting_boundary_mask(
-        z_stabilizers=z_single,
-        x_stabilizers=x_single,
-        boundary=smooth_boundary_qubits,
-        strip_pauli="X",
-        verbose=verbose_boundary_mask,
-    )
-
-    # Base (commuting) Z/X sets used in all phases except the INT+T rough merge.
+    # Base Z/X sets used in all phases except the merge windows (kept unmasked).
     base_z: List[str] = []
     base_x: List[str] = []
 
-    for s, s_masked in zip(z_single, smooth_z_masked):
-        base_z.append(embed_patch(s_masked, offset_C))
-        base_z.append(embed_patch(s_masked, offset_INT))
+    for s in z_single:
+        base_z.append(embed_patch(s, offset_C))
+        base_z.append(embed_patch(s, offset_INT))
         base_z.append(embed_patch(s, offset_T))
 
-    for s, s_masked in zip(x_single, smooth_x_masked):
-        base_x.append(embed_patch(s_masked, offset_C))
-        base_x.append(embed_patch(s_masked, offset_INT))
+    for s in x_single:
+        base_x.append(embed_patch(s, offset_C))
+        base_x.append(embed_patch(s, offset_INT))
         base_x.append(embed_patch(s, offset_T))
 
     # --- Smooth-merge phase stabilizers ---------------------------------
@@ -587,8 +578,27 @@ def build_cnot_surgery_circuit(
     # This realises a smooth merge between C and INT: ancillas are prepared
     # in |+> (via the pre-merge X checks), then governed by Z-type joint
     # checks that effectively measure Z_L^C Z_L^INT over the merge window.
-    smooth_merge_z: List[str] = list(base_z)
-    smooth_merge_x: List[str] = list(base_x)
+    smooth_merge_z: List[str] = []
+    smooth_merge_x: List[str] = []
+
+    smooth_z_masked, smooth_x_masked = _commuting_boundary_mask(
+        z_stabilizers=z_single,
+        x_stabilizers=x_single,
+        boundary=smooth_boundary_qubits,
+        strip_pauli="X",
+        verbose=verbose_boundary_mask,
+    )
+
+    # Mask only the merging patches (C and INT); leave T unmasked.
+    for s, s_masked in zip(z_single, smooth_z_masked):
+        smooth_merge_z.append(embed_patch(s_masked, offset_C))
+        smooth_merge_z.append(embed_patch(s_masked, offset_INT))
+        smooth_merge_z.append(embed_patch(s, offset_T))
+
+    for s, s_masked in zip(x_single, smooth_x_masked):
+        smooth_merge_x.append(embed_patch(s_masked, offset_C))
+        smooth_merge_x.append(embed_patch(s_masked, offset_INT))
+        smooth_merge_x.append(embed_patch(s, offset_T))
 
     # Add distance-many joint Z checks tying C, seam, and INT along the smooth
     # boundary identified by `smooth_boundary_qubits`.
@@ -719,12 +729,25 @@ def build_cnot_surgery_circuit(
         init_label=None,
     )
 
+    def _phase_measure_flags(phase: PhaseSpec) -> tuple[bool, bool]:
+        fam = (stim_config.family or "").upper()
+        if fam not in {"", "Z", "X"}:
+            raise ValueError("config.family must be one of None, 'Z', or 'X'")
+        measure_Z = phase.measure_z if phase.measure_z is not None else (fam in {"", "Z"})
+        measure_X = phase.measure_x if phase.measure_x is not None else (fam in {"", "X"})
+        return measure_Z, measure_X
+
     sz_prev: List[int] | None = None
     sx_prev: List[int] | None = None
+    prev_z_set: Sequence[str] | None = None
+    prev_x_set: Sequence[str] | None = None
     for phase in phases:
-        if phase.name in {"INT+T rough merge", "INT+T rough split"}:
+        # Reset time-like detectors when stabilizer sets change between phases.
+        if prev_z_set is not None and phase.z_stabilizers != prev_z_set:
             sz_prev = None
+        if prev_x_set is not None and phase.x_stabilizers != prev_x_set:
             sx_prev = None
+
         sz_prev, sx_prev = _run_phase(
             circuit=circuit,
             builder=builder,
@@ -733,6 +756,13 @@ def build_cnot_surgery_circuit(
             sz_prev=sz_prev,
             sx_prev=sx_prev,
         )
+        measure_Z, measure_X = _phase_measure_flags(phase)
+        if not measure_Z:
+            sz_prev = None
+        if not measure_X:
+            sx_prev = None
+        prev_z_set = phase.z_stabilizers
+        prev_x_set = phase.x_stabilizers
 
     
     # Final logical Z measurement on the control patch.
@@ -805,8 +835,8 @@ def parse_args() -> argparse.Namespace:
         help="Number of post-surgery memory rounds (default: distance)",
     )
     parser.add_argument("--distance", type=int, default=7, help="Code distance d")
-    parser.add_argument("--px", type=float, default=5e-3, help="X error probability")
-    parser.add_argument("--pz", type=float, default=5e-3, help="Z error probability")
+    parser.add_argument("--px", type=float, default=3e-3, help="X error probability")
+    parser.add_argument("--pz", type=float, default=3e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(

@@ -132,6 +132,16 @@ def _strip_z_on_qubits(pauli_str: str, qubits: Sequence[int]) -> str:
             chars[q] = "I"
     return "".join(chars)
 
+def _pauli_commutes(a: str, b: str) -> bool:
+    """Return True iff two Pauli strings commute (ignoring identities)."""
+    anti = 0
+    for pa, pb in zip(a, b):
+        if pa == "I" or pb == "I":
+            continue
+        if pa != pb:
+            anti ^= 1
+    return anti == 0
+
 def _commuting_boundary_mask(
     z_stabilizers: Sequence[str],
     x_stabilizers: Sequence[str],
@@ -294,6 +304,81 @@ def _commuting_boundary_mask(
             f"extra {secondary_char} stripped={fallback_secondary_strips}"
         )
     return _return_order(["".join(p) for p in primary_chars], ["".join(s) for s in secondary_chars])
+
+
+def _solve_gf2(A: list[list[int]], b: list[int]) -> list[int] | None:
+    """Solve A x = b over GF(2); return one solution or None if inconsistent."""
+    if not A:
+        return [0] * (len(A[0]) if b else 0)
+    m, n = len(A), len(A[0])
+    aug = [row[:] + [b[i] & 1] for i, row in enumerate(A)]
+    r = 0
+    pivots: list[int] = []
+    for c in range(n):
+        pivot = next((i for i in range(r, m) if aug[i][c]), None)
+        if pivot is None:
+            continue
+        aug[r], aug[pivot] = aug[pivot], aug[r]
+        pivots.append(c)
+        for i in range(m):
+            if i != r and aug[i][c]:
+                for j in range(c, n + 1):
+                    aug[i][j] ^= aug[r][j]
+        r += 1
+    for i in range(r, m):
+        if aug[i][n]:
+            return None
+    x = [0] * n
+    for i in range(r - 1, -1, -1):
+        c = pivots[i]
+        val = aug[i][n]
+        for j in range(c + 1, n):
+            val ^= aug[i][j] & x[j]
+        x[c] = val
+    return x
+
+
+def _align_logical_x_to_masked_z(
+    logical_x: str | None,
+    x_stabilizers: Sequence[str],
+    masked_z: Sequence[str],
+) -> str | None:
+    """Pick an equivalent logical-X that commutes with masked Z checks.
+
+    Rather than stripping Z stabilizers (which weakens error detection),
+    adjust the representative of the logical X by multiplying X stabilizers
+    so that it commutes with the boundary-masked Z set used during rough merge.
+    """
+    if logical_x is None or not masked_z or not x_stabilizers:
+        return logical_x
+
+    n = len(logical_x)
+    l_vec = [1 if c in {"X", "Y"} else 0 for c in logical_x]
+    z_rows = [[1 if c == "Z" else 0 for c in stab] for stab in masked_z]
+    x_rows = [[1 if c in {"X", "Y"} else 0 for c in stab] for stab in x_stabilizers]
+
+    if all(_pauli_commutes(logical_x, z) for z in masked_z):
+        return logical_x
+
+    rhs = [sum(l * z for l, z in zip(l_vec, row)) % 2 for row in z_rows]
+    A: list[list[int]] = []
+    for row in z_rows:
+        A.append([sum(x_row[i] & row[i] for i in range(n)) % 2 for x_row in x_rows])
+
+    coeffs = _solve_gf2(A, rhs)
+    if coeffs is None:
+        return logical_x
+
+    delta = [0] * n
+    for coeff, x_row in zip(coeffs, x_rows):
+        if coeff:
+            delta = [(d ^ xr) for d, xr in zip(delta, x_row)]
+
+    aligned_vec = [(l ^ d) for l, d in zip(l_vec, delta)]
+    aligned = "".join("X" if v else "I" for v in aligned_vec)
+    if not all(_pauli_commutes(aligned, z) for z in masked_z):
+        return logical_x
+    return aligned
 
 
 def _run_phase(
@@ -643,13 +728,17 @@ def build_cnot_surgery_circuit(
         boundary=rough_boundary_qubits,
         verbose=verbose_boundary_mask,
     )
-
+    logical_x_aligned = _align_logical_x_to_masked_z(
+        single_model.logical_x,
+        x_single,
+        rough_z_masked,
+    )
     for s, s_masked in zip(z_single, rough_z_masked):
         rough_merge_z.append(embed_patch(s, offset_C))
         rough_merge_z.append(embed_patch(s_masked, offset_INT))
         rough_merge_z.append(embed_patch(s_masked, offset_T))
 
-    
+
     for s, s_masked in zip(x_single, rough_x_masked):
         rough_merge_x.append(embed_patch(s, offset_C))
         rough_merge_x.append(embed_patch(s_masked, offset_INT))
@@ -704,8 +793,8 @@ def build_cnot_surgery_circuit(
     # as OBSERVABLE 1.
 
     logical_x_target: str | None = None
-    if single_model.logical_x is not None:
-        logical_x_target = embed_patch(single_model.logical_x, offset_T)
+    if logical_x_aligned is not None:
+        logical_x_target = embed_patch(logical_x_aligned, offset_T)
     
 
 
@@ -821,7 +910,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--code-type",
         type=str,
-        default="standard",
+        default="heavy_hex",
         choices=["heavy_hex", "standard"],
         help="Type of surface code: 'heavy_hex' or 'standard'",
     )
@@ -843,7 +932,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")

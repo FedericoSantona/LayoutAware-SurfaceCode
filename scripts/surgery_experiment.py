@@ -488,15 +488,7 @@ def build_cnot_surgery_circuit(
         logical_z=None,
         logical_x=None,
     )
-    # Helper to embed a single-patch Pauli string into the combined three-patch
-    # index space at a given offset.
-    def embed_patch(pauli_str: str, offset: int) -> str:
-        assert len(pauli_str) == n_single
-        left = "I" * offset
-        mid = pauli_str
-        right = "I" * (n_total - offset - n_single)
-        return left + mid + right
-
+    
     # Offsets for the three logical patches in the combined code.
     # Ordering: C, seam_C_INT, INT, seam_INT_T, T
     offset_C = 0
@@ -547,6 +539,17 @@ def build_cnot_surgery_circuit(
     print(f"    Patch T:   {rough_T}")
     
     print("="*60 + "\n")
+
+
+
+    # Helper to embed a single-patch Pauli string into the combined three-patch
+    # index space at a given offset.
+    def embed_patch(pauli_str: str, offset: int) -> str:
+        assert len(pauli_str) == n_single
+        left = "I" * offset
+        mid = pauli_str
+        right = "I" * (n_total - offset - n_single)
+        return left + mid + right
 
 
     # Build stabilizers for the disjoint three-patch configuration.

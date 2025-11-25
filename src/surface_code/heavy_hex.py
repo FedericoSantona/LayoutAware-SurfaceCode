@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
-
+import matplotlib.pyplot as plt
 from qiskit_qec.codes.codebuilders.heavyhex_code_builder import HeavyHexCodeBuilder
 from qiskit_qec.linear.symplectic import normalizer
 
@@ -14,6 +15,7 @@ from .logicals import check_logicals, find_logicals_heavyhex
 from .model import SurfaceCodeModel
 from .stabilizers import extract_css_stabilizers
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass
 class HeavyHexModel(SurfaceCodeModel):
@@ -36,6 +38,7 @@ class HeavyHexModel(SurfaceCodeModel):
 
 def build_heavy_hex_model(distance: int) -> HeavyHexModel:
     code = HeavyHexCodeBuilder(d=distance).build()
+    plot_code(code, distance)
     generators = code.generators
     M = generators.matrix.astype(np.uint8) & 1
     S_mat, _, _ = normalizer(M)
@@ -53,3 +56,22 @@ def build_heavy_hex_model(distance: int) -> HeavyHexModel:
         logical_z_vec=logical_z_vec,
         logical_x_vec=logical_x_vec,
     )
+
+
+def plot_code(code, distance: int) -> None:
+    """Plot the code."""
+    # save the code tiling
+    plot_dir = PROJECT_ROOT / "plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig = code.draw(
+        face_colors=False,
+        xcolor="lightcoral",
+        zcolor="skyblue",
+        figsize=(5, 5),
+        show_index=True,
+
+    )
+    plt.savefig(plot_dir / f"heavy_hex_d{distance}.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"heavy hex code tiling saved to {plot_dir}/heavy_hex_d{distance}.png")

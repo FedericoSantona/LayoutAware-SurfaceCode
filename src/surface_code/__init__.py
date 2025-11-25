@@ -1,6 +1,7 @@
 """Surface code utilities and models for logical qubit simulations."""
 
 from .model import SurfaceCodeModel
+from .layout import Layout, SeamSpec
 from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig
 from .geometry_utils import (
     find_boundary_data_qubits,
@@ -65,6 +66,8 @@ __all__ = [
     "build_surface_code_model",
     "PhenomenologicalStimBuilder",
     "PhenomenologicalStimConfig",
+    "Layout",
+    "SeamSpec",
     "find_boundary_data_qubits",
     "find_rough_boundary_data_qubits",
     "find_smooth_boundary_data_qubits",

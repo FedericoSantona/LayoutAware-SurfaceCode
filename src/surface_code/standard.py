@@ -5,15 +5,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-
+import matplotlib.pyplot as plt
 from qiskit_qec.codes.codebuilders.surface_code_builder import SurfaceCodeBuilder
 from qiskit_qec.linear.symplectic import normalizer
+from pathlib import Path
 
 from .linalg import rank_gf2
 from .logicals import check_logicals, find_logicals_standard
 from .model import SurfaceCodeModel
 from .stabilizers import extract_css_stabilizers
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def _native_plaquette_stabilizers(code) -> tuple[list[str], list[str]]:
     """Return the local plaquette stabilizers emitted by SurfaceCodeBuilder.
@@ -69,6 +71,7 @@ def build_standard_surface_code_model(distance: int) -> StandardSurfaceCodeModel
         StandardSurfaceCodeModel instance with all code properties initialized
     """
     code = SurfaceCodeBuilder(d=distance).build()
+    plot_code(code, distance)
     generators = code.generators
     M = generators.matrix.astype(np.uint8) & 1
     S_mat, _, _ = normalizer(M)
@@ -89,3 +92,22 @@ def build_standard_surface_code_model(distance: int) -> StandardSurfaceCodeModel
         logical_z_vec=logical_z_vec,
         logical_x_vec=logical_x_vec,
     )
+
+
+def plot_code(code, distance: int) -> None:
+    """Plot the code."""
+    # save the code tiling
+    plot_dir = PROJECT_ROOT / "plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig = code.draw(
+        face_colors=False,
+        xcolor="lightcoral",
+        zcolor="skyblue",
+        figsize=(5, 5),
+        show_index=True,
+
+    )
+    plt.savefig(plot_dir / f"surface_code_d{distance}.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"surface code tiling saved to {plot_dir}/surface_code_d{distance}.png")

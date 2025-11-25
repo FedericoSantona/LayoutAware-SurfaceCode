@@ -46,6 +46,8 @@ if str(SRC_PATH) not in sys.path:
 from surface_code import (
     PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
+    Layout,
+    SeamSpec,
     build_surface_code_model,
     find_smooth_boundary_data_qubits,
     find_rough_boundary_data_qubits,
@@ -528,58 +530,36 @@ def build_cnot_surgery_circuit(
     of this.
     """
 
-    # Use the single-patch model as a template to build a three-patch layout:
-    # control (C), intermediate ancilla (INT), and target (T). For now we model
-    # this purely at the level of indices: three disjoint copies of the same
-    # patch, laid out in a single index space [0, ..., n_total-1].
-    single_model = build_surface_code_model(distance, code_type)
+        # ------------------------------------------------------------------
+    # Build 3-patch layout using the generic Layout class
+    # ------------------------------------------------------------------
     
-
-     # Determine code name for display and file naming
-    code_name = "heavy-hex" if code_type == "heavy_hex" else "surface-code"
-    code_name_short = "heavy_hex" if code_type == "heavy_hex" else "surface_code"
-
-    # save the code tiling
-    plot_dir = PROJECT_ROOT / "plots"
-    plot_dir.mkdir(exist_ok=True)
-    fig = single_model.code.draw(
-        face_colors=False,
-        xcolor="lightcoral",
-        zcolor="skyblue",
-        figsize=(5, 5),
-        show_index=True,
-
+    layout = Layout(
+        distance=distance,
+        code_type=code_type,
+        patch_order=["C", "INT", "T"],
+        seams=[
+            SeamSpec("C", "INT", "smooth"),  # C–INT smooth merge
+            SeamSpec("INT", "T", "rough"),   # INT–T rough merge
+        ],
+        patch_metadata={"C": "control", "INT": "ancilla", "T": "target"},
     )
-    plt.savefig(plot_dir / f"{code_name_short}_d{distance}.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"{code_name.capitalize()} tiling saved to {plot_dir}/{code_name_short}_d{distance}.png")
-
-    # Identify smooth and rough boundary data qubits for correct seam placement.
-    # The seam between C and INT should be placed on the smooth boundary
-    # (for smooth merge), and the seam between INT and T on a rough boundary
-    # (for rough merge).
-    smooth_boundary_qubits = find_smooth_boundary_data_qubits(single_model)
-    rough_boundary_qubits = find_rough_boundary_data_qubits(single_model)
     
 
-    #smooth_boundary_qubits = [2, 1 , 0 , 22 , 21 , 36 , 35]
-    #rough_boundary_qubits = [2, 7, 8 ,13 , 14 , 19 , 20]
+    if verbose:
+        layout.print_layout()
 
-    print(f"Smooth boundary qubits: {smooth_boundary_qubits}")
-    print(f"Rough boundary qubits: {rough_boundary_qubits}")
-    
-    #-------Layout of the combined code-------
+    # Single-patch model (same object the layout used internally)
+    single_model = layout.single_model
     n_single = single_model.code.n
-    # Extra ancilla line between C and INT for smooth merge, and between
-    # INT and T for rough merge. Use the actual number of boundary qubits
-    # to determine seam sizes.
-    n_seam_C_INT = len(smooth_boundary_qubits)
-    n_seam_INT_T = len(rough_boundary_qubits)
-    n_total = 3 * n_single + n_seam_C_INT + n_seam_INT_T
+    n_total = layout.n_total
 
+    smooth_boundary_qubits = layout.local_boundary_qubits["smooth"]
+    rough_boundary_qubits = layout.local_boundary_qubits["rough"]
+
+
+    # Minimal code-like object exposing only `.n` for the builder.
     class CombinedCode:
-        """Minimal code-like object exposing only `.n` for the builder."""
         def __init__(self, n: int):
             self.n = n
 
@@ -592,60 +572,15 @@ def build_cnot_surgery_circuit(
         logical_z=None,
         logical_x=None,
     )
-    
+
     # Offsets for the three logical patches in the combined code.
-    # Ordering: C, seam_C_INT, INT, seam_INT_T, T
-    offset_C = 0
-    # Seam ancilla qubits between C and INT (smooth merge) placed right after C
-    offset_seam_C_INT = n_single
-    seam_C_INT = list(range(offset_seam_C_INT, offset_seam_C_INT + n_seam_C_INT))
-    
-    # Patch INT comes after the C-INT seam
-    offset_INT = n_single + n_seam_C_INT
-    
-    # Seam ancilla qubits between INT and T (rough merge) placed right after INT
-    offset_seam_INT_T = n_single + n_seam_C_INT + n_single
-    seam_INT_T = list(range(offset_seam_INT_T, offset_seam_INT_T + n_seam_INT_T))
-    
-    # Patch T comes after the INT-T seam
-    offset_T = n_single + n_seam_C_INT + n_single + n_seam_INT_T
-    
-    # Verification print: show the qubit layout ordering
-    print("\n" + "="*60)
-    print("Qubit Layout Verification:")
-    print("="*60)
-    print(f"Patch C:        qubits [{offset_C:4d}, {offset_C + n_single:4d})")
-    print(f"Seam C_INT:     qubits [{offset_seam_C_INT:4d}, {offset_seam_C_INT + n_seam_C_INT:4d})")
-    print(f"Patch INT:      qubits [{offset_INT:4d}, {offset_INT + n_single:4d})")
-    print(f"Seam INT_T:     qubits [{offset_seam_INT_T:4d}, {offset_seam_INT_T + n_seam_INT_T:4d})")
-    print(f"Patch T:        qubits [{offset_T:4d}, {offset_T + n_single:4d})")
-    print(f"Total qubits:   {n_total}")
-    print(f"Expected total: {offset_T + n_single}")
+    offset_C = layout.patch_offsets["C"]
+    offset_INT = layout.patch_offsets["INT"]
+    offset_T = layout.patch_offsets["T"]
 
-    # Show boundary qubits in global coordinate system
-    print("\nBoundary Qubits (in global coordinates):")
-    # Smooth boundary qubits: used for C-INT seam
-    smooth_C = [offset_C + q for q in smooth_boundary_qubits]
-    smooth_INT = [offset_INT + q for q in smooth_boundary_qubits]
-    smooth_T = [offset_T + q for q in smooth_boundary_qubits]
-    print(f"  Smooth boundary (C-INT seam):")
-    print(f"    Patch C:   {smooth_C}")
-    print(f"    Patch INT: {smooth_INT}")
-    print(f"    Patch T:   {smooth_T}")
-    
-    # Rough boundary qubits: used for INT-T seam
-    rough_C = [offset_C + q for q in rough_boundary_qubits]
-    rough_INT = [offset_INT + q for q in rough_boundary_qubits]
-    rough_T = [offset_T + q for q in rough_boundary_qubits]
-    print(f"  Rough boundary (INT-T seam):")
-    print(f"    Patch C:   {rough_C}")
-    print(f"    Patch INT: {rough_INT}")
-    print(f"    Patch T:   {rough_T}")
-    
-    print("="*60 + "\n")
-
-
-
+    # Seam ancilla qubits between patches
+    seam_C_INT = layout.get_seam_qubits("C", "INT")
+    seam_INT_T = layout.get_seam_qubits("INT", "T")
     # Helper to embed a single-patch Pauli string into the combined three-patch
     # index space at a given offset.
     def embed_patch(pauli_str: str, offset: int) -> str:
@@ -707,17 +642,14 @@ def build_cnot_surgery_circuit(
         smooth_merge_x.append(embed_patch(s_masked, offset_INT))
         smooth_merge_x.append(embed_patch(s, offset_T))
 
-    # Add distance-many joint Z checks tying C, seam, and INT along the smooth
-    # boundary identified by `smooth_boundary_qubits`.
-    for k, qb_local in enumerate(smooth_boundary_qubits):
-        if k >= len(seam_C_INT):
-            break
-        q_c = offset_C + qb_local
-        q_sea = seam_C_INT[k]
-        q_int = offset_INT + qb_local
+    #Use layout global indeces to add smooth merge stabilizers
+    smooth_C   = layout.boundary_qubits["C"]["smooth"]
+    smooth_INT = layout.boundary_qubits["INT"]["smooth"]
+    seam_C_INT = layout.get_seam_qubits("C", "INT")
 
+    for q_c, q_int, q_sea in zip(smooth_C, smooth_INT, seam_C_INT):
         chars = ["I"] * n_total
-        chars[q_c] = "Z"
+        chars[q_c]   = "Z"
         chars[q_sea] = "Z"
         chars[q_int] = "Z"
         smooth_merge_z.append("".join(chars))
@@ -765,22 +697,18 @@ def build_cnot_surgery_circuit(
         rough_merge_x.append(embed_patch(s_masked, offset_T))
     
 
-    # Add distance-many joint X checks tying INT, seam_INT_T, and T along the
-    # rough boundary identified by `rough_boundary_qubits`.
-    for k, qb_local in enumerate(rough_boundary_qubits):
-        if k >= len(seam_INT_T):
-            break
-        q_int = offset_INT + qb_local
-        q_sea2 = seam_INT_T[k]
-        q_t = offset_T + qb_local
+    rough_INT = layout.boundary_qubits["INT"]["rough"]
+    rough_T   = layout.boundary_qubits["T"]["rough"]
+    seam_INT_T = layout.get_seam_qubits("INT", "T")
 
+    for q_int, q_t, q_sea2 in zip(rough_INT, rough_T, seam_INT_T):
         chars = ["I"] * n_total
-        chars[q_int] = "X"
+        chars[q_int]  = "X"
         chars[q_sea2] = "X"
-        chars[q_t] = "X"
+        chars[q_t]    = "X"
         rough_merge_x.append("".join(chars))
 
-    # For this first implementation, we explicitly separate the spacetime into
+    # We explicitly separate the spacetime into
     # phases: pre-merge memory, a smooth-merge window, a smooth-split window,
     # an INT+T rough-merge window, and a post-merge memory phase.
     phases = [
@@ -952,7 +880,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")

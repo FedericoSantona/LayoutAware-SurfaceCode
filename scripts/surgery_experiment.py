@@ -699,9 +699,12 @@ def build_cnot_surgery_circuit(
     # single-patch logical_X operator at the target offset. We measure it
     # once at the beginning and once at the end, and include their parity
     # as OBSERVABLE 1.
+
     logical_x_target: str | None = None
     if single_model.logical_x is not None:
         logical_x_target = embed_patch(single_model.logical_x, offset_T)
+    
+
 
     # Define the observable pairs for the logical Z and X measurements
     observable_pairs: List[Tuple[int, int]] = []
@@ -718,6 +721,8 @@ def build_cnot_surgery_circuit(
     if logical_x_target is not None:
         circuit.append_operation("TICK")
         start_idx_target = builder._mpp_from_string(circuit, logical_x_target)
+    
+
     
     
     # Run the pre-merge phase using the same phenomenological noise model
@@ -794,6 +799,7 @@ def build_cnot_surgery_circuit(
             )
             observable_pairs.append((start_idx_target, end_idx_target))
     
+    
     return circuit, observable_pairs
 
 # ---------------------------------------------------------------------------
@@ -812,7 +818,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--code-type",
         type=str,
-        default="heavy_hex",
+        default="standard",
         choices=["heavy_hex", "standard"],
         help="Type of surface code: 'heavy_hex' or 'standard'",
     )
@@ -834,7 +840,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=5, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
@@ -887,34 +893,6 @@ def run_cnot_experiment(
         verbose_boundary_mask=verbose_boundary_mask,
     )
 
-    """
-    # Write SVG diagram to file - focus on detector D297
-    # D297 involves qubits 13, 15, 17 (from error message), problem at tick 38
-    svg_content = str(circuit.diagram(
-        "detslice-with-ops-svg",
-        tick=range(36, 40),     # Narrow range around problem tick (38)
-        filter_coords=["D297"],  # Focus on the problematic detector
-    ))
-    with open("circuit_diagram_d297.svg", "w") as f:
-        f.write(svg_content)
-    
-    # Also create a text timeline which is more readable
-    # Note: timeline-text doesn't support tick parameter, shows full circuit
-    text_diagram = str(circuit.diagram("timeline-text"))
-    with open("circuit_diagram_d297.txt", "w") as f:
-        f.write(text_diagram)
-    
-    print("Diagrams saved:")
-    print("  SVG: circuit_diagram_d297.svg (open in browser)")
-    print("  Text: circuit_diagram_d297.txt (more readable)")
-    print("  Detector D297 (qubits 13, 15, 17), ticks 36-39")
-
-
-    ops = list(circuit)
-    for i in range(125, 140):
-        print(i, ops[i])
-    """
-
 
     # We reuse PhenomenologicalStimConfig purely for its noise parameters and
     # CSS-family selector; the `rounds` field is ignored by the multi-phase
@@ -927,7 +905,7 @@ def run_cnot_experiment(
     )
 
     mc_config = MonteCarloConfig(shots=shots, seed=seed)
-    result = run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config)
+    result = run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config )
     
     print(f"{code_type} code of distance ={distance}")
     print(f"shots={result.shots}")

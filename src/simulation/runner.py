@@ -34,9 +34,10 @@ def run_logical_error_rate(
     builder: PhenomenologicalStimBuilder,
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
+    verbose: bool = False,
 ) -> SimulationResult:
     circuit, observable_pairs = builder.build(stim_config)
-    return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config)
+    return run_circuit_logical_error_rate(circuit, observable_pairs, stim_config, mc_config, verbose=verbose)
 
 
 def run_circuit_logical_error_rate(
@@ -45,8 +46,10 @@ def run_circuit_logical_error_rate(
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
 ) -> SimulationResult:
+
+    
     # 1. Get DEM WITHOUT decomposition (before)
-    print("\n=== BEFORE DECOMPOSITION ===")
+    print("\n=== Checking for high-weight errors ===")
     dem_before = circuit.detector_error_model(decompose_errors=False)
     counts_before = Counter(
         sum(1 for t in inst.targets_copy() if t.is_relative_detector_id())
@@ -57,62 +60,82 @@ def run_circuit_logical_error_rate(
     print(f"Total error instructions: {sum(counts_before.values())}")
     print(f"Error size histogram (before): {dict(sorted(counts_before.items()))}")
     
-    # 2. Try decomposition WITHOUT ignoring failures to see what fails
-    print("\n=== CHECKING FOR DECOMPOSITION FAILURES ===")
-    try:
-        dem_strict = circuit.detector_error_model(decompose_errors=True, ignore_decomposition_failures=False)
-        print("✓ All errors decomposed successfully!")
-    except Exception as e:
-        print(f"✗ Decomposition failed: {e}")
-        print("\nTo investigate further, examine the circuit's error model structure.")
-        # You can optionally write the DEM to file for manual inspection
-        try:
-            with open("dem_before_decomposition.txt", "w") as f:
-                f.write(str(dem_before))
-            print("Wrote undecomposed DEM to 'dem_before_decomposition.txt'")
-        except Exception:
-            pass  # Don't fail if file write fails
-    
-    # 3. Get DEM WITH decomposition, ignoring failures (after)
-    print("\n=== AFTER DECOMPOSITION (ignoring failures) ===")
-    dem = circuit.detector_error_model(decompose_errors=True, ignore_decomposition_failures=True)
-    counts_after = Counter(
-        sum(1 for t in inst.targets_copy() if t.is_relative_detector_id())
-        for inst in dem
-        if inst.type == 'error'
-    )
-    print(f"Detectors: {dem.num_detectors}")
-    print(f"Total error instructions: {sum(counts_after.values())}")
-    print(f"Error size histogram (after): {dict(sorted(counts_after.items()))}")
-    
-    # 4. Compare the results
-    print("\n=== COMPARISON ===")
-    total_before = sum(counts_before.values())
-    total_after = sum(counts_after.values())
-    print(f"Error instructions lost: {total_before - total_after}")
-    
-    # Show changes in distribution
-    all_sizes = set(counts_before.keys()) | set(counts_after.keys())
-    for size in sorted(all_sizes):
-        before = counts_before.get(size, 0)
-        after = counts_after.get(size, 0)
-        change = after - before
-        if change != 0:
-            print(f"  Size {size}: {before} → {after} (Δ{change:+d})")
-    
-    # Identify high-weight errors that might fail decomposition
-    print("\n=== HIGH-WEIGHT ERRORS (potential decomposition issues) ===")
+    # 2. Check if there are high-weight errors that need decomposition
     high_weight_count = 0
-    for i, inst in enumerate(dem_before):
+    for inst in dem_before:
         if inst.type == 'error':
             num_detectors = sum(1 for t in inst.targets_copy() if t.is_relative_detector_id())
             if num_detectors > 2:  # These need decomposition
                 high_weight_count += 1
-                if high_weight_count <= 5:  # Show first 5 as examples
-                    print(f"Error {i}: weight={num_detectors}, probability={inst.args_copy()[0]}")
-                    print(f"  Targets: {inst.targets_copy()[:10]}...")  # Show first 10 targets
-    if high_weight_count > 5:
-        print(f"... and {high_weight_count - 5} more high-weight errors")
+
+    if high_weight_count == 0:
+        print("No high-weight errors found. Using undecomposed DEM.")
+        dem = dem_before
+
+    elif high_weight_count > 0:
+        # 3. Try decomposition WITHOUT ignoring failures to see what fails
+        print(f"\n=== CHECKING FOR DECOMPOSITION FAILURES ({high_weight_count} high-weight errors found) ===")
+        try:
+            dem_strict = circuit.detector_error_model(decompose_errors=True, ignore_decomposition_failures=False)
+            print("✓ All errors decomposed successfully!")
+            # Use decomposed DEM
+            dem = dem_strict
+        except Exception as e:
+            print(f"✗ Decomposition failed: {e}")
+            print("\nTo investigate further, examine the circuit's error model structure.")
+            # You can optionally write the DEM to file for manual inspection
+            try:
+                with open("dem_before_decomposition.txt", "w") as f:
+                    f.write(str(dem_before))
+                print("Wrote undecomposed DEM to 'dem_before_decomposition.txt'")
+            except Exception:
+                pass  # Don't fail if file write fails
+            
+            # Get DEM WITH decomposition, ignoring failures (after)
+            print("\n=== AFTER DECOMPOSITION (ignoring failures) ===")
+            print("We are decomposing errors while ignoring failures")
+            dem = circuit.detector_error_model(decompose_errors=True, ignore_decomposition_failures=True)
+            counts_after = Counter(
+                sum(1 for t in inst.targets_copy() if t.is_relative_detector_id())
+                for inst in dem
+                if inst.type == 'error'
+            )
+            print(f"Detectors: {dem.num_detectors}")
+            print(f"Total error instructions: {sum(counts_after.values())}")
+            print(f"Error size histogram (after): {dict(sorted(counts_after.items()))}")
+            
+            # 4. Compare the results (only if decomposition failed)
+            print("\n=== COMPARISON ===")
+            total_before = sum(counts_before.values())
+            total_after = sum(counts_after.values())
+            print(f"Error instructions lost: {total_before - total_after}")
+            
+            # Show changes in distribution
+            all_sizes = set(counts_before.keys()) | set(counts_after.keys())
+            for size in sorted(all_sizes):
+                before = counts_before.get(size, 0)
+                after = counts_after.get(size, 0)
+                change = after - before
+                if change != 0:
+                    print(f"  Size {size}: {before} → {after} (Δ{change:+d})")
+            
+            # Identify high-weight errors that might fail decomposition
+            print("\n=== HIGH-WEIGHT ERRORS (potential decomposition issues) ===")
+            shown_count = 0
+            for i, inst in enumerate(dem_before):
+                if inst.type == 'error':
+                    num_detectors = sum(1 for t in inst.targets_copy() if t.is_relative_detector_id())
+                    if num_detectors > 2:  # These need decomposition
+                        shown_count += 1
+                        if shown_count <= 5:  # Show first 5 as examples
+                            print(f"Error {i}: weight={num_detectors}, probability={inst.args_copy()[0]}")
+                            print(f"  Targets: {inst.targets_copy()[:10]}...")  # Show first 10 targets
+            if shown_count > 5:
+                print(f"... and {shown_count - 5} more high-weight errors")
+    else:
+        print("\n=== NO DECOMPOSITION NEEDED ===")
+        print("No high-weight errors (>2 detectors) found. Using undecomposed DEM.")
+        dem = dem_before
     
     print("\ndetectors:", dem.num_detectors)
     matcher = pm.Matching.from_detector_error_model(dem)

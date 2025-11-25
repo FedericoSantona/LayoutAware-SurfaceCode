@@ -342,6 +342,8 @@ def _align_logical_x_to_masked_z(
     logical_x: str | None,
     x_stabilizers: Sequence[str],
     masked_z: Sequence[str],
+    *,
+    verbose: bool = False,
 ) -> str | None:
     """Pick an equivalent logical-X that commutes with masked Z checks.
 
@@ -350,6 +352,7 @@ def _align_logical_x_to_masked_z(
     so that it commutes with the boundary-masked Z set used during rough merge.
     """
     if logical_x is None or not masked_z or not x_stabilizers:
+        print("[logical-align] No logical X or masked Z or X stabilizers provided")
         return logical_x
 
     n = len(logical_x)
@@ -358,6 +361,7 @@ def _align_logical_x_to_masked_z(
     x_rows = [[1 if c in {"X", "Y"} else 0 for c in stab] for stab in x_stabilizers]
 
     if all(_pauli_commutes(logical_x, z) for z in masked_z):
+        print("[logical-align] Logical X already commutes with masked Z, no adjustment needed")
         return logical_x
 
     rhs = [sum(l * z for l, z in zip(l_vec, row)) % 2 for row in z_rows]
@@ -367,17 +371,32 @@ def _align_logical_x_to_masked_z(
 
     coeffs = _solve_gf2(A, rhs)
     if coeffs is None:
+        print("[logical-align] No solution found for logical X alignment")
         return logical_x
 
     delta = [0] * n
-    for coeff, x_row in zip(coeffs, x_rows):
+    used_indices: list[int] = []
+    for idx, (coeff, x_row) in enumerate(zip(coeffs, x_rows)):
         if coeff:
+            used_indices.append(idx)
             delta = [(d ^ xr) for d, xr in zip(delta, x_row)]
 
     aligned_vec = [(l ^ d) for l, d in zip(l_vec, delta)]
     aligned = "".join("X" if v else "I" for v in aligned_vec)
     if not all(_pauli_commutes(aligned, z) for z in masked_z):
+        print("[logical-align] Adjusted logical X does not commute with masked Z")
         return logical_x
+    if verbose:
+        delta_support = sum(1 for l, a in zip(logical_x, aligned) if l != a)
+        print(
+            "[logical-align] adjusted logical X: "
+            f"used {sum(coeffs)} X stabilizers, "
+            f"delta_support={delta_support}, "
+            f"wX_before={logical_x.count('X')}, "
+            f"wX_after={aligned.count('X')}"
+        )
+        if used_indices:
+            print(f"[logical-align] stabilizer indices used (0-based): {[i for i,c in enumerate(coeffs) if c]}")
     return aligned
 
 
@@ -486,7 +505,7 @@ def build_cnot_surgery_circuit(
     rounds_pre: int,
     rounds_merge: int,
     rounds_post: int,
-    verbose_boundary_mask: bool = False,
+    verbose: bool = False,
 ) -> Tuple[stim.Circuit, List[Tuple[int, int]]]:
     """Return a Stim circuit implementing a *lattice-surgery* CNOT scaffold.
 
@@ -674,7 +693,7 @@ def build_cnot_surgery_circuit(
         x_stabilizers=x_single,
         boundary=smooth_boundary_qubits,
         strip_pauli="X",
-        verbose=verbose_boundary_mask,
+        verbose=verbose,
     )
 
     # Mask only the merging patches (C and INT); leave T unmasked.
@@ -726,12 +745,13 @@ def build_cnot_surgery_circuit(
         z_stabilizers=z_single,
         x_stabilizers=x_single,
         boundary=rough_boundary_qubits,
-        verbose=verbose_boundary_mask,
+        verbose=verbose,
     )
     logical_x_aligned = _align_logical_x_to_masked_z(
         single_model.logical_x,
         x_single,
         rough_z_masked,
+        verbose=verbose,
     )
     for s, s_masked in zip(z_single, rough_z_masked):
         rough_merge_z.append(embed_patch(s, offset_C))
@@ -955,7 +975,7 @@ def run_cnot_experiment(
     p_z: float,
     shots: int,
     seed: int | None,
-    verbose_boundary_mask: bool = False,
+    verbose: bool = False,
 ):
     """Top-level driver for the CNOT experiment.
 
@@ -982,7 +1002,7 @@ def run_cnot_experiment(
         rounds_pre=rounds_pre,
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
-        verbose_boundary_mask=verbose_boundary_mask,
+        verbose=verbose,
     )
 
 
@@ -1027,7 +1047,7 @@ def main() -> None:
         p_z=args.pz,
         shots=args.shots,
         seed=args.seed,
-        verbose_boundary_mask=args.verbose,
+        verbose=args.verbose,
     )
 
 

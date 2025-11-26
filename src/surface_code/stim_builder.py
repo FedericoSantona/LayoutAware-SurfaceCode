@@ -180,6 +180,45 @@ class PhenomenologicalStimBuilder:
             circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
 
 
+    # ----- logical observable helpers ---------------------------------------
+
+    def measure_logical_once(
+        self,
+        circuit: stim.Circuit,
+        logical_str: Optional[str],
+    ) -> Optional[int]:
+        """Measure a logical operator once and return its absolute index.
+
+        Appends a TICK and an MPP(logical_str) if logical_str is not None.
+        Returns the absolute measurement index, or None if skipped/empty.
+        """
+        if logical_str is None:
+            return None
+        circuit.append_operation("TICK")
+        return self._mpp_from_string(circuit, logical_str)
+
+    def attach_observable_pair(
+        self,
+        circuit: stim.Circuit,
+        start_idx: Optional[int],
+        end_idx: Optional[int],
+        observable_index: int,
+        observable_pairs: List[Tuple[int, int]],
+    ) -> None:
+        """Wire two measurements into an OBSERVABLE and record the pair."""
+        if start_idx is None or end_idx is None:
+            return
+        circuit.append_operation(
+            "OBSERVABLE_INCLUDE",
+            [
+                self._rec_from_abs(circuit, start_idx),
+                self._rec_from_abs(circuit, end_idx),
+            ],
+            observable_index,
+        )
+        observable_pairs.append((start_idx, end_idx))
+
+
     def _run_css_block(
         self,
         circuit: stim.Circuit,
@@ -269,14 +308,11 @@ class PhenomenologicalStimBuilder:
                 logical_string = self.logical_x
 
         for q in range(n):
-            circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
+            circuit.append_operation("QUBIT_COORDS", [q], [q, 0])  
 
         observable_pairs: list[tuple[int, int]] = []
 
-        start: Optional[int] = None
-        if logical_string is not None:
-            circuit.append_operation("TICK")
-            start = self._mpp_from_string(circuit, logical_string)
+        start: Optional[int] = self.measure_logical_once(circuit, logical_string)
 
         # Run CSS measurement rounds using the helper method
         sz_prev: Optional[list[int]] = None
@@ -293,17 +329,14 @@ class PhenomenologicalStimBuilder:
             sx_prev=sx_prev,
         )
 
-        end: Optional[int] = None
-        if logical_string is not None:
-            circuit.append_operation("TICK")
-            end = self._mpp_from_string(circuit, logical_string)
-            if start is not None and end is not None:
-                circuit.append_operation(
-                    "OBSERVABLE_INCLUDE",
-                    [self._rec_from_abs(circuit, start), self._rec_from_abs(circuit, end)],
-                    0,
-                )
-                observable_pairs.append((start, end))
+        end: Optional[int] = self.measure_logical_once(circuit, logical_string)
+        self.attach_observable_pair(
+            circuit,
+            start_idx=start,
+            end_idx=end,
+            observable_index=0,
+            observable_pairs=observable_pairs,
+        )
 
         return circuit, observable_pairs
 

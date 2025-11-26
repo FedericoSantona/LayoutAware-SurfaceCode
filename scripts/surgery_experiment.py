@@ -148,20 +148,11 @@ def build_cnot_surgery_circuit(
     # Define the observable pairs for the logical Z and X measurements
     observable_pairs: List[Tuple[int, int]] = []
 
-    #Measure logical Z on the control patch
-    start_idx_control: int | None = None
-    if logical_z_control is not None:
-        circuit.append_operation("TICK")
-        start_idx_control = builder._mpp_from_string(circuit, logical_z_control)
+    # Initial logical Z on control
+    start_idx_control = builder.measure_logical_once(circuit, logical_z_control)
 
-
-    #Measure logical X on the target patch
-    start_idx_target: int | None = None
-    if logical_x_target is not None:
-        circuit.append_operation("TICK")
-        start_idx_target = builder._mpp_from_string(circuit, logical_x_target)
-    
-
+    # Initial logical X on target
+    start_idx_target = builder.measure_logical_once(circuit, logical_x_target)
     
     
     # Run the pre-merge phase using the same phenomenological noise model
@@ -182,34 +173,25 @@ def build_cnot_surgery_circuit(
     )
 
     
-    # Final logical Z measurement on the control patch.
-    end_idx_control: int | None = None
-    if logical_z_control is not None:
-        circuit.append_operation("TICK")
-        end_idx_control = builder._mpp_from_string(circuit, logical_z_control)
-        if start_idx_control is not None and end_idx_control is not None:
-            circuit.append_operation(
-                "OBSERVABLE_INCLUDE",
-                [builder._rec_from_abs(circuit, start_idx_control),
-                 builder._rec_from_abs(circuit, end_idx_control)],
-                0,
-            )
-            observable_pairs.append((start_idx_control, end_idx_control))
+    # Final logical Z on control
+    end_idx_control = builder.measure_logical_once(circuit, logical_z_control)
+    builder.attach_observable_pair(
+        circuit,
+        start_idx=start_idx_control,
+        end_idx=end_idx_control,
+        observable_index=0,
+        observable_pairs=observable_pairs,
+    )
 
-    
-    # Final logical X measurement on the target patch.
-    end_idx_target: int | None = None
-    if logical_x_target is not None:
-        circuit.append_operation("TICK")
-        end_idx_target = builder._mpp_from_string(circuit, logical_x_target)
-        if start_idx_target is not None and end_idx_target is not None:
-            circuit.append_operation(
-                "OBSERVABLE_INCLUDE",
-                [builder._rec_from_abs(circuit, start_idx_target),
-                 builder._rec_from_abs(circuit, end_idx_target)],
-                1,
-            )
-            observable_pairs.append((start_idx_target, end_idx_target))
+    # Final logical X on target
+    end_idx_target = builder.measure_logical_once(circuit, logical_x_target)
+    builder.attach_observable_pair(
+        circuit,
+        start_idx=start_idx_target,
+        end_idx=end_idx_target,
+        observable_index=1,
+        observable_pairs=observable_pairs,
+    )
     
     
     return circuit, observable_pairs

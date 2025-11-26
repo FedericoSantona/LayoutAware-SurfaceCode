@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--layout",
         type=str,
         choices=["heavy_hex", "standard"],
-        default="standard",
+        default="heavy_hex",
         help="Surface code layout type: 'heavy_hex' or 'standard' (default: heavy_hex)",
     )
     parser.add_argument(

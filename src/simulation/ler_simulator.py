@@ -45,6 +45,7 @@ def run_circuit_logical_error_rate(
     observable_pairs: Sequence[Tuple[int, int]],
     stim_config: PhenomenologicalStimConfig,
     mc_config: MonteCarloConfig,
+    verbose: bool = False
 ) -> SimulationResult:
 
     

@@ -712,7 +712,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
     parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
     parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")

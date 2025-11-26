@@ -154,6 +154,96 @@ class PhenomenologicalStimBuilder:
                 [self._rec_from_abs(circuit, prev_idx), self._rec_from_abs(circuit, curr_idx)],
             )
 
+        # ----- internal CSS engine --------------------------------------------
+
+    def _measure_family_flags(
+        self,
+        config: "PhenomenologicalStimConfig",
+        phase_measure_z: bool | None,
+        phase_measure_x: bool | None,
+    ) -> tuple[bool, bool]:
+        fam = (config.family or "").upper()
+        if fam not in {"", "Z", "X"}:
+            raise ValueError("config.family must be one of None, 'Z', or 'X'")
+        measure_Z = phase_measure_z if phase_measure_z is not None else (fam in {"", "Z"})
+        measure_X = phase_measure_x if phase_measure_x is not None else (fam in {"", "X"})
+        return measure_Z, measure_X
+
+    def _apply_x_noise(self, circuit: stim.Circuit, config: "PhenomenologicalStimConfig") -> None:
+        if config.p_x_error:
+            n = self.code.n
+            circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
+
+    def _apply_z_noise(self, circuit: stim.Circuit, config: "PhenomenologicalStimConfig") -> None:
+        if config.p_z_error:
+            n = self.code.n
+            circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
+
+
+    def _run_css_block(
+        self,
+        circuit: stim.Circuit,
+        *,
+        z_stabilizers: Sequence[str],
+        x_stabilizers: Sequence[str],
+        rounds: int,
+        config: "PhenomenologicalStimConfig",
+        phase_measure_z: bool | None,
+        phase_measure_x: bool | None,
+        sz_prev: list[int] | None,
+        sx_prev: list[int] | None,
+    ) -> tuple[list[int] | None, list[int] | None]:
+    
+        """Core engine: run Z/X halves with noise and time-like detectors."""
+        z_stabs = list(z_stabilizers)
+        x_stabs = list(x_stabilizers)
+
+        measure_Z, measure_X = self._measure_family_flags(
+            config, phase_measure_z, phase_measure_x
+        )
+
+        # Warmup round if needed
+        if measure_Z and z_stabs and sz_prev is None:
+            circuit.append_operation("TICK")
+            sz_prev = self._measure_list(
+                circuit, z_stabs, family="Z", round_index=-1
+            )
+        if measure_X and x_stabs and sx_prev is None:
+            circuit.append_operation("TICK")
+            sx_prev = self._measure_list(
+                circuit, x_stabs, family="X", round_index=-1
+            )
+
+        # Main rounds
+        for round_idx in range(rounds):
+            if measure_Z and z_stabs:
+                circuit.append_operation("TICK")
+                self._apply_x_noise(circuit, config)
+                sz_curr = self._measure_list(
+                    circuit, z_stabs, family="Z", round_index=round_idx
+                )
+                if sz_prev is not None:
+                    self._add_detectors(circuit, sz_prev, sz_curr)
+                sz_prev = sz_curr
+
+            if measure_X and x_stabs:
+                circuit.append_operation("TICK")
+                self._apply_z_noise(circuit, config)
+                sx_curr = self._measure_list(
+                    circuit, x_stabs, family="X", round_index=round_idx
+                )
+                if sx_prev is not None:
+                    self._add_detectors(circuit, sx_prev, sx_curr)
+                sx_prev = sx_curr
+
+        # If this phase doesn't measure a family at all, kill its history
+        if not measure_Z:
+            sz_prev = None
+        if not measure_X:
+            sx_prev = None
+
+        return sz_prev, sx_prev
+
 
     # ----- public API --------------------------------------------------
 
@@ -161,12 +251,10 @@ class PhenomenologicalStimBuilder:
         n = self.code.n
         circuit = stim.Circuit()
 
-        # Which CSS family to measure in this circuit
+        # Validate CSS family configuration
         fam = (config.family or "").upper()
         if fam not in {"", "Z", "X"}:
             raise ValueError("config.family must be one of None, 'Z', or 'X'")
-        measure_Z = (fam in {"", "Z"})
-        measure_X = (fam in {"", "X"})
 
         logical_string = None
         if config.init_label is not None:
@@ -183,14 +271,6 @@ class PhenomenologicalStimBuilder:
         for q in range(n):
             circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
-        def apply_x_noise() -> None:
-            if config.p_x_error:    
-                circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
-
-        def apply_z_noise() -> None:
-            if config.p_z_error:
-                circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
-
         observable_pairs: list[tuple[int, int]] = []
 
         start: Optional[int] = None
@@ -198,58 +278,20 @@ class PhenomenologicalStimBuilder:
             circuit.append_operation("TICK")
             start = self._mpp_from_string(circuit, logical_string)
 
-        # Establish reference measurements before noisy cycles, per-family.
+        # Run CSS measurement rounds using the helper method
         sz_prev: Optional[list[int]] = None
         sx_prev: Optional[list[int]] = None
-        if measure_Z:
-            circuit.append_operation("TICK")
-            sz_prev = self._measure_list(
-                circuit,
-                self.z_stabilizers,
-                family="Z",
-                round_index=-1,
-            )
-        if measure_X:
-            circuit.append_operation("TICK")
-            sx_prev = self._measure_list(
-                circuit,
-                self.x_stabilizers,
-                family="X",
-                round_index=-1,
-            )
-
-        for round_index in range(config.rounds):
-            # Z half
-            if measure_Z:
-                circuit.append_operation("TICK")
-              
-                apply_x_noise()
-                sz_curr = self._measure_list(
-                    circuit,
-                    self.z_stabilizers,
-                    family="Z",
-                    round_index=round_index,
-                )
-                if sz_prev is not None:
-                    self._add_detectors(circuit, sz_prev, sz_curr)
-
-                sz_prev = sz_curr
-
-            # X half
-            if measure_X:
-                circuit.append_operation("TICK")
-
-                apply_z_noise()
-                sx_curr = self._measure_list(
-                    circuit,
-                    self.x_stabilizers,
-                    family="X",
-                    round_index=round_index,
-                )
-                if sx_prev is not None:
-                    self._add_detectors(circuit, sx_prev, sx_curr)
-        
-                sx_prev = sx_curr
+        sz_prev, sx_prev = self._run_css_block(
+            circuit,
+            z_stabilizers=self.z_stabilizers,
+            x_stabilizers=self.x_stabilizers,
+            rounds=config.rounds,
+            config=config,
+            phase_measure_z=None,
+            phase_measure_x=None,
+            sz_prev=sz_prev,
+            sx_prev=sx_prev,
+        )
 
         end: Optional[int] = None
         if logical_string is not None:
@@ -279,24 +321,9 @@ class PhenomenologicalStimBuilder:
         have its own Z/X stabilizer sets and round counts, while sharing
         time-like detectors across phases when the stabilizer sets match.
         """
-        n = self.code.n
-
         fam = (config.family or "").upper()
         if fam not in {"", "Z", "X"}:
             raise ValueError("config.family must be one of None, 'Z', or 'X'")
-
-        def _phase_measure_flags(phase: PhaseSpec) -> tuple[bool, bool]:
-            measure_Z = phase.measure_z if phase.measure_z is not None else (fam in {"", "Z"})
-            measure_X = phase.measure_x if phase.measure_x is not None else (fam in {"", "X"})
-            return measure_Z, measure_X
-
-        def apply_x_noise() -> None:
-            if config.p_x_error:
-                circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
-
-        def apply_z_noise() -> None:
-            if config.p_z_error:
-                circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
 
         sz_prev: list[int] | None = None
         sx_prev: list[int] | None = None
@@ -306,7 +333,6 @@ class PhenomenologicalStimBuilder:
         for phase in phases:
             z_stabs = list(phase.z_stabilizers)
             x_stabs = list(phase.x_stabilizers)
-            measure_Z, measure_X = _phase_measure_flags(phase)
 
             # Reset time-like detectors when stabilizer sets change.
             if prev_z_set is not None and z_stabs != list(prev_z_set):
@@ -314,48 +340,18 @@ class PhenomenologicalStimBuilder:
             if prev_x_set is not None and x_stabs != list(prev_x_set):
                 sx_prev = None
 
-            # Warmup round for this phase (if needed)
-            if measure_Z and z_stabs and sz_prev is None:
-                circuit.append_operation("TICK")
-                sz_prev = self._measure_list(
-                    circuit, z_stabs, family="Z", round_index=-1
-                )
-
-            if measure_X and x_stabs and sx_prev is None:
-                circuit.append_operation("TICK")
-                sx_prev = self._measure_list(
-                    circuit, x_stabs, family="X", round_index=-1
-                )
-
-            # Repeat this phase's stabilizers
-            for round_idx in range(phase.rounds):
-                # Z half
-                if measure_Z and z_stabs:
-                    circuit.append_operation("TICK")
-                    apply_x_noise()
-                    sz_curr = self._measure_list(
-                        circuit, z_stabs, family="Z", round_index=round_idx
-                    )
-                    if sz_prev is not None:
-                        self._add_detectors(circuit, sz_prev, sz_curr)
-                    sz_prev = sz_curr
-
-                # X half
-                if measure_X and x_stabs:
-                    circuit.append_operation("TICK")
-                    apply_z_noise()
-                    sx_curr = self._measure_list(
-                        circuit, x_stabs, family="X", round_index=round_idx
-                    )
-                    if sx_prev is not None:
-                        self._add_detectors(circuit, sx_prev, sx_curr)
-                    sx_prev = sx_curr
-
-            # Kill history if this phase doesn't measure that family at all
-            if not measure_Z:
-                sz_prev = None
-            if not measure_X:
-                sx_prev = None
+            # Run CSS measurement rounds using the helper method
+            sz_prev, sx_prev = self._run_css_block(
+                circuit,
+                z_stabilizers=z_stabs,
+                x_stabilizers=x_stabs,
+                rounds=phase.rounds,
+                config=config,
+                phase_measure_z=phase.measure_z,
+                phase_measure_x=phase.measure_x,
+                sz_prev=sz_prev,
+                sx_prev=sx_prev,
+            )
 
             prev_z_set = z_stabs
             prev_x_set = x_stabs

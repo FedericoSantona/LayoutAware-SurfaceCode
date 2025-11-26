@@ -92,7 +92,7 @@ def find_boundary_data_qubits(
     # --- 1) Get coordinates for each data qubit ---
     coords = _get_qubit_coordinates(model)
     if coords is None:
-        # Fallback: if coordinates cannot be extracted, return empty list
+        # Fallback: if coordinates cannot be extracted, raise an error
         raise ValueError("Qubit coordinates cannot be extracted from the code object")
     
     # Filter to only qubits with valid coordinates
@@ -100,6 +100,7 @@ def find_boundary_data_qubits(
     valid_indices = np.where(valid_mask)[0]
     
     if len(valid_indices) == 0:
+        # Fallback: if no qubits with valid coordinates found, raise an error
         raise ValueError("No qubits with valid coordinates found")
     
     xs = coords[valid_mask, 0]
@@ -167,7 +168,7 @@ def find_boundary_data_qubits(
     
     # Pick only the single best-matching side (one boundary = one side)
     if len(sorted_sides) < 1:
-        # Fallback: if we can't find any sides, return empty list
+        # Fallback: if we can't find any sides, raise an error
         raise ValueError("Cannot find any sides for boundary detection")
     
     chosen_side_name = sorted_sides[0][0]

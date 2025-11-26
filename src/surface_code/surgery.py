@@ -1,0 +1,322 @@
+# src/surface_code/surgery.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Sequence, Tuple
+
+from .layout import Layout, BoundaryType
+from .stim_builder import PhaseSpec  # or: from . import PhaseSpec, depending on your exports
+from .stabilizers import _commuting_boundary_mask
+from .logicals import _align_logical_x_to_masked_z
+
+
+@dataclass
+class CNOTSpec:
+    """Container for a lattice-surgery CNOT construction.
+
+    phases:
+        Ordered list of spacetime phases (pre-merge, merges/splits, post-merge).
+    logical_z_control:
+        Embedded logical-Z Pauli string for the control patch (global indices).
+    logical_x_target:
+        Embedded logical-X Pauli string for the target patch (global indices).
+    """
+
+    phases: List[PhaseSpec]
+    logical_z_control: str | None
+    logical_x_target: str | None
+
+
+class LatticeSurgery:
+    """High-level helper for lattice-surgery constructions on a Layout.
+
+    This class wraps the geometric information from `Layout` and the
+    single-patch model to produce stabilizer sets for:
+      * disjoint multi-patch memory phases,
+      * smooth merges along smooth boundaries, and
+      * rough merges along rough boundaries.
+
+    It does *not* know about Stim circuits directly; instead it returns
+    Pauli-string stabilizer sets (on the combined code) and logical
+    observables. You then feed these into `PhenomenologicalStimBuilder`
+    via PhaseSpec + run_phases.
+    """
+
+    def __init__(self, layout: Layout):
+        self.layout = layout
+        self.single_model = layout.single_model
+        self.n_single = self.single_model.code.n
+        self.n_total = layout.n_total
+
+        # Single-patch stabilizer data
+        self.z_single = list(self.single_model.z_stabilizers)
+        self.x_single = list(self.single_model.x_stabilizers)
+
+    # ------------------------------------------------------------------
+    # Basic helpers
+    # ------------------------------------------------------------------
+
+    def embed_patch(self, pauli_str: str, patch_name: str) -> str:
+        """Embed a single-patch Pauli into the global index space at patch_name."""
+        assert len(pauli_str) == self.n_single
+        offset = self.layout.patch_offsets[patch_name]
+        left = "I" * offset
+        mid = pauli_str
+        right = "I" * (self.n_total - offset - self.n_single)
+        return left + mid + right
+
+    def base_stabilizers(self, patches: Sequence[str] | None = None) -> Tuple[List[str], List[str]]:
+        """Disjoint-memory stabilizers: same single-patch model copied to each patch."""
+        patch_list = list(patches) if patches is not None else list(self.layout.patch_order)
+        base_z: List[str] = []
+        base_x: List[str] = []
+
+        for s in self.z_single:
+            for name in patch_list:
+                base_z.append(self.embed_patch(s, name))
+
+        for s in self.x_single:
+            for name in patch_list:
+                base_x.append(self.embed_patch(s, name))
+
+        return base_z, base_x
+
+    # ------------------------------------------------------------------
+    # Internal masking helper shared by smooth/rough merges
+    # ------------------------------------------------------------------
+
+    def _masked_embedded_for_boundary(
+        self,
+        *,
+        boundary_type: BoundaryType,          # "smooth" or "rough"
+        merge_patches: Sequence[str],         # patches whose boundary is being merged
+        all_patches: Sequence[str],           # all logical patches present
+        verbose: bool = False,
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Mask single-patch stabilizers at a given boundary and embed globally.
+
+        Returns:
+            (z_out, x_out, masked_z_local)
+
+            z_out / x_out:
+                Z/X stabilizers on the *combined* code where patches in
+                `merge_patches` use the boundary-masked single-patch model,
+                and all other patches use the unmasked model.
+            masked_z_local:
+                The *single-patch* Z stabilizers after masking (used by
+                rough-merge logical-X alignment).
+        """
+        local_boundary = self.layout.local_boundary_qubits[boundary_type]
+        strip_pauli = "X" if boundary_type == "smooth" else "Z"
+
+        masked_z_local, masked_x_local = _commuting_boundary_mask(
+            z_stabilizers=self.z_single,
+            x_stabilizers=self.x_single,
+            boundary=local_boundary,
+            strip_pauli=strip_pauli,
+            verbose=verbose,
+        )
+
+        merge_set = set(merge_patches)
+        z_out: List[str] = []
+        x_out: List[str] = []
+
+        # Z stabilizers
+        for s, s_masked in zip(self.z_single, masked_z_local):
+            for name in all_patches:
+                if name in merge_set:
+                    z_out.append(self.embed_patch(s_masked, name))
+                else:
+                    z_out.append(self.embed_patch(s, name))
+
+        # X stabilizers
+        for s, s_masked in zip(self.x_single, masked_x_local):
+            for name in all_patches:
+                if name in merge_set:
+                    x_out.append(self.embed_patch(s_masked, name))
+                else:
+                    x_out.append(self.embed_patch(s, name))
+
+        return z_out, x_out, masked_z_local
+
+    # ------------------------------------------------------------------
+    # Smooth and rough merge stabilizers
+    # ------------------------------------------------------------------
+
+    def smooth_merge_stabilizers(
+        self,
+        left: str,
+        right: str,
+        *,
+        all_patches: Sequence[str],
+        verbose: bool = False,
+    ) -> Tuple[List[str], List[str]]:
+        """Return stabilizers for a smooth merge between `left` and `right`.
+
+        - Patches in `all_patches` are all logically present (e.g. ["C", "INT", "T"]).
+        - `left` and `right` are the two patches being smoothly merged.
+        """
+        merge_patches = [left, right]
+        z_merge, x_merge, _ = self._masked_embedded_for_boundary(
+            boundary_type="smooth",
+            merge_patches=merge_patches,
+            all_patches=all_patches,
+            verbose=verbose,
+        )
+
+        # Add joint Z checks tying left, seam, and right along the smooth boundary.
+        boundary_left = self.layout.boundary_qubits[left]["smooth"]
+        boundary_right = self.layout.boundary_qubits[right]["smooth"]
+        seam = self.layout.get_seam_qubits(left, right)
+
+        for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
+            chars = ["I"] * self.n_total
+            chars[q_l] = "Z"
+            chars[q_sea] = "Z"
+            chars[q_r] = "Z"
+            z_merge.append("".join(chars))
+
+        return z_merge, x_merge
+
+    def rough_merge_stabilizers(
+        self,
+        left: str,
+        right: str,
+        *,
+        all_patches: Sequence[str],
+        verbose: bool = False,
+    ) -> Tuple[List[str], List[str], str | None]:
+        """Return stabilizers for a rough merge between `left` and `right`.
+
+        Returns:
+            (z_stabs, x_stabs, logical_x_aligned_single_patch)
+
+            logical_x_aligned_single_patch is a *single-patch* Pauli string,
+            adjusted to commute with the masked Z checks used during rough
+            merge. You typically embed this at the *target* patch to define
+            the logical-X observable.
+        """
+        merge_patches = [left, right]
+        z_merge, x_merge, masked_z_local = self._masked_embedded_for_boundary(
+            boundary_type="rough",
+            merge_patches=merge_patches,
+            all_patches=all_patches,
+            verbose=verbose,
+        )
+
+        # Adjust logical X to commute with masked Z checks (single-patch space).
+        logical_x_aligned: str | None = _align_logical_x_to_masked_z(
+            self.single_model.logical_x,
+            self.x_single,
+            masked_z_local,
+            verbose=verbose,
+        )
+
+        # Add joint X checks tying left, seam, and right along the rough boundary.
+        boundary_left = self.layout.boundary_qubits[left]["rough"]
+        boundary_right = self.layout.boundary_qubits[right]["rough"]
+        seam = self.layout.get_seam_qubits(left, right)
+
+        for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
+            chars = ["I"] * self.n_total
+            chars[q_l] = "X"
+            chars[q_sea] = "X"
+            chars[q_r] = "X"
+            x_merge.append("".join(chars))
+
+        return z_merge, x_merge, logical_x_aligned
+
+    # ------------------------------------------------------------------
+    # High-level: CNOT via lattice surgery
+    # ------------------------------------------------------------------
+
+    def cnot(
+        self,
+        control: str,
+        ancilla: str,
+        target: str,
+        *,
+        rounds_pre: int,
+        rounds_merge: int,
+        rounds_post: int,
+        verbose: bool = False,
+    ) -> CNOTSpec:
+        """Construct a CNOT via smooth(control–ancilla) + rough(ancilla–target).
+
+        Returns:
+            CNOTSpec with:
+              * phases: a PhaseSpec list suitable for builder.run_phases(...)
+              * logical_z_control: embedded logical-Z on `control`
+              * logical_x_target: embedded aligned logical-X on `target`
+        """
+        # Which logical patches exist in this 3-patch CNOT layout
+        patches = [control, ancilla, target]
+
+        # Disjoint 3-patch memory stabilizers
+        base_z, base_x = self.base_stabilizers(patches)
+
+        # C+INT smooth merge
+        smooth_merge_z, smooth_merge_x = self.smooth_merge_stabilizers(
+            control,
+            ancilla,
+            all_patches=patches,
+            verbose=verbose,
+        )
+
+        # INT+T rough merge
+        rough_merge_z, rough_merge_x, logical_x_aligned = self.rough_merge_stabilizers(
+            ancilla,
+            target,
+            all_patches=patches,
+            verbose=verbose,
+        )
+
+        # Build phase list (same structure as your current surgery_experiment)
+        phases: List[PhaseSpec] = [
+            PhaseSpec("pre-merge", base_z, base_x, rounds_pre),
+            PhaseSpec(
+                f"{control}+{ancilla} smooth merge",
+                smooth_merge_z,
+                smooth_merge_x,
+                rounds_merge,
+                measure_z=True,
+                measure_x=True,
+            ),
+            PhaseSpec(
+                f"{control}|{ancilla} smooth split",
+                base_z,
+                base_x,
+                rounds_merge,
+            ),
+            PhaseSpec(
+                f"{ancilla}+{target} rough merge",
+                rough_merge_z,
+                rough_merge_x,
+                rounds_merge,
+                measure_z=True,
+                measure_x=True,
+            ),
+            PhaseSpec(
+                f"{ancilla}|{target} rough split",
+                base_z,
+                base_x,
+                rounds_merge,
+            ),
+            PhaseSpec("post-merge", base_z, base_x, rounds_post),
+        ]
+
+        # Embedded logical observables
+        logical_z_control: str | None = None
+        if self.single_model.logical_z is not None:
+            logical_z_control = self.embed_patch(self.single_model.logical_z, control)
+
+        logical_x_target: str | None = None
+        if logical_x_aligned is not None:
+            logical_x_target = self.embed_patch(logical_x_aligned, target)
+
+        return CNOTSpec(
+            phases=phases,
+            logical_z_control=logical_z_control,
+            logical_x_target=logical_x_target,
+        )

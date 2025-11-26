@@ -49,8 +49,7 @@ from surface_code import (
     Layout,
     SeamSpec,
     PhaseSpec,
-    _align_logical_x_to_masked_z,
-    _commuting_boundary_mask,
+    LatticeSurgery,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate
 
@@ -105,160 +104,24 @@ def build_cnot_surgery_circuit(
     if verbose:
         layout.print_layout()
 
-    # Single-patch model (same object the layout used internally)
-    single_model = layout.single_model
-    n_single = single_model.code.n
     n_total = layout.n_total
+    single_model = layout.single_model
 
-    smooth_boundary_qubits = layout.local_boundary_qubits["smooth"]
-    rough_boundary_qubits = layout.local_boundary_qubits["rough"]
-
-    # Offsets for the three logical patches in the combined code.
-    offset_C = layout.patch_offsets["C"]
-    offset_INT = layout.patch_offsets["INT"]
-    offset_T = layout.patch_offsets["T"]
-
-    # Seam ancilla qubits between patches
-    seam_C_INT = layout.get_seam_qubits("C", "INT")
-    seam_INT_T = layout.get_seam_qubits("INT", "T")
-    # Helper to embed a single-patch Pauli string into the combined three-patch
-    # index space at a given offset.
-    def embed_patch(pauli_str: str, offset: int) -> str:
-        assert len(pauli_str) == n_single
-        left = "I" * offset
-        mid = pauli_str
-        right = "I" * (n_total - offset - n_single)
-        return left + mid + right
-
-
-    # Build stabilizers for the disjoint three-patch configuration.
-    z_single = list(single_model.z_stabilizers)
-    x_single = list(single_model.x_stabilizers)
-
-    # Base Z/X sets used in all phases except the merge windows (kept unmasked).
-    base_z: List[str] = []
-    base_x: List[str] = []
-
-    for s in z_single:
-        base_z.append(embed_patch(s, offset_C))
-        base_z.append(embed_patch(s, offset_INT))
-        base_z.append(embed_patch(s, offset_T))
-
-    for s in x_single:
-        base_x.append(embed_patch(s, offset_C))
-        base_x.append(embed_patch(s, offset_INT))
-        base_x.append(embed_patch(s, offset_T))
-
-    # --- Smooth-merge phase stabilizers ---------------------------------
-    #
-    # In the C+INT smooth-merge window we:
-    #   * keep all patch stabilizers for C, INT, and T;
-    #   * drop the single-qubit X checks on the seam ancillas; and
-    #   * add joint Z stabilizers that couple a smooth-boundary qubit of C,
-    #     the corresponding seam ancilla, and the corresponding qubit of INT.
-    #
-    # This realises a smooth merge between C and INT: ancillas are prepared
-    # in |+> (via the pre-merge X checks), then governed by Z-type joint
-    # checks that effectively measure Z_L^C Z_L^INT over the merge window.
-    smooth_merge_z: List[str] = []
-    smooth_merge_x: List[str] = []
-
-    smooth_z_masked, smooth_x_masked = _commuting_boundary_mask(
-        z_stabilizers=z_single,
-        x_stabilizers=x_single,
-        boundary=smooth_boundary_qubits,
-        strip_pauli="X",
+    surgery = LatticeSurgery(layout)
+    cnot_spec = surgery.cnot(
+        control="C",
+        ancilla="INT",
+        target="T",
+        rounds_pre=rounds_pre,
+        rounds_merge=rounds_merge,
+        rounds_post=rounds_post,
         verbose=verbose,
     )
 
-    # Mask only the merging patches (C and INT); leave T unmasked.
-    for s, s_masked in zip(z_single, smooth_z_masked):
-        smooth_merge_z.append(embed_patch(s_masked, offset_C))
-        smooth_merge_z.append(embed_patch(s_masked, offset_INT))
-        smooth_merge_z.append(embed_patch(s, offset_T))
+    phases = cnot_spec.phases
+    logical_z_control = cnot_spec.logical_z_control
+    logical_x_target  = cnot_spec.logical_x_target
 
-    for s, s_masked in zip(x_single, smooth_x_masked):
-        smooth_merge_x.append(embed_patch(s_masked, offset_C))
-        smooth_merge_x.append(embed_patch(s_masked, offset_INT))
-        smooth_merge_x.append(embed_patch(s, offset_T))
-
-    #Use layout global indeces to add smooth merge stabilizers
-    smooth_C   = layout.boundary_qubits["C"]["smooth"]
-    smooth_INT = layout.boundary_qubits["INT"]["smooth"]
-    seam_C_INT = layout.get_seam_qubits("C", "INT")
-
-    for q_c, q_int, q_sea in zip(smooth_C, smooth_INT, seam_C_INT):
-        chars = ["I"] * n_total
-        chars[q_c]   = "Z"
-        chars[q_sea] = "Z"
-        chars[q_int] = "Z"
-        smooth_merge_z.append("".join(chars))
-        
-
-    # --- Rough-merge phase stabilizers for INT+T ---------------------------
-    #
-    # In the INT+T rough-merge window we:
-    #   * keep all (possibly stripped) Z stabilizers for C, INT, and T;
-    #   * keep the X stabilizers for all patches; and
-    #   * add joint X stabilizers that couple a rough-boundary qubit of INT,
-    #     the corresponding seam ancilla, and the corresponding qubit of T.
-    #
-    # This realises a rough merge between INT and T: joint X checks effectively
-    # measure X_L^INT X_L^T along the rough boundary where X stabilizers
-    # terminate.
-    # Rough-merge stabilizers: strip Z support on INT/T rough boundaries and
-    # mask INT/T X stabilizers on that boundary (rather than dropping them),
-    # then add joint INT–seam–T X checks. This keeps the rough-merge CSS set
-    # commuting while preserving syndrome data near the merge.
-    rough_merge_z: List[str] = []
-    rough_merge_x: List[str] = []
-
-    rough_z_masked, rough_x_masked = _commuting_boundary_mask(
-        z_stabilizers=z_single,
-        x_stabilizers=x_single,
-        boundary=rough_boundary_qubits,
-        verbose=verbose,
-    )
-    logical_x_aligned = _align_logical_x_to_masked_z(
-        single_model.logical_x,
-        x_single,
-        rough_z_masked,
-        verbose=verbose,
-    )
-    for s, s_masked in zip(z_single, rough_z_masked):
-        rough_merge_z.append(embed_patch(s, offset_C))
-        rough_merge_z.append(embed_patch(s_masked, offset_INT))
-        rough_merge_z.append(embed_patch(s_masked, offset_T))
-
-
-    for s, s_masked in zip(x_single, rough_x_masked):
-        rough_merge_x.append(embed_patch(s, offset_C))
-        rough_merge_x.append(embed_patch(s_masked, offset_INT))
-        rough_merge_x.append(embed_patch(s_masked, offset_T))
-    
-
-    rough_INT = layout.boundary_qubits["INT"]["rough"]
-    rough_T   = layout.boundary_qubits["T"]["rough"]
-    seam_INT_T = layout.get_seam_qubits("INT", "T")
-
-    for q_int, q_t, q_sea2 in zip(rough_INT, rough_T, seam_INT_T):
-        chars = ["I"] * n_total
-        chars[q_int]  = "X"
-        chars[q_sea2] = "X"
-        chars[q_t]    = "X"
-        rough_merge_x.append("".join(chars))
-
-    # We explicitly separate the spacetime into
-    # phases: pre-merge memory, a smooth-merge window, a smooth-split window,
-    # an INT+T rough-merge window, and a post-merge memory phase.
-    phases = [
-        PhaseSpec("pre-merge", base_z, base_x, rounds_pre),
-        PhaseSpec("C+INT smooth merge", smooth_merge_z, smooth_merge_x, rounds_merge, measure_z=True, measure_x=True),
-        PhaseSpec("C|INT smooth split", base_z, base_x, rounds_merge),
-        PhaseSpec("INT+T rough merge", rough_merge_z, rough_merge_x, rounds_merge, measure_z=True, measure_x=True),
-        PhaseSpec("INT+T rough split", base_z, base_x, rounds_merge),
-        PhaseSpec("post-merge", base_z, base_x, rounds_post),
-    ]
 
     circuit = stim.Circuit()
 
@@ -280,25 +143,6 @@ def build_cnot_surgery_circuit(
     # Attach simple 1D coordinates for all qubits in the combined layout.
     for q in range(code.n):
         circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
-
-    
-    # Build a logical Z observable for the control patch by embedding the
-    # single-patch logical_Z operator at the control offset. We measure it
-    # once at the beginning and once at the end, and include their parity
-    # as OBSERVABLE 0 (mirroring the memory experiment).
-    logical_z_control: str | None = None
-    if single_model.logical_z is not None:
-        logical_z_control = embed_patch(single_model.logical_z, offset_C)
-
-    # Build a logical X observable for the target patch by embedding the
-    # single-patch logical_X operator at the target offset. We measure it
-    # once at the beginning and once at the end, and include their parity
-    # as OBSERVABLE 1.
-
-    logical_x_target: str | None = None
-    if logical_x_aligned is not None:
-        logical_x_target = embed_patch(logical_x_aligned, offset_T)
-    
 
 
     # Define the observable pairs for the logical Z and X measurements

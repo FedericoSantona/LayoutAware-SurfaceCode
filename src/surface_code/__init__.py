@@ -3,14 +3,12 @@
 from .model import SurfaceCodeModel
 from .layout import Layout, SeamSpec
 from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig, PhaseSpec
+from .surgery import LatticeSurgery
 from .geometry_utils import (
     find_boundary_data_qubits,
     find_rough_boundary_data_qubits,
     find_smooth_boundary_data_qubits,
 )
-from .linalg import _pauli_commutes, _solve_gf2
-from .logicals import _align_logical_x_to_masked_z
-from .stabilizers import _commuting_boundary_mask
 try:
     from .heavy_hex import HeavyHexModel, build_heavy_hex_model
 except ImportError as _heavy_hex_import_error:  # pragma: no cover - optional dependency
@@ -78,4 +76,5 @@ __all__ = [
     "_solve_gf2",
     "_align_logical_x_to_masked_z",
     "_commuting_boundary_mask",
+    "LatticeSurgery",
 ]

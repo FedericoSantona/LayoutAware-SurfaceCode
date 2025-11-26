@@ -3,6 +3,16 @@ from __future__ import annotations
 
 import numpy as np
 
+def _pauli_commutes(a: str, b: str) -> bool:
+    """Return True iff two Pauli strings commute (ignoring identities)."""
+    anti = 0
+    for pa, pb in zip(a, b):
+        if pa == "I" or pb == "I":
+            continue
+        if pa != pb:
+            anti ^= 1
+    return anti == 0
+
 
 def rank_gf2(matrix: np.ndarray) -> int:
     """Return the rank of ``matrix`` over GF(2)."""
@@ -88,19 +98,6 @@ def row_in_span_gf2(matrix: np.ndarray, row: np.ndarray) -> bool:
     current_rank = rank_gf2(matrix)
     stacked_rank = rank_gf2(np.vstack([matrix, row & 1]))
     return stacked_rank == current_rank
-
-
-def _pauli_commutes(a: str, b: str) -> bool:
-    """Return True iff two Pauli strings commute (ignoring identities)."""
-    anti = 0
-    for pa, pb in zip(a, b):
-        if pa == "I" or pb == "I":
-            continue
-        if pa != pb:
-            anti ^= 1
-    return anti == 0
-
-
 
 def _solve_gf2(A: list[list[int]], b: list[int]) -> list[int] | None:
     """Solve A x = b over GF(2); return one solution or None if inconsistent."""

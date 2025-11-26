@@ -1,4 +1,3 @@
-"""Helpers for extracting CSS stabilizers from gauge generator data."""
 from __future__ import annotations
 
 import numpy as np
@@ -6,6 +5,7 @@ import numpy as np
 from .linalg import nullspace_gf2, rank_gf2, _solve_add_only, _pauli_commutes
 from typing import Sequence
 
+"""Helpers for extracting CSS stabilizers from gauge generator data."""
 
 def rank_increases(matrix: np.ndarray, row: np.ndarray) -> bool:
     """Return ``True`` iff appending ``row`` increases GF(2) rank of ``matrix``."""
@@ -73,6 +73,8 @@ def extract_css_stabilizers(stabilizer_mat: np.ndarray) -> tuple[list[str], list
     x_stabs = [x_string(x) for x in x_rows if np.any(x)]
     return z_stabs, x_stabs
 
+
+"Helper functions for stripping stabilizers at boundaries, so as to satisfy STIM circuit requirements."
 
 
 def _strip_x_on_qubits(pauli_str: str, qubits: Sequence[int]) -> str:

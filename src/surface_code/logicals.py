@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from typing import Sequence
 from .linalg import nullspace_gf2, row_in_span_gf2, symplectic_to_pauli
+from .linalg import _pauli_commutes, _solve_gf2
 
 
 def find_logicals_general(code, stabilizer_mat: np.ndarray, distance: int, strict_weight_check: bool = True):
@@ -167,4 +169,67 @@ def check_logicals(ZL_vec: np.ndarray, XL_vec: np.ndarray, stabilizer_mat: np.nd
         "weight_Z": int(ZL_vec[:n].sum() + ZL_vec[n:].sum()),
         "weight_X": int(XL_vec[:n].sum() + XL_vec[n:].sum()),
     }
-    return diagnostics
+    
+
+def _align_logical_x_to_masked_z(  
+    logical_x: str | None,
+    x_stabilizers: Sequence[str],
+    masked_z: Sequence[str],
+    *,
+    verbose: bool = False,
+) -> str | None:
+    """Pick an equivalent logical-X that commutes with masked Z checks.
+
+    Rather than stripping Z stabilizers (which weakens error detection),
+    adjust the representative of the logical X by multiplying X stabilizers
+    so that it commutes with the boundary-masked Z set used during rough merge.
+    """
+    if logical_x is None or not masked_z or not x_stabilizers:
+        print("[logical-align] No logical X or masked Z or X stabilizers provided")
+        return logical_x
+    
+    n = len(logical_x)
+    l_vec = [1 if c in {"X", "Y"} else 0 for c in logical_x]
+    z_rows = [[1 if c == "Z" else 0 for c in stab] for stab in masked_z]
+    x_rows = [[1 if c in {"X", "Y"} else 0 for c in stab] for stab in x_stabilizers]
+
+    if all(_pauli_commutes(logical_x, z) for z in masked_z):
+        print("[logical-align] Logical X already commutes with masked Z, no adjustment needed")
+        return logical_x
+    print("Logical X needs adjustment")
+    
+    rhs = [sum(l * z for l, z in zip(l_vec, row)) % 2 for row in z_rows]
+    A: list[list[int]] = []
+    for row in z_rows:
+        A.append([sum(x_row[i] & row[i] for i in range(n)) % 2 for x_row in x_rows])
+
+    coeffs = _solve_gf2(A, rhs)
+    if coeffs is None:
+        print("[logical-align] No solution found for logical X alignment")
+        return logical_x
+
+    delta = [0] * n
+    used_indices: list[int] = []
+    for idx, (coeff, x_row) in enumerate(zip(coeffs, x_rows)):
+        if coeff:
+            used_indices.append(idx)
+            delta = [(d ^ xr) for d, xr in zip(delta, x_row)]
+
+    aligned_vec = [(l ^ d) for l, d in zip(l_vec, delta)]
+    aligned = "".join("X" if v else "I" for v in aligned_vec)
+    if not all(_pauli_commutes(aligned, z) for z in masked_z):
+        print("[logical-align] Adjusted logical X does not commute with masked Z")
+        return logical_x
+    
+    if verbose:
+        delta_support = sum(1 for l, a in zip(logical_x, aligned) if l != a)
+        print(
+            "[logical-align] adjusted logical X: "
+            f"used {sum(coeffs)} X stabilizers, "
+            f"delta_support={delta_support}, "
+            f"wX_before={logical_x.count('X')}, "
+            f"wX_after={aligned.count('X')}"
+        )
+        if used_indices:
+            print(f"[logical-align] stabilizer indices used (0-based): {[i for i,c in enumerate(coeffs) if c]}")
+    return aligned

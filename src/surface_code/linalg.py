@@ -88,3 +88,80 @@ def row_in_span_gf2(matrix: np.ndarray, row: np.ndarray) -> bool:
     current_rank = rank_gf2(matrix)
     stacked_rank = rank_gf2(np.vstack([matrix, row & 1]))
     return stacked_rank == current_rank
+
+
+def _pauli_commutes(a: str, b: str) -> bool:
+    """Return True iff two Pauli strings commute (ignoring identities)."""
+    anti = 0
+    for pa, pb in zip(a, b):
+        if pa == "I" or pb == "I":
+            continue
+        if pa != pb:
+            anti ^= 1
+    return anti == 0
+
+
+
+def _solve_gf2(A: list[list[int]], b: list[int]) -> list[int] | None:
+    """Solve A x = b over GF(2); return one solution or None if inconsistent."""
+    if not A:
+        return [0] * (len(A[0]) if b else 0)
+    m, n = len(A), len(A[0])
+    aug = [row[:] + [b[i] & 1] for i, row in enumerate(A)]
+    r = 0
+    pivots: list[int] = []
+    for c in range(n):
+        pivot = next((i for i in range(r, m) if aug[i][c]), None)
+        if pivot is None:
+            continue
+        aug[r], aug[pivot] = aug[pivot], aug[r]
+        pivots.append(c)
+        for i in range(m):
+            if i != r and aug[i][c]:
+                for j in range(c, n + 1):
+                    aug[i][j] ^= aug[r][j]
+        r += 1
+    for i in range(r, m):
+        if aug[i][n]:
+            return None
+    x = [0] * n
+    for i in range(r - 1, -1, -1):
+        c = pivots[i]
+        val = aug[i][n]
+        for j in range(c + 1, n):
+            val ^= aug[i][j] & x[j]
+        x[c] = val
+    return x
+
+def _solve_add_only(z_matrix: list[list[int]], b_vec: list[int], free_cols: list[int]) -> list[int] | None:
+        """Solve z_matrix[:, free_cols] * delta = b_vec over GF(2)."""
+        if not z_matrix:
+            return [0] * len(free_cols)
+        m = len(z_matrix)
+        n = len(free_cols)
+        aug = [[z_matrix[r][c] for c in free_cols] + [b_vec[r] % 2] for r in range(m)]
+        row = 0
+        pivots: list[int] = []
+        for col in range(n):
+            pivot = next((r for r in range(row, m) if aug[r][col]), None)
+            if pivot is None:
+                continue
+            aug[row], aug[pivot] = aug[pivot], aug[row]
+            pivots.append(col)
+            for r in range(m):
+                if r != row and aug[r][col]:
+                    for c in range(col, n + 1):
+                        aug[r][c] ^= aug[row][c]
+            row += 1
+        for r in range(row, m):
+            if aug[r][n]:
+                return None
+        delta = [0] * n
+        for r in range(row - 1, -1, -1):
+            col = pivots[r]
+            rhs = aug[r][n]
+            for c in range(col + 1, n):
+                rhs ^= aug[r][c] & delta[c]
+            delta[col] = rhs
+        return delta
+

@@ -100,12 +100,10 @@ def build_cnot_surgery_circuit(
         patch_metadata={"C": "control", "INT": "ancilla", "T": "target"},
     )
     
-
     if verbose:
         layout.print_layout()
 
     n_total = layout.n_total
-    single_model = layout.single_model
 
     surgery = LatticeSurgery(layout)
     cnot_spec = surgery.cnot(
@@ -121,6 +119,7 @@ def build_cnot_surgery_circuit(
     phases = cnot_spec.phases
     logical_z_control = cnot_spec.logical_z_control
     logical_x_target  = cnot_spec.logical_x_target
+    patch_logicals = cnot_spec.patch_logicals
 
 
     circuit = stim.Circuit()
@@ -144,16 +143,40 @@ def build_cnot_surgery_circuit(
     for q in range(code.n):
         circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
 
-
+    
     # Define the observable pairs for the logical Z and X measurements
     observable_pairs: List[Tuple[int, int]] = []
 
+    """
     # Initial logical Z on control
     start_idx_control = builder.measure_logical_once(circuit, logical_z_control)
 
     # Initial logical X on target
     start_idx_target = builder.measure_logical_once(circuit, logical_x_target)
-    
+    """
+
+   # --------------------------------------------------------------
+    # Per-patch logical initialization (before any detectors)
+    # --------------------------------------------------------------
+    # Example choice:
+    #   C   prepared in Z-basis (|0_L or |1_L)
+    #   INT prepared in X-basis (|+_L ancilla)
+    #   T   prepared in X-basis (or Z, depending on your protocol)
+    patch_init_bases: dict[str, str] = {
+        "C": "Z",
+        "INT": "X",
+        "T": "X",
+    }
+
+    init_indices: dict[str, int | None] = {}
+    for patch, basis in patch_init_bases.items():
+        logical_str = patch_logicals.get(patch, {}).get(basis)
+        init_indices[patch] = builder.measure_logical_once(circuit, logical_str)
+
+    # For CNOT: track Z on control as observable 0, X on target as observable 1
+    start_idx_control = init_indices["C"]  # Z_C
+    start_idx_target  = init_indices["T"]  # basis depends on patch_init_bases["T"]
+
     
     # Run the pre-merge phase using the same phenomenological noise model
     # used in the memory experiment.
@@ -173,7 +196,7 @@ def build_cnot_surgery_circuit(
     )
 
     
-    # Final logical Z on control
+    # Final logical on control
     end_idx_control = builder.measure_logical_once(circuit, logical_z_control)
     builder.attach_observable_pair(
         circuit,
@@ -183,7 +206,7 @@ def build_cnot_surgery_circuit(
         observable_pairs=observable_pairs,
     )
 
-    # Final logical X on target
+    # Final logical on target
     end_idx_target = builder.measure_logical_once(circuit, logical_x_target)
     builder.attach_observable_pair(
         circuit,
@@ -192,6 +215,11 @@ def build_cnot_surgery_circuit(
         observable_index=1,
         observable_pairs=observable_pairs,
     )
+
+    # --------------------------------------------------------------
+    # Final collapse measurements per patch
+    # (after LER, no detectors after this)
+    # --------------------------------------------------------------
     
     
     return circuit, observable_pairs

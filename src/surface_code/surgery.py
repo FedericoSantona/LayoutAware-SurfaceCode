@@ -26,6 +26,7 @@ class CNOTSpec:
     phases: List[PhaseSpec]
     logical_z_control: str | None
     logical_x_target: str | None
+    patch_logicals: dict[str, dict[str, str]]  # patch -> {'Z': ..., 'X': ...}
 
 
 class LatticeSurgery:
@@ -227,6 +228,29 @@ class LatticeSurgery:
 
         return z_merge, x_merge, logical_x_aligned
 
+
+    #------------------------------------------------------------------
+    # Extract logical operators for a given patch
+    #------------------------------------------------------------------
+    def logical_for_patch(self, patch: str, basis: str) -> str | None:
+        """Return embedded logical operator on a given patch and basis.
+
+        basis: 'Z' or 'X'
+        Returns a Pauli string on the *combined* code, or None if that logical
+        isn't available in the single-patch model.
+        """
+        basis = basis.upper()
+        if basis == "Z":
+            local = self.single_model.logical_z
+        elif basis == "X":
+            local = self.single_model.logical_x
+        else:
+            raise ValueError("basis must be 'Z' or 'X'")
+
+        if local is None:
+            return None
+
+        return self.embed_patch(local, patch)
     # ------------------------------------------------------------------
     # High-level: CNOT via lattice surgery
     # ------------------------------------------------------------------
@@ -252,6 +276,19 @@ class LatticeSurgery:
         """
         # Which logical patches exist in this 3-patch CNOT layout
         patches = [control, ancilla, target]
+
+
+        # Precompute both Z/X logicals for each patch, embedded globally.
+        patch_logicals: dict[str, dict[str, str]] = {}
+        for name in patches:
+            patch_logicals[name] = {}
+            z_emb = self.logical_for_patch(name, "Z")
+            x_emb = self.logical_for_patch(name, "X")
+            if z_emb is not None:
+                patch_logicals[name]["Z"] = z_emb
+            if x_emb is not None:
+                patch_logicals[name]["X"] = x_emb
+
 
         # Disjoint 3-patch memory stabilizers
         base_z, base_x = self.base_stabilizers(patches)
@@ -315,8 +352,10 @@ class LatticeSurgery:
         if logical_x_aligned is not None:
             logical_x_target = self.embed_patch(logical_x_aligned, target)
 
+
         return CNOTSpec(
             phases=phases,
             logical_z_control=logical_z_control,
             logical_x_target=logical_x_target,
+            patch_logicals=patch_logicals,
         )

@@ -2,7 +2,7 @@
 
 from .model import SurfaceCodeModel
 from .layout import Layout, SeamSpec
-from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig
+from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig, PhaseSpec
 from .geometry_utils import (
     find_boundary_data_qubits,
     find_rough_boundary_data_qubits,
@@ -71,4 +71,5 @@ __all__ = [
     "find_boundary_data_qubits",
     "find_rough_boundary_data_qubits",
     "find_smooth_boundary_data_qubits",
+    "PhaseSpec",
 ]

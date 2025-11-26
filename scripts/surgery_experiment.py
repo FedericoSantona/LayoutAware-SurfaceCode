@@ -48,53 +48,9 @@ from surface_code import (
     PhenomenologicalStimConfig,
     Layout,
     SeamSpec,
-    build_surface_code_model,
-    find_smooth_boundary_data_qubits,
-    find_rough_boundary_data_qubits,
+    PhaseSpec,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate
-
-
-# ---------------------------------------------------------------------------
-# Phase description
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class PhaseSpec:
-    """Describe one spacetime phase of the lattice-surgery protocol.
-
-    Each phase uses a *single* CSS stabilizer family (Z and X) on a *fixed*
-    layout of qubits (three patches plus any seam / intermediate qubits).
-    The differences between phases come solely from which stabilizers are
-    measured and for how many rounds.
-
-    Attributes
-    ----------
-    name:
-        Human-readable label, e.g. "pre-merge", "C+INT smooth merge".
-    z_stabilizers / x_stabilizers:
-        Lists of Pauli strings (on the *combined* code) describing the Z- and
-        X-type checks to measure in this phase.
-    rounds:
-        Number of repeated stabilizer-measurement rounds in this phase.
-    measure_z / measure_x:
-        Optional flags to explicitly control whether Z or X stabilizers are
-        measured in this phase. If None, uses the default behavior based on
-        config.family and whether stabilizers are provided.
-    """
-
-    name: str
-    z_stabilizers: Sequence[str]
-    x_stabilizers: Sequence[str]
-    rounds: int
-    measure_z: bool | None = None
-    measure_x: bool | None = None
-
-
-# ---------------------------------------------------------------------------
-# Core circuit builder
-# ---------------------------------------------------------------------------
 
 
 # Helper to strip Xs on specified qubits from a Pauli string
@@ -402,103 +358,6 @@ def _align_logical_x_to_masked_z(
     return aligned
 
 
-def _run_phase(
-    circuit: stim.Circuit,
-    builder: PhenomenologicalStimBuilder,
-    phase: PhaseSpec,
-    config: PhenomenologicalStimConfig,
-    sz_prev: List[int] | None,
-    sx_prev: List[int] | None,
-) -> Tuple[List[int] | None, List[int] | None]:
-    """Append one lattice-surgery phase to the circuit.
-
-    This is a thin wrapper that reuses the existing helper methods on
-    `PhenomenologicalStimBuilder` (noise model, `_measure_list`,
-    `_add_detectors`) but allows different stabilizer sets per phase.
-
-    Parameters
-    ----------
-    circuit:
-        The Stim circuit being built.
-    builder:
-        Your existing `PhenomenologicalStimBuilder` instance. Only its helper
-        methods and `code.n` are used here.
-    phase:
-        Which stabilizers to measure and for how many rounds.
-    config:
-        Noise parameters (p_x_error, p_z_error) and family selection.
-    sz_prev / sx_prev:
-        Absolute measurement indices from the previous phase / round, used to
-        build time-like detectors that span *all* phases.
-
-    Returns
-    -------
-    (sz_prev, sx_prev):
-        The last round's measurement indices for Z and X checks, to be fed
-        into the next phase.
-    """
-
-    n = builder.code.n
-
-    # Which CSS family to measure in this circuit (same semantics as in
-    # `PhenomenologicalStimBuilder.build`).
-    fam = (config.family or "").upper()
-    if fam not in {"", "Z", "X"}:
-        raise ValueError("config.family must be one of None, 'Z', or 'X'")
-    # Use per-phase flags if specified, otherwise fall back to config.family behavior
-    measure_Z = phase.measure_z if phase.measure_z is not None else (fam in {"", "Z"})
-    measure_X = phase.measure_x if phase.measure_x is not None else (fam in {"", "X"})
-
-    def apply_x_noise() -> None:
-        if config.p_x_error:
-            circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
-
-    def apply_z_noise() -> None:
-        if config.p_z_error:
-            circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
-
-    # noise-free warmup round for this phase if there is no
-    # prior history for the corresponding stabilizer family. This mirrors the
-    # behaviour of `PhenomenologicalStimBuilder.build` in the memory experiment.
-    if measure_Z and phase.z_stabilizers and sz_prev is None:
-        circuit.append_operation("TICK")
-        sz_prev = builder._measure_list(
-            circuit, phase.z_stabilizers, family="Z", round_index=-1
-        )
-
-    if measure_X and phase.x_stabilizers and sx_prev is None:
-        circuit.append_operation("TICK")
-        sx_prev = builder._measure_list(
-            circuit, phase.x_stabilizers, family="X", round_index=-1
-        )
-
-    # Repeat this phase's stabilizers for the requested number of rounds.
-    for round_idx in range(phase.rounds):
-        # Z half
-        if measure_Z and phase.z_stabilizers:
-            circuit.append_operation("TICK")
-            apply_x_noise()
-            sz_curr = builder._measure_list(
-                circuit, phase.z_stabilizers, family="Z", round_index=round_idx
-            )
-            if sz_prev is not None:
-                builder._add_detectors(circuit, sz_prev, sz_curr)
-            sz_prev = sz_curr
-
-        # X half
-        if measure_X and phase.x_stabilizers:
-            circuit.append_operation("TICK")
-            apply_z_noise()
-            sx_curr = builder._measure_list(
-                circuit, phase.x_stabilizers, family="X", round_index=round_idx
-            )
-            if sx_prev is not None:
-                builder._add_detectors(circuit, sx_prev, sx_curr)
-            sx_prev = sx_curr
-
-    return sz_prev, sx_prev
-
-
 def build_cnot_surgery_circuit(
     distance: int,
     code_type: str,
@@ -774,40 +633,13 @@ def build_cnot_surgery_circuit(
         init_label=None,
     )
 
-    def _phase_measure_flags(phase: PhaseSpec) -> tuple[bool, bool]:
-        fam = (stim_config.family or "").upper()
-        if fam not in {"", "Z", "X"}:
-            raise ValueError("config.family must be one of None, 'Z', or 'X'")
-        measure_Z = phase.measure_z if phase.measure_z is not None else (fam in {"", "Z"})
-        measure_X = phase.measure_x if phase.measure_x is not None else (fam in {"", "X"})
-        return measure_Z, measure_X
-
-    sz_prev: List[int] | None = None
-    sx_prev: List[int] | None = None
-    prev_z_set: Sequence[str] | None = None
-    prev_x_set: Sequence[str] | None = None
-    for phase in phases:
-        # Reset time-like detectors when stabilizer sets change between phases.
-        if prev_z_set is not None and phase.z_stabilizers != prev_z_set:
-            sz_prev = None
-        if prev_x_set is not None and phase.x_stabilizers != prev_x_set:
-            sx_prev = None
-
-        sz_prev, sx_prev = _run_phase(
-            circuit=circuit,
-            builder=builder,
-            phase=phase,
-            config=stim_config,
-            sz_prev=sz_prev,
-            sx_prev=sx_prev,
-        )
-        measure_Z, measure_X = _phase_measure_flags(phase)
-        if not measure_Z:
-            sz_prev = None
-        if not measure_X:
-            sx_prev = None
-        prev_z_set = phase.z_stabilizers
-        prev_x_set = phase.x_stabilizers
+    # Run all phases (pre-merge, merges/splits, post-merge) using the
+    # generalized multi-phase builder helper.
+    builder.run_phases(
+        circuit=circuit,
+        phases=phases,
+        config=stim_config,
+    )
 
     
     # Final logical Z measurement on the control patch.
@@ -858,7 +690,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--code-type",
         type=str,
-        default="heavy_hex",
+        default="standard",
         choices=["heavy_hex", "standard"],
         help="Type of surface code: 'heavy_hex' or 'standard'",
     )

@@ -23,6 +23,37 @@ class PhenomenologicalStimConfig:
     family: Optional[str] = None
    
 
+@dataclass
+class PhaseSpec:
+    """Describe one spacetime phase of the lattice-surgery protocol.
+
+    Each phase uses a *single* CSS stabilizer family (Z and X) on a *fixed*
+    layout of qubits (three patches plus any seam / intermediate qubits).
+    The differences between phases come solely from which stabilizers are
+    measured and for how many rounds.
+
+    Attributes
+    ----------
+    name:
+        Human-readable label, e.g. "pre-merge", "C+INT smooth merge".
+    z_stabilizers / x_stabilizers:
+        Lists of Pauli strings (on the *combined* code) describing the Z- and
+        X-type checks to measure in this phase.
+    rounds:
+        Number of repeated stabilizer-measurement rounds in this phase.
+    measure_z / measure_x:
+        Optional flags to explicitly control whether Z or X stabilizers are
+        measured in this phase. If None, uses the default behavior based on
+        config.family and whether stabilizers are provided.
+    """
+
+    name: str
+    z_stabilizers: Sequence[str]
+    x_stabilizers: Sequence[str]
+    rounds: int
+    measure_z: bool | None = None
+    measure_x: bool | None = None
+
 
 
 class PhenomenologicalStimBuilder:
@@ -233,3 +264,98 @@ class PhenomenologicalStimBuilder:
                 observable_pairs.append((start, end))
 
         return circuit, observable_pairs
+
+        # ----- multi-phase API --------------------------------------------------
+
+    def run_phases(
+        self,
+        circuit: stim.Circuit,
+        phases: Sequence["PhaseSpec"],
+        config: "PhenomenologicalStimConfig",
+    ) -> None:
+        """Run a sequence of CSS phases on an existing circuit.
+
+        This mirrors the internal logic of `build`, but allows each phase to
+        have its own Z/X stabilizer sets and round counts, while sharing
+        time-like detectors across phases when the stabilizer sets match.
+        """
+        n = self.code.n
+
+        fam = (config.family or "").upper()
+        if fam not in {"", "Z", "X"}:
+            raise ValueError("config.family must be one of None, 'Z', or 'X'")
+
+        def _phase_measure_flags(phase: PhaseSpec) -> tuple[bool, bool]:
+            measure_Z = phase.measure_z if phase.measure_z is not None else (fam in {"", "Z"})
+            measure_X = phase.measure_x if phase.measure_x is not None else (fam in {"", "X"})
+            return measure_Z, measure_X
+
+        def apply_x_noise() -> None:
+            if config.p_x_error:
+                circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
+
+        def apply_z_noise() -> None:
+            if config.p_z_error:
+                circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
+
+        sz_prev: list[int] | None = None
+        sx_prev: list[int] | None = None
+        prev_z_set: Sequence[str] | None = None
+        prev_x_set: Sequence[str] | None = None
+
+        for phase in phases:
+            z_stabs = list(phase.z_stabilizers)
+            x_stabs = list(phase.x_stabilizers)
+            measure_Z, measure_X = _phase_measure_flags(phase)
+
+            # Reset time-like detectors when stabilizer sets change.
+            if prev_z_set is not None and z_stabs != list(prev_z_set):
+                sz_prev = None
+            if prev_x_set is not None and x_stabs != list(prev_x_set):
+                sx_prev = None
+
+            # Warmup round for this phase (if needed)
+            if measure_Z and z_stabs and sz_prev is None:
+                circuit.append_operation("TICK")
+                sz_prev = self._measure_list(
+                    circuit, z_stabs, family="Z", round_index=-1
+                )
+
+            if measure_X and x_stabs and sx_prev is None:
+                circuit.append_operation("TICK")
+                sx_prev = self._measure_list(
+                    circuit, x_stabs, family="X", round_index=-1
+                )
+
+            # Repeat this phase's stabilizers
+            for round_idx in range(phase.rounds):
+                # Z half
+                if measure_Z and z_stabs:
+                    circuit.append_operation("TICK")
+                    apply_x_noise()
+                    sz_curr = self._measure_list(
+                        circuit, z_stabs, family="Z", round_index=round_idx
+                    )
+                    if sz_prev is not None:
+                        self._add_detectors(circuit, sz_prev, sz_curr)
+                    sz_prev = sz_curr
+
+                # X half
+                if measure_X and x_stabs:
+                    circuit.append_operation("TICK")
+                    apply_z_noise()
+                    sx_curr = self._measure_list(
+                        circuit, x_stabs, family="X", round_index=round_idx
+                    )
+                    if sx_prev is not None:
+                        self._add_detectors(circuit, sx_prev, sx_curr)
+                    sx_prev = sx_curr
+
+            # Kill history if this phase doesn't measure that family at all
+            if not measure_Z:
+                sz_prev = None
+            if not measure_X:
+                sx_prev = None
+
+            prev_z_set = z_stabs
+            prev_x_set = x_stabs

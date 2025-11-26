@@ -113,22 +113,6 @@ def build_cnot_surgery_circuit(
     smooth_boundary_qubits = layout.local_boundary_qubits["smooth"]
     rough_boundary_qubits = layout.local_boundary_qubits["rough"]
 
-
-    # Minimal code-like object exposing only `.n` for the builder.
-    class CombinedCode:
-        def __init__(self, n: int):
-            self.n = n
-
-    code = CombinedCode(n_total)
-
-    builder = PhenomenologicalStimBuilder(
-        code=code,
-        z_stabilizers=[],
-        x_stabilizers=[],
-        logical_z=None,
-        logical_x=None,
-    )
-
     # Offsets for the three logical patches in the combined code.
     offset_C = layout.patch_offsets["C"]
     offset_INT = layout.patch_offsets["INT"]
@@ -277,6 +261,21 @@ def build_cnot_surgery_circuit(
     ]
 
     circuit = stim.Circuit()
+
+    # Minimal code-like object exposing only `.n` for the builder.
+    class CombinedCode:
+        def __init__(self, n: int):
+            self.n = n
+
+    code = CombinedCode(n_total)
+
+    builder = PhenomenologicalStimBuilder(
+        code=code,
+        z_stabilizers=[],
+        x_stabilizers=[],
+        logical_z=None,
+        logical_x=None,
+    )
 
     # Attach simple 1D coordinates for all qubits in the combined layout.
     for q in range(code.n):

@@ -85,7 +85,7 @@ def build_cnot_surgery_circuit(
     of this.
     """
 
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Build 3-patch layout using the generic Layout class
     # ------------------------------------------------------------------
     
@@ -146,14 +146,6 @@ def build_cnot_surgery_circuit(
     
     # Define the observable pairs for the logical Z and X measurements
     observable_pairs: List[Tuple[int, int]] = []
-
-    """
-    # Initial logical Z on control
-    start_idx_control = builder.measure_logical_once(circuit, logical_z_control)
-
-    # Initial logical X on target
-    start_idx_target = builder.measure_logical_once(circuit, logical_x_target)
-    """
 
    # --------------------------------------------------------------
     # Per-patch logical initialization (before any detectors)

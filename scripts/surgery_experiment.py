@@ -160,11 +160,15 @@ def build_cnot_surgery_circuit(
         "T": "X",
     }
 
+    #This is the initial logical measurement for the CNOT experiment, 
+    # it initializes the logical qubits in the Z or X basis.
     init_indices: dict[str, int | None] = {}
     for patch, basis in patch_init_bases.items():
         logical_str = patch_logicals.get(patch, {}).get(basis)
         init_indices[patch] = builder.measure_logical_once(circuit, logical_str)
 
+
+    #This is the start index for the logical measurements of the CNOT experiment.
     # For CNOT: track Z on control as observable 0, X on target as observable 1
     start_idx_control = init_indices["C"]  # Z_C
     start_idx_target  = init_indices["T"]  # basis depends on patch_init_bases["T"]

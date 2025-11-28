@@ -196,11 +196,6 @@ def build_cnot_surgery_circuit(
         observable_pairs=observable_pairs,
     )
 
-    # --------------------------------------------------------------
-    # Final collapse measurements per patch
-    # (after LER, no detectors after this)
-    # --------------------------------------------------------------
-    
     
     return circuit, observable_pairs
 
@@ -256,6 +251,13 @@ def build_cnot_surgery_circuit_physics(
     patch_logicals = cnot_spec.patch_logicals
     bell_obs = cnot_spec.bell_observables
 
+    if verbose:
+        print("[physics] Bell observables:")
+        for name, obs in bell_obs.items():
+            print(f"  {name}:")
+            print(f"    pauli: {obs.pauli}")
+            print(f"    frame_bits: {obs.frame_bits}")
+
     circuit = stim.Circuit()
 
     class CombinedCode:
@@ -310,12 +312,142 @@ def build_cnot_surgery_circuit_physics(
     circuit.append_operation("TICK")
     zz_idx = builder.measure_logical_once(circuit, zz_logical)
 
+
+    # --------------------------------------------------------------
+    # Resolve symbolic frame_bits into measurement indices
+    # --------------------------------------------------------------
+
+    def _collect_phase_indices(
+        pauli_strings: list[str],
+        *,
+        family: str,
+        phase_name: str,
+    ) -> list[int]:
+        """For each Pauli in pauli_strings, find the last-round measurement index
+        in builder._meas_meta with matching family and phase."""
+        out: list[int] = []
+        for p in pauli_strings:
+            candidates: list[tuple[int, int]] = []
+            for idx, meta in builder._meas_meta.items():
+                if (
+                    meta.get("pauli") == p
+                    and meta.get("family") == family
+                    and meta.get("phase") == phase_name
+                ):
+                    candidates.append((idx, meta["round"]))
+            if not candidates:
+                print(f"[physics] WARNING: no measurement found for {p!r} in {phase_name!r}")
+                continue
+            best_idx = max(candidates, key=lambda t: t[1])[0]
+            out.append(best_idx)
+        return out
+
+    def resolve_frame_bits(labels: list[str]) -> list[int]:
+        """Map symbolic frame bit labels from LogicalObservable.frame_bits
+        to concrete measurement indices via layout + builder._meas_meta."""
+        indices: list[int] = []
+
+        for label in labels:
+            kind, left, right = label.split(":")
+
+            if kind == "SMOOTH_Z_SEAM":
+                # Construct the joint Z checks across the smooth C–INT seam
+                boundary_left = layout.boundary_qubits[left]["smooth"]
+                boundary_right = layout.boundary_qubits[right]["smooth"]
+                seam = layout.get_seam_qubits(left, right)
+
+                paulis: list[str] = []
+                for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
+                    chars = ["I"] * n_total
+                    chars[q_l] = "Z"
+                    chars[q_sea] = "Z"
+                    chars[q_r] = "Z"
+                    paulis.append("".join(chars))
+
+                phase_name = f"{left}+{right} smooth merge"
+                indices.extend(
+                    _collect_phase_indices(paulis, family="Z", phase_name=phase_name)
+                )
+
+            elif kind == "ROUGH_X_SEAM":
+                # Construct the joint X checks across the rough INT–T seam
+                boundary_left = layout.boundary_qubits[left]["rough"]
+                boundary_right = layout.boundary_qubits[right]["rough"]
+                seam = layout.get_seam_qubits(left, right)
+
+                paulis: list[str] = []
+                for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
+                    chars = ["I"] * n_total
+                    chars[q_l] = "X"
+                    chars[q_sea] = "X"
+                    chars[q_r] = "X"
+                    paulis.append("".join(chars))
+
+                phase_name = f"{left}+{right} rough merge"
+                indices.extend(
+                    _collect_phase_indices(paulis, family="X", phase_name=phase_name)
+                )
+
+            else:
+                # Unknown label: ignore for now or raise
+                if verbose:
+                    print(f"[physics] WARNING: unknown frame bit label {label!r}")
+                continue
+
+        return indices
+
+        # Resolve frame bits for XX and ZZ coming from the merge windows
+    frame_xx = resolve_frame_bits(bell_obs["XX"].frame_bits)
+    frame_zz = resolve_frame_bits(bell_obs["ZZ"].frame_bits)
+
+    if verbose:
+        print("[physics] frame_xx indices:", frame_xx)
+        print("[physics] frame_zz indices:", frame_zz)
+
+    # --------------------------------------------------------------
+    # Include initial logical measurements in the Pauli frame
+    # --------------------------------------------------------------
+    # By construction:
+    #   * We measured X_C at init_indices["C"] to "prepare" C in X-basis.
+    #   * We measured Z_T at init_indices["T"] to "prepare" T in Z-basis.
+    #
+    # These are random ±1 but *known per shot*, so they must be part of the
+    # dressed Bell stabilizers.
+    xx_indices: list[int] = []
+    if init_indices.get("C") is not None:
+        xx_indices.append(init_indices["C"])   # X_C^{init} factor
+    if init_indices.get("INT") is not None:
+        xx_indices.append(init_indices["INT"]) # X_INT^{init} factor
+    xx_indices.extend(frame_xx)                # rough seam X parities
+    xx_indices.append(xx_idx)                  # final X_C X_T
+
+    zz_indices: list[int] = []
+    if init_indices.get("T") is not None:
+        zz_indices.append(init_indices["T"])   # Z_T^{init} factor
+    zz_indices.extend(frame_zz)                # smooth seam Z parities
+    zz_indices.append(zz_idx)                  # final Z_C Z_T
+
+    if verbose:
+        print("[physics] XX indices (init + frame + final):", xx_indices)
+        print("[physics] ZZ indices (init + frame + final):", zz_indices)
+
     correlator_map: dict[str, list[int]] = {
-    "XX": [xx_idx],
-    "ZZ": [zz_idx],
-}
-   
+        "XX": xx_indices,
+        "ZZ": zz_indices,
+    }
+
+    if verbose:
+        print("[physics] Metadata for frame_xx:")
+        for idx in frame_xx:
+            print("  idx", idx, "->", builder._meas_meta.get(idx))
+
+        print("[physics] Metadata for frame_zz:")
+        for idx in frame_zz:
+            print("  idx", idx, "->", builder._meas_meta.get(idx))
+
     return circuit, correlator_map
+
+   
 
 # ---------------------------------------------------------------------------
 # CLI wrapper, mirroring memory_experiment.py
@@ -340,24 +472,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rounds-pre",
         type=int,
-        default=None,
+        default=1,
         help="Number of pre-surgery memory rounds (three disjoint patches, default: distance)",
     )
     parser.add_argument(
         "--rounds-merge",
         type=int,
-        default=None,
+        default=1,
         help="Number of rounds in each merge/split window (default: distance)",
     )
     parser.add_argument(
         "--rounds-post",
         type=int,
-        default=None,
+        default=1,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
-    parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
-    parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--px", type=float, default=0, help="X error probability")
+    parser.add_argument("--pz", type=float, default=0, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(
@@ -369,7 +501,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         type=str,
         choices=["ler", "physics", "both"],
-        default="both",
+        default="physics",
         help="Which experiment to run: logical error rate, physics correlators, or both.",
     )
     return parser.parse_args()
@@ -428,6 +560,23 @@ def run_cnot_physics_experiment(
     print(f"Physical error rates: p_x={p_x}, p_z={p_z}")
     for name, value in phys_result.correlators.items():
         print(f"⟨{name}⟩ = {value:.3f}")
+
+
+    # Quick diagnostic: look at the first few shots by hand
+    if verbose:
+        small_mc = MonteCarloConfig(shots=8, seed=seed)
+        import numpy as np
+        sampler = circuit.compile_sampler(seed=seed)
+        small_samples = np.asarray(sampler.sample(small_mc.shots), dtype=np.float64)
+        pm1 = 1 - 2 * small_samples
+
+        for name, idxs in correlator_map.items():
+            idxs = list(idxs)
+            vals = pm1[:, idxs].prod(axis=1)
+            print(f"[physics] Sampled values for {name}:")
+            for s, v in enumerate(vals):
+                print(f"  shot {s}: {v}")
+            print(f"  mean over {small_mc.shots} shots: {vals.mean():.3f}")
 
     return phys_result
 

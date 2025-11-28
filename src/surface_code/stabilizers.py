@@ -235,3 +235,42 @@ def _commuting_boundary_mask(
         )
     return _return_order(["".join(p) for p in primary_chars], ["".join(s) for s in secondary_chars])
 
+
+def stabs_to_symplectic(z_stabs: list[str], x_stabs: list[str]) -> np.ndarray:
+    """Convert CSS Z/X stabilizers into a full symplectic matrix [Z | X]."""
+    if not z_stabs and not x_stabs:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    n = len(z_stabs[0] if z_stabs else x_stabs[0])
+    rows: list[np.ndarray] = []
+
+    # Z-type generators
+    for s in z_stabs:
+        assert len(s) == n
+        vec = np.zeros(2 * n, dtype=np.uint8)
+        for q, c in enumerate(s):
+            if c == "Z":
+                vec[q] = 1
+            elif c == "Y":
+                vec[q] = 1
+                vec[n + q] = 1
+            elif c == "X":
+                vec[n + q] = 1
+        rows.append(vec)
+
+    # X-type generators
+    for s in x_stabs:
+        assert len(s) == n
+        vec = np.zeros(2 * n, dtype=np.uint8)
+        for q, c in enumerate(s):
+            if c == "X":
+                vec[n + q] = 1
+            elif c == "Y":
+                vec[q] = 1
+                vec[n + q] = 1
+            elif c == "Z":
+                vec[q] = 1
+        rows.append(vec)
+
+    return np.vstack(rows) if rows else np.zeros((0, 2 * n), dtype=np.uint8)
+

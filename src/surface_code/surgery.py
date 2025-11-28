@@ -10,6 +10,10 @@ from .layout import Layout, BoundaryType
 from .stim_builder import PhaseSpec  # or: from . import PhaseSpec, depending on your exports
 from .stabilizers import _commuting_boundary_mask
 from .logicals import _align_logical_x_to_masked_z, _multiply_paulis_disjoint
+from .linalg import rank_gf2
+from .stabilizers import stabs_to_symplectic
+
+
 
 
 @dataclass
@@ -67,6 +71,11 @@ class LatticeSurgery:
     # Basic helpers
     # ------------------------------------------------------------------
 
+    def _phase_k(self, z_stabs: list[str], x_stabs: list[str]) -> int:
+        S = stabs_to_symplectic(z_stabs, x_stabs)
+        r = rank_gf2(S)
+        return self.n_total - r
+
     def _embed_patch(self, pauli_str: str, patch_name: str) -> str:
         """Embed a single-patch Pauli into the global index space at patch_name."""
         assert len(pauli_str) == self.n_single
@@ -91,6 +100,35 @@ class LatticeSurgery:
                 base_x.append(self._embed_patch(s, name))
 
         return base_z, base_x
+
+    def _annotate_bell_frame(
+        self,
+        bell_observables: Dict[str, LogicalObservable],
+        control: str,
+        ancilla: str,
+        target: str,
+    ) -> Dict[str, LogicalObservable]:
+        """Attach *symbolic* Pauli-frame dependencies to XX and ZZ.
+
+        For this first version we just record that:
+          * ZZ depends on the smooth-merge Z parity between control and ancilla.
+          * XX depends on the rough-merge X parity between ancilla and target.
+
+        These labels are later resolved to actual measurement indices by the
+        physics experiment code using builder._meas_meta and the Layout.
+        """
+        # We'll use a simple "KIND:left:right" convention for labels.
+        # KIND is one of: "SMOOTH_Z_SEAM", "ROUGH_X_SEAM", etc.
+        zz = bell_observables.get("ZZ")
+        xx = bell_observables.get("XX")
+
+        if zz is not None:
+            zz.frame_bits.append(f"SMOOTH_Z_SEAM:{control}:{ancilla}")
+
+        if xx is not None:
+            xx.frame_bits.append(f"ROUGH_X_SEAM:{ancilla}:{target}")
+
+        return bell_observables
 
     # ------------------------------------------------------------------
     # Internal masking helper shared by smooth/rough merges
@@ -321,7 +359,13 @@ class LatticeSurgery:
                 frame_bits=[],
             ),
 }
-
+        # Attach symbolic frame information (no indices yet)
+        bell_observables = self._annotate_bell_frame(
+            bell_observables,
+            control=control,
+            ancilla=ancilla,
+            target=target,
+        )
 
         # Disjoint 3-patch memory stabilizers
         base_z, base_x = self._base_stabilizers(patches)
@@ -384,6 +428,14 @@ class LatticeSurgery:
         logical_x_target: str | None = None
         if logical_x_aligned is not None:
             logical_x_target = self._embed_patch(logical_x_aligned, target)
+
+
+        if verbose:
+            print("[debug] code parameters per phase:")
+            for ph in phases:
+                k = self._phase_k(ph.z_stabilizers, ph.x_stabilizers)
+                print(f"  Phase {ph.name:24s}: n={self.n_total}, k={k}, "
+                    f"#Z={len(ph.z_stabilizers)}, #X={len(ph.x_stabilizers)}")
 
 
         return CNOTSpec(

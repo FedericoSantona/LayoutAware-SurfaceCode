@@ -1,6 +1,6 @@
 """Simulation entry points for logical-error benchmarking."""
 
-from .ler_simulator import (
+from .runner import (
     MonteCarloConfig,
     SimulationResult,
     run_circuit_logical_error_rate,

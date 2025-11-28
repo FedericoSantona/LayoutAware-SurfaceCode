@@ -67,7 +67,7 @@ class LatticeSurgery:
     # Basic helpers
     # ------------------------------------------------------------------
 
-    def embed_patch(self, pauli_str: str, patch_name: str) -> str:
+    def _embed_patch(self, pauli_str: str, patch_name: str) -> str:
         """Embed a single-patch Pauli into the global index space at patch_name."""
         assert len(pauli_str) == self.n_single
         offset = self.layout.patch_offsets[patch_name]
@@ -76,7 +76,7 @@ class LatticeSurgery:
         right = "I" * (self.n_total - offset - self.n_single)
         return left + mid + right
 
-    def base_stabilizers(self, patches: Sequence[str] | None = None) -> Tuple[List[str], List[str]]:
+    def _base_stabilizers(self, patches: Sequence[str] | None = None) -> Tuple[List[str], List[str]]:
         """Disjoint-memory stabilizers: same single-patch model copied to each patch."""
         patch_list = list(patches) if patches is not None else list(self.layout.patch_order)
         base_z: List[str] = []
@@ -84,11 +84,11 @@ class LatticeSurgery:
 
         for s in self.z_single:
             for name in patch_list:
-                base_z.append(self.embed_patch(s, name))
+                base_z.append(self._embed_patch(s, name))
 
         for s in self.x_single:
             for name in patch_list:
-                base_x.append(self.embed_patch(s, name))
+                base_x.append(self._embed_patch(s, name))
 
         return base_z, base_x
 
@@ -136,17 +136,17 @@ class LatticeSurgery:
         for s, s_masked in zip(self.z_single, masked_z_local):
             for name in all_patches:
                 if name in merge_set:
-                    z_out.append(self.embed_patch(s_masked, name))
+                    z_out.append(self._embed_patch(s_masked, name))
                 else:
-                    z_out.append(self.embed_patch(s, name))
+                    z_out.append(self._embed_patch(s, name))
 
         # X stabilizers
         for s, s_masked in zip(self.x_single, masked_x_local):
             for name in all_patches:
                 if name in merge_set:
-                    x_out.append(self.embed_patch(s_masked, name))
+                    x_out.append(self._embed_patch(s_masked, name))
                 else:
-                    x_out.append(self.embed_patch(s, name))
+                    x_out.append(self._embed_patch(s, name))
 
         return z_out, x_out, masked_z_local
 
@@ -154,7 +154,7 @@ class LatticeSurgery:
     # Smooth and rough merge stabilizers
     # ------------------------------------------------------------------
 
-    def smooth_merge_stabilizers(
+    def _smooth_merge_stabilizers(
         self,
         left: str,
         right: str,
@@ -189,7 +189,7 @@ class LatticeSurgery:
 
         return z_merge, x_merge
 
-    def rough_merge_stabilizers(
+    def _rough_merge_stabilizers(
         self,
         left: str,
         right: str,
@@ -241,7 +241,7 @@ class LatticeSurgery:
     #------------------------------------------------------------------
     # Extract logical operators for a given patch
     #------------------------------------------------------------------
-    def logical_for_patch(self, patch: str, basis: str) -> str | None:
+    def _logical_for_patch(self, patch: str, basis: str) -> str | None:
         """Return embedded logical operator on a given patch and basis.
 
         basis: 'Z' or 'X'
@@ -259,7 +259,7 @@ class LatticeSurgery:
         if local is None:
             return None
 
-        return self.embed_patch(local, patch)
+        return self._embed_patch(local, patch)
     # ------------------------------------------------------------------
     # High-level: CNOT via lattice surgery
     # ------------------------------------------------------------------
@@ -291,8 +291,8 @@ class LatticeSurgery:
         patch_logicals: dict[str, dict[str, str]] = {}
         for name in patches:
             patch_logicals[name] = {}
-            z_emb = self.logical_for_patch(name, "Z")
-            x_emb = self.logical_for_patch(name, "X")
+            z_emb = self._logical_for_patch(name, "Z")
+            x_emb = self._logical_for_patch(name, "X")
             if z_emb is not None:
                 patch_logicals[name]["Z"] = z_emb
             if x_emb is not None:
@@ -324,10 +324,10 @@ class LatticeSurgery:
 
 
         # Disjoint 3-patch memory stabilizers
-        base_z, base_x = self.base_stabilizers(patches)
+        base_z, base_x = self._base_stabilizers(patches)
 
         # C+INT smooth merge
-        smooth_merge_z, smooth_merge_x = self.smooth_merge_stabilizers(
+        smooth_merge_z, smooth_merge_x = self._smooth_merge_stabilizers(
             control,
             ancilla,
             all_patches=patches,
@@ -335,14 +335,14 @@ class LatticeSurgery:
         )
 
         # INT+T rough merge
-        rough_merge_z, rough_merge_x, logical_x_aligned = self.rough_merge_stabilizers(
+        rough_merge_z, rough_merge_x, logical_x_aligned = self._rough_merge_stabilizers(
             ancilla,
             target,
             all_patches=patches,
             verbose=verbose,
         )
 
-        # Build phase list (same structure as your current surgery_experiment)
+        # Build phase list
         phases: List[PhaseSpec] = [
             PhaseSpec("pre-merge", base_z, base_x, rounds_pre),
             PhaseSpec(
@@ -379,11 +379,11 @@ class LatticeSurgery:
         # Embedded logical observables
         logical_z_control: str | None = None
         if self.single_model.logical_z is not None:
-            logical_z_control = self.embed_patch(self.single_model.logical_z, control)
+            logical_z_control = self._embed_patch(self.single_model.logical_z, control)
 
         logical_x_target: str | None = None
         if logical_x_aligned is not None:
-            logical_x_target = self.embed_patch(logical_x_aligned, target)
+            logical_x_target = self._embed_patch(logical_x_aligned, target)
 
 
         return CNOTSpec(

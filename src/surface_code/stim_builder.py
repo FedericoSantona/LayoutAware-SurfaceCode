@@ -123,6 +123,7 @@ class PhenomenologicalStimBuilder:
         *,
         family: str,
         round_index: int,
+        phase_name: str = None,
     ) -> list[int]:
         """Measure a list of Paulis and record debug metadata per measurement.
 
@@ -144,6 +145,7 @@ class PhenomenologicalStimBuilder:
                     "round": round_index,
                     "stab_index": stab_index,
                     "pauli": pauli,
+                    "phase": phase_name if phase_name is not None else "unknown",
                 }
         return indices
 
@@ -231,6 +233,7 @@ class PhenomenologicalStimBuilder:
         phase_measure_x: bool | None,
         sz_prev: list[int] | None,
         sx_prev: list[int] | None,
+        phase_name: str = None,
     ) -> tuple[list[int] | None, list[int] | None]:
     
         """Core engine: run Z/X halves with noise and time-like detectors."""
@@ -245,12 +248,12 @@ class PhenomenologicalStimBuilder:
         if measure_Z and z_stabs and sz_prev is None:
             circuit.append_operation("TICK")
             sz_prev = self._measure_list(
-                circuit, z_stabs, family="Z", round_index=-1
+                circuit, z_stabs, family="Z", round_index=-1, phase_name=phase_name
             )
         if measure_X and x_stabs and sx_prev is None:
             circuit.append_operation("TICK")
             sx_prev = self._measure_list(
-                circuit, x_stabs, family="X", round_index=-1
+                circuit, x_stabs, family="X", round_index=-1, phase_name=phase_name
             )
 
         # Main rounds
@@ -259,7 +262,7 @@ class PhenomenologicalStimBuilder:
                 circuit.append_operation("TICK")
                 self._apply_x_noise(circuit, config)
                 sz_curr = self._measure_list(
-                    circuit, z_stabs, family="Z", round_index=round_idx
+                    circuit, z_stabs, family="Z", round_index=round_idx, phase_name=phase_name
                 )
                 if sz_prev is not None:
                     self._add_detectors(circuit, sz_prev, sz_curr)
@@ -269,7 +272,7 @@ class PhenomenologicalStimBuilder:
                 circuit.append_operation("TICK")
                 self._apply_z_noise(circuit, config)
                 sx_curr = self._measure_list(
-                    circuit, x_stabs, family="X", round_index=round_idx
+                    circuit, x_stabs, family="X", round_index=round_idx, phase_name=phase_name
                 )
                 if sx_prev is not None:
                     self._add_detectors(circuit, sx_prev, sx_curr)
@@ -314,6 +317,7 @@ class PhenomenologicalStimBuilder:
 
         start: Optional[int] = self.measure_logical_once(circuit, logical_string)
 
+        phase_name = "single_phase"
         # Run CSS measurement rounds using the helper method
         sz_prev: Optional[list[int]] = None
         sx_prev: Optional[list[int]] = None
@@ -327,6 +331,7 @@ class PhenomenologicalStimBuilder:
             phase_measure_x=None,
             sz_prev=sz_prev,
             sx_prev=sx_prev,
+            phase_name=phase_name,
         )
 
         end: Optional[int] = self.measure_logical_once(circuit, logical_string)
@@ -384,6 +389,7 @@ class PhenomenologicalStimBuilder:
                 phase_measure_x=phase.measure_x,
                 sz_prev=sz_prev,
                 sx_prev=sx_prev,
+                phase_name=phase.name,
             )
 
             prev_z_set = z_stabs

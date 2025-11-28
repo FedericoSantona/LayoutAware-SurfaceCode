@@ -1,29 +1,11 @@
 """Lattice-surgery CNOT experiment.
 
-This script is intended to sit next to `memory_experiment.py` and reuse the same
-Stim + PyMatching Monte Carlo infrastructure, but for a *gate* experiment
-instead of a memory experiment.
-
 Conceptually, we follow the CNOT construction of Horsman et al.,
 "Surface code quantum computing by lattice surgery" (2013): two planar
 logical patches (control C and target T) and an intermediate logical patch
 (INT) prepared in |+>_L. The CNOT is realised by a smooth merge + split
 between C and INT followed by a rough merge between INT and T.
 
-This file does **not** yet implement the full geometry-specific stabilizers
-for those merge/split phases. Instead, it provides a clear *template* showing
-how to:
-
-  * plug a multi-phase lattice-surgery circuit into the existing
-    `PhenomenologicalStimConfig` + Monte Carlo pipeline;
-  * where the per-phase Z/X stabilizers for the three-patch layout
-    need to be supplied;
-  * how and where to attach the logical CNOT observable.
-
-Once the geometry-dependent stabilizer lists are implemented, the
-`build_cnot_surgery_circuit` function will produce a Stim circuit that you
-can feed directly to `run_circuit_logical_error_rate` to estimate a logical
-CNOT error rate as a function of distance and noise parameters.
 """
 
 from __future__ import annotations
@@ -51,7 +33,36 @@ from surface_code import (
     PhaseSpec,
     LatticeSurgery,
 )
-from simulation import MonteCarloConfig, run_circuit_logical_error_rate
+from simulation import MonteCarloConfig, run_circuit_logical_error_rate, run_circuit_physics
+
+
+# ---------------------------------------------------------------------------
+# Helper: multiply two Pauli strings on disjoint supports (no phases)
+# ---------------------------------------------------------------------------
+
+def _multiply_paulis_disjoint(a: str, b: str) -> str:
+    """Multiply two Pauli strings assuming disjoint support (or identical chars).
+
+    This ignores overall phases and assumes that at each position either:
+      * one of a,b is 'I', or
+      * a == b.
+    """
+    if len(a) != len(b):
+        raise ValueError("Pauli strings must have the same length")
+    out = []
+    for ca, cb in zip(a, b):
+        if ca == 'I':
+            out.append(cb)
+        elif cb == 'I':
+            out.append(ca)
+        elif ca == cb:
+            out.append(ca)
+        else:
+            raise ValueError(f"Overlapping non-commuting Paulis at site: {ca}, {cb}")
+    return "".join(out)
+
+
+
 
 
 def build_cnot_surgery_circuit(
@@ -221,6 +232,137 @@ def build_cnot_surgery_circuit(
     return circuit, observable_pairs
 
 # ---------------------------------------------------------------------------
+# Build circuit for physics mode (Bell-state diagnostics)
+# ---------------------------------------------------------------------------
+
+
+def build_cnot_surgery_circuit_physics(
+    distance: int,
+    code_type: str,
+    p_x: float,
+    p_z: float,
+    rounds_pre: int,
+    rounds_merge: int,
+    rounds_post: int,
+    verbose: bool = False,
+) -> Tuple[stim.Circuit, dict[str, list[int]]]:
+    """Build a CNOT surgery circuit plus Bell-type logical measurements.
+
+    This variant is for "physics mode": we *do not* attach DEM observables,
+    but instead add explicit logical MPPs at the end of the protocol to probe
+    Bell correlators such as X_C X_T and Z_C Z_T.
+    """
+    layout = Layout(
+        distance=distance,
+        code_type=code_type,
+        patch_order=["C", "INT", "T"],
+        seams=[
+            SeamSpec("C", "INT", "smooth"),
+            SeamSpec("INT", "T", "rough"),
+        ],
+        patch_metadata={"C": "control", "INT": "ancilla", "T": "target"},
+    )
+
+    if verbose:
+        layout.print_layout()
+
+    n_total = layout.n_total
+
+    surgery = LatticeSurgery(layout)
+    cnot_spec = surgery.cnot(
+        control="C",
+        ancilla="INT",
+        target="T",
+        rounds_pre=rounds_pre,
+        rounds_merge=rounds_merge,
+        rounds_post=rounds_post,
+        verbose=verbose,
+    )
+
+    phases = cnot_spec.phases
+    patch_logicals = cnot_spec.patch_logicals
+
+    circuit = stim.Circuit()
+
+    class CombinedCode:
+        def __init__(self, n: int):
+            self.n = n
+
+    code = CombinedCode(n_total)
+
+    builder = PhenomenologicalStimBuilder(
+        code=code,
+        z_stabilizers=[],
+        x_stabilizers=[],
+        logical_z=None,
+        logical_x=None,
+    )
+
+    for q in range(code.n):
+        circuit.append_operation("QUBIT_COORDS", [q], [q, 0])
+
+    # Logical initialisation choice for Bell: C in X, INT in X, T in Z
+    patch_init_bases: dict[str, str] = {
+        "C": "X",
+        "INT": "X",
+        "T": "Z",
+    }
+
+    init_indices: dict[str, int | None] = {}
+    for patch, basis in patch_init_bases.items():
+        logical_str = patch_logicals.get(patch, {}).get(basis)
+        init_indices[patch] = builder.measure_logical_once(circuit, logical_str)
+
+    stim_config = PhenomenologicalStimConfig(
+        rounds=1,
+        p_x_error=p_x,
+        p_z_error=p_z,
+        init_label=None,
+    )
+
+    builder.run_phases(
+        circuit=circuit,
+        phases=phases,
+        config=stim_config,
+    )
+
+   # ------------------------------------------------------------------
+    # Final logical measurements for Bell diagnostics
+    # ------------------------------------------------------------------
+    z_c = patch_logicals["C"].get("Z")
+    z_t = patch_logicals["T"].get("Z")
+    x_c = patch_logicals["C"].get("X")
+    x_t = patch_logicals["T"].get("X")
+
+    if z_c is None or z_t is None or x_c is None or x_t is None:
+        raise ValueError("Missing logical X/Z operators for C or T")
+
+    xx_logical = _multiply_paulis_disjoint(x_c, x_t)
+    zz_logical = _multiply_paulis_disjoint(z_c, z_t)
+
+    circuit.append_operation("TICK")
+    xx_idx = builder.measure_logical_once(circuit, xx_logical)
+
+    circuit.append_operation("TICK")
+    zz_idx = builder.measure_logical_once(circuit, zz_logical)
+
+    # Also measure single-qubit logicals if you want marginals
+    circuit.append_operation("TICK")
+    zc_idx = builder.measure_logical_once(circuit, z_c)
+
+    circuit.append_operation("TICK")
+    zt_idx = builder.measure_logical_once(circuit, z_t)
+
+    correlator_map: dict[str, list[int]] = {
+        "XX": [xx_idx],
+        "ZZ": [zz_idx],
+        "ZC": [zc_idx],
+        "ZT": [zt_idx],
+    }
+
+    return circuit, correlator_map
+
+# ---------------------------------------------------------------------------
 # CLI wrapper, mirroring memory_experiment.py
 # ---------------------------------------------------------------------------
 
@@ -268,7 +410,71 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Verbose output.",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["ler", "physics", "both"],
+        default="both",
+        help="Which experiment to run: logical error rate, physics correlators, or both.",
+    )
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Physics-mode experiment driver
+# ---------------------------------------------------------------------------
+
+def run_cnot_physics_experiment(
+    distance: int,
+    code_type: str,
+    rounds_pre: int | None,
+    rounds_merge: int | None,
+    rounds_post: int | None,
+    p_x: float,
+    p_z: float,
+    shots: int,
+    seed: int | None,
+    verbose: bool = False,
+):
+    """Top-level driver for Bell-state physics diagnostics.
+
+    Builds the lattice-surgery CNOT circuit, then samples it directly to
+    estimate logical Bell correlators such as X_C X_T and Z_C Z_T.
+    """
+    if rounds_pre is None:
+        rounds_pre = distance
+    if rounds_merge is None:
+        rounds_merge = distance
+    if rounds_post is None:
+        rounds_post = distance
+
+    circuit, correlator_map = build_cnot_surgery_circuit_physics(
+        distance=distance,
+        code_type=code_type,
+        p_x=p_x,
+        p_z=p_z,
+        rounds_pre=rounds_pre,
+        rounds_merge=rounds_merge,
+        rounds_post=rounds_post,
+        verbose=verbose,
+    )
+
+    mc_config = MonteCarloConfig(shots=shots, seed=seed)
+    phys_result = run_circuit_physics(
+        circuit=circuit,
+        correlator_map=correlator_map,
+        mc_config=mc_config,
+        keep_samples=False,
+        verbose=verbose,
+    )
+
+    print(f"{code_type} code of distance ={distance}")
+    print(f"shots={phys_result.shots}")
+    print(f"Physical error rates: p_x={p_x}, p_z={p_z}")
+    for name, value in phys_result.correlators.items():
+        print(f"⟨{name}⟩ = {value:.3f}")
+
+    return phys_result
 
 
 def run_cnot_experiment(
@@ -343,18 +549,34 @@ def run_cnot_experiment(
 
 def main() -> None:
     args = parse_args()
-    run_cnot_experiment(
-        distance=args.distance,
-        code_type=args.code_type,
-        rounds_pre=args.rounds_pre,
-        rounds_merge=args.rounds_merge,
-        rounds_post=args.rounds_post,
-        p_x=args.px,
-        p_z=args.pz,
-        shots=args.shots,
-        seed=args.seed,
-        verbose=args.verbose,
-    )
+
+    if args.mode in ("ler", "both"):
+        run_cnot_experiment(
+            distance=args.distance,
+            code_type=args.code_type,
+            rounds_pre=args.rounds_pre,
+            rounds_merge=args.rounds_merge,
+            rounds_post=args.rounds_post,
+            p_x=args.px,
+            p_z=args.pz,
+            shots=args.shots,
+            seed=args.seed,
+            verbose=args.verbose,
+        )
+
+    if args.mode in ("physics", "both"):
+        run_cnot_physics_experiment(
+            distance=args.distance,
+            code_type=args.code_type,
+            rounds_pre=args.rounds_pre,
+            rounds_merge=args.rounds_merge,
+            rounds_post=args.rounds_post,
+            p_x=args.px,
+            p_z=args.pz,
+            shots=args.shots,
+            seed=args.seed,
+            verbose=args.verbose,
+        )
 
 
 if __name__ == "__main__":

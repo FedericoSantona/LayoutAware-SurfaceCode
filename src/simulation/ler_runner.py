@@ -10,13 +10,7 @@ import pymatching as pm
 import stim
 
 from surface_code.stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig
-
-
-@dataclass
-class MonteCarloConfig:
-    shots: int = 5000
-    seed: Optional[int] = None
-
+from .montecarlo import MonteCarloConfig
 
 @dataclass
 class SimulationResult:

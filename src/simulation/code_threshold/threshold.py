@@ -12,7 +12,8 @@ from surface_code import (
     build_surface_code_model,
 )
 
-from ..runner import MonteCarloConfig, SimulationResult, run_logical_error_rate
+from ..ler_runner import SimulationResult, run_logical_error_rate
+from ..montecarlo import MonteCarloConfig
 
 
 @dataclass

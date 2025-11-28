@@ -233,3 +233,26 @@ def _align_logical_x_to_masked_z(
         if used_indices:
             print(f"[logical-align] stabilizer indices used (0-based): {[i for i,c in enumerate(coeffs) if c]}")
     return aligned
+
+
+
+def _multiply_paulis_disjoint(a: str, b: str) -> str:
+    """Multiply two Pauli strings assuming disjoint support (or identical chars).
+
+    This ignores overall phases and assumes that at each position either:
+      * one of a,b is 'I', or
+      * a == b.
+    """
+    if len(a) != len(b):
+        raise ValueError("Pauli strings must have the same length")
+    out = []
+    for ca, cb in zip(a, b):
+        if ca == 'I':
+            out.append(cb)
+        elif cb == 'I':
+            out.append(ca)
+        elif ca == cb:
+            out.append(ca)
+        else:
+            raise ValueError(f"Overlapping non-commuting Paulis at site: {ca}, {cb}")
+    return "".join(out)

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Dict
+
 
 from .layout import Layout, BoundaryType
 from .stim_builder import PhaseSpec  # or: from . import PhaseSpec, depending on your exports
 from .stabilizers import _commuting_boundary_mask
-from .logicals import _align_logical_x_to_masked_z
+from .logicals import _align_logical_x_to_masked_z, _multiply_paulis_disjoint
 
 
 @dataclass
@@ -27,6 +28,14 @@ class CNOTSpec:
     logical_z_control: str | None
     logical_x_target: str | None
     patch_logicals: dict[str, dict[str, str]]  # patch -> {'Z': ..., 'X': ...}
+    bell_observables: Dict[str, LogicalObservable] 
+
+@dataclass
+class LogicalObservable:
+    """Logical Pauli observable plus its (symbolic) Pauli-frame dependencies."""
+    name: str
+    pauli: str          # Pauli string on the combined code (I/X/Y/Z on all qubits)
+    frame_bits: List[str]  # symbolic labels for parity measurements that flip this observable
 
 
 class LatticeSurgery:
@@ -290,6 +299,30 @@ class LatticeSurgery:
                 patch_logicals[name]["X"] = x_emb
 
 
+        # Bell observables initialization 
+        ZC = patch_logicals[control]["Z"]
+        XC = patch_logicals[control]["X"]
+        ZT = patch_logicals[target]["Z"]
+        XT = patch_logicals[target]["X"]
+
+        # Bell stabilizers in the naive, pre-surgery picture
+        XX_pauli = _multiply_paulis_disjoint(XC, XT)
+        ZZ_pauli = _multiply_paulis_disjoint(ZC, ZT)
+
+        bell_observables: dict[str, LogicalObservable] = {
+            "XX": LogicalObservable(
+                name="XX",
+                pauli=XX_pauli,
+                frame_bits=[],  # to be filled in as you propagate
+            ),
+            "ZZ": LogicalObservable(
+                name="ZZ",
+                pauli=ZZ_pauli,
+                frame_bits=[],
+            ),
+}
+
+
         # Disjoint 3-patch memory stabilizers
         base_z, base_x = self.base_stabilizers(patches)
 
@@ -358,4 +391,5 @@ class LatticeSurgery:
             logical_z_control=logical_z_control,
             logical_x_target=logical_x_target,
             patch_logicals=patch_logicals,
+            bell_observables=bell_observables,
         )

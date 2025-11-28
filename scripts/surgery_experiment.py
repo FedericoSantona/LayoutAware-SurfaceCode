@@ -36,33 +36,6 @@ from surface_code import (
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate, run_circuit_physics
 
 
-# ---------------------------------------------------------------------------
-# Helper: multiply two Pauli strings on disjoint supports (no phases)
-# ---------------------------------------------------------------------------
-
-def _multiply_paulis_disjoint(a: str, b: str) -> str:
-    """Multiply two Pauli strings assuming disjoint support (or identical chars).
-
-    This ignores overall phases and assumes that at each position either:
-      * one of a,b is 'I', or
-      * a == b.
-    """
-    if len(a) != len(b):
-        raise ValueError("Pauli strings must have the same length")
-    out = []
-    for ca, cb in zip(a, b):
-        if ca == 'I':
-            out.append(cb)
-        elif cb == 'I':
-            out.append(ca)
-        elif ca == cb:
-            out.append(ca)
-        else:
-            raise ValueError(f"Overlapping non-commuting Paulis at site: {ca}, {cb}")
-    return "".join(out)
-
-
-
 
 
 def build_cnot_surgery_circuit(
@@ -281,6 +254,7 @@ def build_cnot_surgery_circuit_physics(
 
     phases = cnot_spec.phases
     patch_logicals = cnot_spec.patch_logicals
+    bell_obs = cnot_spec.bell_observables
 
     circuit = stim.Circuit()
 
@@ -326,19 +300,9 @@ def build_cnot_surgery_circuit_physics(
         config=stim_config,
     )
 
-   # ------------------------------------------------------------------
-    # Final logical measurements for Bell diagnostics
-    # ------------------------------------------------------------------
-    z_c = patch_logicals["C"].get("Z")
-    z_t = patch_logicals["T"].get("Z")
-    x_c = patch_logicals["C"].get("X")
-    x_t = patch_logicals["T"].get("X")
-
-    if z_c is None or z_t is None or x_c is None or x_t is None:
-        raise ValueError("Missing logical X/Z operators for C or T")
-
-    xx_logical = _multiply_paulis_disjoint(x_c, x_t)
-    zz_logical = _multiply_paulis_disjoint(z_c, z_t)
+    # Bell stabilizers 
+    xx_logical = bell_obs["XX"].pauli
+    zz_logical = bell_obs["ZZ"].pauli
 
     circuit.append_operation("TICK")
     xx_idx = builder.measure_logical_once(circuit, xx_logical)
@@ -346,20 +310,11 @@ def build_cnot_surgery_circuit_physics(
     circuit.append_operation("TICK")
     zz_idx = builder.measure_logical_once(circuit, zz_logical)
 
-    # Also measure single-qubit logicals if you want marginals
-    circuit.append_operation("TICK")
-    zc_idx = builder.measure_logical_once(circuit, z_c)
-
-    circuit.append_operation("TICK")
-    zt_idx = builder.measure_logical_once(circuit, z_t)
-
     correlator_map: dict[str, list[int]] = {
-        "XX": [xx_idx],
-        "ZZ": [zz_idx],
-        "ZC": [zc_idx],
-        "ZT": [zt_idx],
-    }
-
+    "XX": [xx_idx],
+    "ZZ": [zz_idx],
+}
+   
     return circuit, correlator_map
 
 # ---------------------------------------------------------------------------

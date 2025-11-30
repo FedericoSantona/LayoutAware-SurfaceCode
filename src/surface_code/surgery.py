@@ -257,12 +257,13 @@ class LatticeSurgery:
             chars[q_r] = "Z"
             z_merge.append("".join(chars))
 
+        
         # Explicitly include the logical Z parity Z_L(left) * Z_L(right) as a stabilizer
         if self.logical_z_single is not None:
             z_left = self._embed_patch(self.logical_z_single, left)
             z_right = self._embed_patch(self.logical_z_single, right)
             z_merge.append(_multiply_paulis_disjoint(z_left, z_right))
-
+        
         return z_merge, x_merge
 
     def _rough_merge_stabilizers(
@@ -311,11 +312,13 @@ class LatticeSurgery:
             chars[q_r] = "X"
             x_merge.append("".join(chars))
 
+        
         # Explicitly include the logical X parity X_L(left) * X_L(right) as a stabilizer
         if logical_x_aligned is not None:
             x_left = self._embed_patch(logical_x_aligned, left)
             x_right = self._embed_patch(logical_x_aligned, right)
             x_merge.append(_multiply_paulis_disjoint(x_left, x_right))
+        
 
         return z_merge, x_merge, logical_x_aligned
 
@@ -443,7 +446,9 @@ class LatticeSurgery:
 
         # Build phase list
         phases: List[PhaseSpec] = [
-            PhaseSpec("pre-merge", base_z + all_seam_z, base_x + all_seam_x, rounds_pre),
+            PhaseSpec("pre-merge", base_z + all_seam_z,
+                base_x + all_seam_x,
+                rounds_pre),
             PhaseSpec(
                 f"{control}+{ancilla} smooth merge",
                 smooth_merge_z,
@@ -472,7 +477,9 @@ class LatticeSurgery:
                 base_x + all_seam_x,
                 rounds_merge,
             ),
-            PhaseSpec("post-merge", base_z + all_seam_z, base_x + all_seam_x, rounds_post),
+            PhaseSpec("post-merge", base_z + all_seam_z,
+                base_x + all_seam_x,
+                rounds_post),
         ]
 
         # Embedded logical observables

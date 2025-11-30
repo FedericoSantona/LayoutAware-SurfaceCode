@@ -32,6 +32,7 @@ from surface_code import (
     SeamSpec,
     LatticeSurgery,
     stabs_to_symplectic,
+    _multiply_paulis_disjoint,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate, run_circuit_physics
 
@@ -87,6 +88,7 @@ def _symplectic_product(a: list[int], b: list[int]) -> int:
     return (sum(az[i] & bx[i] for i in range(n)) + sum(ax[i] & bz[i] for i in range(n))) & 1
 
 
+
 def _add_to_basis(basis: list[list[int]], vec: list[int]) -> bool:
     """Gaussian-eliminate vec into basis in-place. Return True iff it increases rank."""
     if not basis:
@@ -111,9 +113,239 @@ def _add_to_basis(basis: list[list[int]], vec: list[int]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Additional symplectic helpers for stabilizer basis and Pauli equivalence
+# ---------------------------------------------------------------------------
+def _build_stab_basis_from_symplectic(S) -> list[list[int]]:
+    """Build a row-echelon-like basis for the stabilizer span from a symplectic matrix S."""
+    basis: list[list[int]] = []
+    for row in S:
+        row_vec = [int(b) for b in row]
+        _add_to_basis(basis, row_vec)
+    return basis
+
+
+def _reduce_vec_by_basis(vec: list[int], basis: list[list[int]]) -> list[int]:
+    """Reduce a vector modulo the span of 'basis' (Gaussian elimination in GF(2))."""
+    if not basis:
+        return vec.copy()
+
+    v = vec.copy()
+    leads: list[int | None] = []
+    for b in basis:
+        lead = next((i for i, bit in enumerate(b) if bit), None)
+        leads.append(lead)
+
+    for lead, b in sorted(zip(leads, basis), key=lambda t: (t[0] is None, t[0])):
+        if lead is None:
+            continue
+        if v[lead]:
+            v = [vi ^ bi for vi, bi in zip(v, b)]
+    return v
+
+
+
+def _equivalent_mod_basis(pa: str, pb: str, basis: list[list[int]]) -> bool:
+    """Return True iff pa and pb differ by a product of stabilizers spanning 'basis'."""
+    v_a = _pauli_str_to_vec(pa)
+    v_b = _pauli_str_to_vec(pb)
+    v_diff = [ai ^ bi for ai, bi in zip(v_a, v_b)]
+    v_red = _reduce_vec_by_basis(v_diff, basis)
+    return not any(v_red)
+
+
+# ---------------------------------------------------------------------------
+# Canonicalize logicals modulo a stabilizer basis
+# ---------------------------------------------------------------------------
+def _canonicalize_logical(pauli: str, stab_basis: list[list[int]]) -> str:
+    """Return a canonical representative of `pauli` modulo the stabilizer span.
+
+    The returned Pauli is equivalent to the input up to multiplication by
+    stabilizers whose symplectic vectors span `stab_basis`.
+    """
+    v = _pauli_str_to_vec(pauli)
+    v_red = _reduce_vec_by_basis(v, stab_basis)
+    return _vec_to_pauli_str(v_red)
+
+
+# ---------------------------------------------------------------------------
+# GF(2) matrix inversion and logical-basis diagnostic helpers
+# ---------------------------------------------------------------------------
+def _gf2_matrix_inverse(M: list[list[int]]) -> list[list[int]]:
+    """Invert a square matrix over GF(2).
+
+    M is given as a list of rows. Raises ValueError if the matrix is
+    not invertible.
+    """
+    n = len(M)
+    if any(len(row) != n for row in M):
+        raise ValueError("Matrix must be square for GF(2) inversion.")
+
+    # Build augmented matrix [M | I]
+    aug: list[list[int]] = []
+    for i, row in enumerate(M):
+        aug.append(list(row) + [1 if i == j else 0 for j in range(n)])
+
+    # Gaussian elimination over GF(2).
+    for col in range(n):
+        # Find a pivot row with a 1 in this column.
+        pivot = None
+        for r in range(col, n):
+            if aug[r][col]:
+                pivot = r
+                break
+        if pivot is None:
+            raise ValueError("Matrix is not invertible over GF(2).")
+
+        # Swap pivot row into place.
+        if pivot != col:
+            aug[col], aug[pivot] = aug[pivot], aug[col]
+
+        # Eliminate this column in all other rows.
+        for r in range(n):
+            if r == col:
+                continue
+            if aug[r][col]:
+                aug[r] = [a ^ b for a, b in zip(aug[r], aug[col])]
+
+    # Extract the right-half as the inverse.
+    inv = [row[n:] for row in aug]
+    return inv
+
+
+def _diagnose_post_merge_mapping(
+    stab_basis: list[list[int]],
+    patch_logicals: dict[str, dict[str, str]],
+    verbose: bool = True,
+) -> None:
+    """Diagnostic: build a 3-qubit logical basis and express prep operators in it.
+
+    Steps:
+      1. Take canonical patch logicals for C, INT, T in X/Z.
+      2. Use a small symplectic Gram–Schmidt on their span to build
+         a logical basis {X1, Z1, X2, Z2, X3, Z3}.
+      3. Express the prep operators (X_C, X_INT, Z_T) in that basis.
+
+    This does *not* affect the circuit or correlators; it only prints
+    information when verbose=True to help understand where the Bell
+    pair actually lives in the 3-logical-qubit space.
+    """
+    # 1) Canonicalize patch logicals modulo the post-merge stabilizer span.
+    labels_order = ["C_X", "C_Z", "INT_X", "INT_Z", "T_X", "T_Z"]
+    canonical: dict[str, str] = {}
+    for patch in ["C", "INT", "T"]:
+        for basis in ["X", "Z"]:
+            key = f"{patch}_{basis}"
+            pauli = patch_logicals.get(patch, {}).get(basis)
+            if pauli is None:
+                raise ValueError(f"Missing logical {basis} for patch {patch}")
+            canonical[key] = _canonicalize_logical(pauli, stab_basis)
+
+    vecs: list[list[int]] = [_pauli_str_to_vec(canonical[label]) for label in labels_order]
+    m = len(vecs)  # Should be 6 for 3 logical qubits.
+
+    # 2) Symplectic Gram–Schmidt on the span of these 6 logicals.
+    # We work in the coordinate space over the original 6 patch-logical
+    # generators. coords[i] gives the GF(2)^6 coefficients of the i-th
+    # current vector in terms of the original [C_X, C_Z, INT_X, INT_Z, T_X, T_Z].
+    coords: list[list[int]] = [[1 if j == i else 0 for j in range(m)] for i in range(m)]
+    cur_vecs: list[list[int]] = [v[:] for v in vecs]
+    used = [False] * m
+    pairs: list[tuple[int, int]] = []
+
+    for i in range(m):
+        if used[i]:
+            continue
+        partner = None
+        for j in range(i + 1, m):
+            if used[j]:
+                continue
+            if _symplectic_product(cur_vecs[i], cur_vecs[j]):
+                partner = j
+                break
+        if partner is None:
+            # No partner with symplectic product 1; skip.
+            continue
+
+        p = i
+        q = partner
+        used[p] = True
+        used[q] = True
+
+        # Orthogonalise remaining vectors against this pair so they commute
+        # with both new logical generators.
+        for k in range(m):
+            if used[k] or k == p or k == q:
+                continue
+            # If w anticommutes with p, add q.
+            if _symplectic_product(cur_vecs[k], cur_vecs[p]):
+                for t in range(m):
+                    coords[k][t] ^= coords[q][t]
+                cur_vecs[k] = [a ^ b for a, b in zip(cur_vecs[k], cur_vecs[q])]
+            # If w anticommutes with q, add p.
+            if _symplectic_product(cur_vecs[k], cur_vecs[q]):
+                for t in range(m):
+                    coords[k][t] ^= coords[p][t]
+                cur_vecs[k] = [a ^ b for a, b in zip(cur_vecs[k], cur_vecs[p])]
+
+        pairs.append((p, q))
+
+    if verbose:
+        if len(pairs) != 3:
+            print(f"[diagnostic] Warning: expected 3 logical pairs, found {len(pairs)}")
+
+    # 3) Build the abstract logical basis {X1, Z1, X2, Z2, X3, Z3}.
+    basis_labels: list[str] = []
+    basis_phys: list[list[int]] = []
+    basis_coords: list[list[int]] = []
+
+    for idx, (p, q) in enumerate(pairs):
+        basis_labels.append(f"X{idx + 1}")
+        basis_phys.append(cur_vecs[p])
+        basis_coords.append(coords[p][:])
+
+        basis_labels.append(f"Z{idx + 1}")
+        basis_phys.append(cur_vecs[q])
+        basis_coords.append(coords[q][:])
+
+    if len(basis_labels) != 6:
+        # If something went wrong, bail out early.
+        if verbose:
+            print("[diagnostic] Incomplete logical basis; skipping mapping.")
+        return
+
+    # Build the 6x6 matrix A whose rows are the coefficients of the new
+    # logical basis elements in terms of the original patch-logical basis.
+    A: list[list[int]] = [row[:] for row in basis_coords]
+    A_inv = _gf2_matrix_inverse(A)
+
+    # 4) Print human-readable info.
+    if verbose:
+        print("[diagnostic] Logical basis from canonical patch operators:")
+        for lbl, vec in zip(basis_labels, basis_phys):
+            print(f"  {lbl}: {_vec_to_pauli_str(vec)}")
+
+        # Prep operators correspond to original basis vectors:
+        #   C_X   -> index 0
+        #   INT_X -> index 2
+        #   T_Z   -> index 5
+        prep_specs = [
+            ("X_C (prep)", 0),
+            ("X_INT (prep)", 2),
+            ("Z_T (prep)", 5),
+        ]
+        print("[diagnostic] Prep operators expressed in {X1,Z1,X2,Z2,X3,Z3}:")
+        for name, j in prep_specs:
+            # For old-basis vector e_j, its coordinates in the new logical
+            # basis are the j-th column of A_inv.
+            coeffs = [A_inv[row][j] for row in range(len(A_inv))]
+            terms = [basis_labels[r] for r, c in enumerate(coeffs) if c]
+            comb_str = " * ".join(terms) if terms else "I"
+            print(f"  {name}: {comb_str}")
+
+
 def _propagate_logicals_through_measurements(
     *,
-    n_total: int,
     logicals: dict[str, str],
     meas_meta: dict[int, dict],
 ) -> tuple[dict[str, str], dict[str, list[int]]]:
@@ -355,14 +587,63 @@ def build_cnot_surgery_circuit_physics(
 
     phases = cnot_spec.phases
     patch_logicals = cnot_spec.patch_logicals
-    bell_obs = cnot_spec.bell_observables
+
+    # ------------------------------------------------------------------
+    # Build symplectic stabilizer basis for the post-merge phase.
+    # This will be used to derive Bell operators via the final code's
+    # stabilizer algebra.
+    # ------------------------------------------------------------------
+    post_phase = None
+    for ph in phases:
+        if ph.name.endswith("post-merge") or ph.name == "post-merge":
+            post_phase = ph
+            break
+
+    stab_basis: list[list[int]] | None = None
+    if post_phase is not None:
+        S_post = stabs_to_symplectic(post_phase.z_stabilizers, post_phase.x_stabilizers)
+        stab_basis = _build_stab_basis_from_symplectic(S_post)
+        if verbose:
+            n_total = layout.n_total
+            k_post = n_total - len(stab_basis)
+            print(f"[debug] post-merge stabilizer rank = {len(stab_basis)}, k = {k_post}")
+    else:
+        raise ValueError("[debug] WARNING: no 'post-merge' phase found; symplectic final Bell operators not found.")
+
+    # Optional diagnostic: understand how the prepared logicals map
+    # into a 3-qubit logical basis after surgery.
+    if verbose and stab_basis is not None:
+        _diagnose_post_merge_mapping(stab_basis, patch_logicals, verbose=verbose)
+
+    # ------------------------------------------------------------------
+    # Build Bell seeds from *canonical* post-merge logicals.
+    # We start from the control/target patch logicals and reduce them
+    # modulo the post-merge stabilizer span to obtain canonical
+    # representatives \tilde X_C, \tilde Z_C, \tilde X_T, \tilde Z_T.
+    # ------------------------------------------------------------------
+    XC_pre = patch_logicals["C"]["X"]
+    XT_pre = patch_logicals["T"]["X"]
+    ZC_pre = patch_logicals["C"]["Z"]
+    ZT_pre = patch_logicals["T"]["Z"]
+
+    XC = _canonicalize_logical(XC_pre, stab_basis)
+    XT = _canonicalize_logical(XT_pre, stab_basis)
+    ZC = _canonicalize_logical(ZC_pre, stab_basis)
+    ZT = _canonicalize_logical(ZT_pre, stab_basis)
+
+    # Bell stabilizers in the post-merge logical picture
+    XX_seed = _multiply_paulis_disjoint(XC, XT)
+    ZZ_seed = _multiply_paulis_disjoint(ZC, ZT)
 
     if verbose:
-        print("[physics] Bell observables:")
-        for name, obs in bell_obs.items():
-            print(f"  {name}:")
-            print(f"    pauli: {obs.pauli}")
-            print(f"    frame_bits: {obs.frame_bits}")
+        print("[physics] Canonical post-merge logicals:")
+        print("  X_C:", XC)
+        print("  Z_C:", ZC)
+        print("  X_T:", XT)
+        print("  Z_T:", ZT)
+        print("[physics] Bell seeds (canonical):")
+        print("  XX_seed:", XX_seed)
+        print("  ZZ_seed:", ZZ_seed)
 
     circuit = stim.Circuit()
 
@@ -408,17 +689,16 @@ def build_cnot_surgery_circuit_physics(
         config=stim_config,
     )
 
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Derive Bell observables and Pauli-frame dependencies by propagating
     # the initial Bell operators through the measured stabilizers.
     # ------------------------------------------------------------------
     tracked_ops = {
-        "XX": bell_obs["XX"].pauli,
-        "ZZ": bell_obs["ZZ"].pauli,
+        "XX": XX_seed,
+        "ZZ": ZZ_seed,
     }
 
     final_ops, deps = _propagate_logicals_through_measurements(
-        n_total=n_total,
         logicals=tracked_ops,
         meas_meta=builder._meas_meta,
     )
@@ -427,11 +707,12 @@ def build_cnot_surgery_circuit_physics(
     zz_logical = final_ops["ZZ"]
 
     frame_xx = deps["XX"]   # all measurement indices whose bits must be included for XX
-    frame_zz = deps["ZZ"]
+    frame_zz = deps["ZZ"]   # all measurement indices whose bits must be included for ZZ
 
     if verbose:
         print("[physics] frame_xx indices:", frame_xx)
         print("[physics] frame_zz indices:", frame_zz)
+
 
     # Measure the derived Bell operators
     circuit.append_operation("TICK")

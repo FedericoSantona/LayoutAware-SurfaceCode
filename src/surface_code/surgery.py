@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Dict
+from typing import List, Sequence, Tuple
 
 
 from .layout import Layout, BoundaryType
@@ -32,14 +32,6 @@ class CNOTSpec:
     logical_z_control: str | None
     logical_x_target: str | None
     patch_logicals: dict[str, dict[str, str]]  # patch -> {'Z': ..., 'X': ...}
-    bell_observables: Dict[str, LogicalObservable] 
-
-@dataclass
-class LogicalObservable:
-    """Logical Pauli observable plus its (symbolic) Pauli-frame dependencies."""
-    name: str
-    pauli: str          # Pauli string on the combined code (I/X/Y/Z on all qubits)
-    frame_bits: List[str]  # symbolic labels for parity measurements that flip this observable
 
 
 class LatticeSurgery:
@@ -133,43 +125,6 @@ class LatticeSurgery:
 
         return base_z, base_x
 
-    def _annotate_bell_frame(
-        self,
-        bell_observables: Dict[str, LogicalObservable],
-        control: str,
-        ancilla: str,
-        target: str,
-    ) -> Dict[str, LogicalObservable]:
-        """Attach *symbolic* Pauli-frame dependencies to XX and ZZ.
-
-        Teleportation-style CNOT byproducts:
-          * The smooth-merge Z measurement (Z_C Z_anc + seam) flips X-type
-            frame signs → it must dress the XX Bell stabilizer.
-          * The rough-merge X measurement (X_anc X_T + seam) flips Z-type
-            frame signs → it must dress the ZZ Bell stabilizer.
-
-        We therefore record that:
-          * XX depends on the smooth Z seam + logical Z parity between
-            `control` and `ancilla`.
-          * ZZ depends on the rough X seam + logical X parity between
-            `ancilla` and `target`.
-
-        These labels are resolved later to actual measurement indices.
-        """
-        zz = bell_observables.get("ZZ")
-        xx = bell_observables.get("XX")
-
-        if xx is not None:
-            # XX gets the *Z-type* frame bits from the smooth merge.
-            xx.frame_bits.append(f"SMOOTH_Z_SEAM:{control}:{ancilla}")
-            xx.frame_bits.append(f"LOGICAL_Z_PARITY:{control}:{ancilla}")
-
-        if zz is not None:
-            # ZZ gets the *X-type* frame bits from the rough merge.
-            zz.frame_bits.append(f"ROUGH_X_SEAM:{ancilla}:{target}")
-            zz.frame_bits.append(f"LOGICAL_X_PARITY:{ancilla}:{target}")
-
-        return bell_observables
 
     # ------------------------------------------------------------------
     # Internal masking helper shared by smooth/rough merges
@@ -393,35 +348,6 @@ class LatticeSurgery:
                 patch_logicals[name]["X"] = x_emb
 
 
-        # Bell observables initialization 
-        ZC = patch_logicals[control]["Z"]
-        XC = patch_logicals[control]["X"]
-        ZT = patch_logicals[target]["Z"]
-        XT = patch_logicals[target]["X"]
-
-        # Bell stabilizers in the naive, pre-surgery picture
-        XX_pauli = _multiply_paulis_disjoint(XC, XT)
-        ZZ_pauli = _multiply_paulis_disjoint(ZC, ZT)
-
-        bell_observables: dict[str, LogicalObservable] = {
-            "XX": LogicalObservable(
-                name="XX",
-                pauli=XX_pauli,
-                frame_bits=[],  # to be filled in as you propagate
-            ),
-            "ZZ": LogicalObservable(
-                name="ZZ",
-                pauli=ZZ_pauli,
-                frame_bits=[],
-            ),
-}
-        # Attach symbolic frame information (no indices yet)
-        bell_observables = self._annotate_bell_frame(
-            bell_observables,
-            control=control,
-            ancilla=ancilla,
-            target=target,
-        )
 
         # Disjoint 3-patch memory stabilizers
         base_z, base_x = self._base_stabilizers(patches)
@@ -514,5 +440,4 @@ class LatticeSurgery:
             logical_z_control=logical_z_control,
             logical_x_target=logical_x_target,
             patch_logicals=patch_logicals,
-            bell_observables=bell_observables,
         )

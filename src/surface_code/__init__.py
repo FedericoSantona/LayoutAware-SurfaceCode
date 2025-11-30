@@ -2,10 +2,10 @@
 
 from .model import SurfaceCodeModel
 from .layout import Layout, SeamSpec
-from .logicals import _multiply_paulis_disjoint
 from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig, PhaseSpec
-from .surgery import LatticeSurgery
 from .stabilizers import stabs_to_symplectic
+from .logicals import _multiply_paulis_disjoint
+from .surgery import LatticeSurgery
 from .geometry_utils import (
     find_boundary_data_qubits,
     find_rough_boundary_data_qubits,
@@ -79,6 +79,6 @@ __all__ = [
     "_align_logical_x_to_masked_z",
     "_commuting_boundary_mask",
     "LatticeSurgery",
-    "_multiply_paulis_disjoint",
     "stabs_to_symplectic",
+    "_multiply_paulis_disjoint",
 ]

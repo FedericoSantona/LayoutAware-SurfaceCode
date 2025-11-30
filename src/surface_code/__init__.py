@@ -5,6 +5,7 @@ from .layout import Layout, SeamSpec
 from .logicals import _multiply_paulis_disjoint
 from .stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig, PhaseSpec
 from .surgery import LatticeSurgery
+from .stabilizers import stabs_to_symplectic
 from .geometry_utils import (
     find_boundary_data_qubits,
     find_rough_boundary_data_qubits,
@@ -79,4 +80,5 @@ __all__ = [
     "_commuting_boundary_mask",
     "LatticeSurgery",
     "_multiply_paulis_disjoint",
+    "stabs_to_symplectic",
 ]

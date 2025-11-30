@@ -31,9 +31,115 @@ from surface_code import (
     Layout,
     SeamSpec,
     LatticeSurgery,
-    _multiply_paulis_disjoint,
+    stabs_to_symplectic,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate, run_circuit_physics
+
+
+# ---------------------------------------------------------------------------
+# Small symplectic helpers for Pauli-frame tracking
+# ---------------------------------------------------------------------------
+
+def _pauli_str_to_vec(pauli: str) -> list[int]:
+    """Convert Pauli string (I/X/Y/Z) to GF(2) symplectic vector [Z | X]."""
+    z = []
+    x = []
+    for c in pauli:
+        if c == "I":
+            z.append(0)
+            x.append(0)
+        elif c == "Z":
+            z.append(1)
+            x.append(0)
+        elif c == "X":
+            z.append(0)
+            x.append(1)
+        elif c == "Y":
+            z.append(1)
+            x.append(1)
+        else:
+            raise ValueError(f"Unknown Pauli character {c}")
+    return z + x
+
+
+def _vec_to_pauli_str(vec: list[int]) -> str:
+    """Convert a symplectic vector back to a Pauli string (ignoring phase)."""
+    n = len(vec) // 2
+    z, x = vec[:n], vec[n:]
+    out = []
+    for zi, xi in zip(z, x):
+        if zi and xi:
+            out.append("Y")
+        elif zi:
+            out.append("Z")
+        elif xi:
+            out.append("X")
+        else:
+            out.append("I")
+    return "".join(out)
+
+
+def _symplectic_product(a: list[int], b: list[int]) -> int:
+    n = len(a) // 2
+    az, ax = a[:n], a[n:]
+    bz, bx = b[:n], b[n:]
+    # (a_Z · b_X + a_X · b_Z) mod 2
+    return (sum(az[i] & bx[i] for i in range(n)) + sum(ax[i] & bz[i] for i in range(n))) & 1
+
+
+def _add_to_basis(basis: list[list[int]], vec: list[int]) -> bool:
+    """Gaussian-eliminate vec into basis in-place. Return True iff it increases rank."""
+    if not basis:
+        if any(vec):
+            basis.append(vec.copy())
+            return True
+        return False
+
+    v = vec.copy()
+    leads: list[int | None] = []
+    for b in basis:
+        lead = next((i for i, bit in enumerate(b) if bit), None)
+        leads.append(lead)
+    for lead, b in sorted(zip(leads, basis), key=lambda t: (t[0] is None, t[0])):
+        if lead is None:
+            continue
+        if v[lead]:
+            v = [vi ^ bi for vi, bi in zip(v, b)]
+    if any(v):
+        basis.append(v)
+        return True
+    return False
+
+
+def _propagate_logicals_through_measurements(
+    *,
+    n_total: int,
+    logicals: dict[str, str],
+    meas_meta: dict[int, dict],
+) -> tuple[dict[str, str], dict[str, list[int]]]:
+    """Track how measurements flip logicals and return dependencies per logical.
+
+    We process measurements in circuit order (sorted by index). Whenever a
+    logical Pauli anticommutes with a measured Pauli, that measurement outcome
+    flips the logical eigenvalue. To keep tracking consistent, we multiply the
+    logical by the measured Pauli so it commutes going forward.
+    """
+    logical_vecs = {name: _pauli_str_to_vec(p) for name, p in logicals.items()}
+    deps: dict[str, list[int]] = {name: [] for name in logicals}
+
+    for idx in sorted(meas_meta):
+        p_str = meas_meta[idx].get("pauli")
+        if p_str is None:
+            continue
+        p_vec = _pauli_str_to_vec(p_str)
+
+        for name, l_vec in list(logical_vecs.items()):
+            if _symplectic_product(l_vec, p_vec):
+                deps[name].append(idx)
+                logical_vecs[name] = [a ^ b for a, b in zip(l_vec, p_vec)]
+
+    final_logicals = {name: _vec_to_pauli_str(vec) for name, vec in logical_vecs.items()}
+    return final_logicals, deps
 
 
 
@@ -302,162 +408,75 @@ def build_cnot_surgery_circuit_physics(
         config=stim_config,
     )
 
-    # Bell stabilizers 
-    xx_logical = bell_obs["XX"].pauli
-    zz_logical = bell_obs["ZZ"].pauli
+        # ------------------------------------------------------------------
+    # Derive Bell observables and Pauli-frame dependencies by propagating
+    # the initial Bell operators through the measured stabilizers.
+    # ------------------------------------------------------------------
+    tracked_ops = {
+        "XX": bell_obs["XX"].pauli,
+        "ZZ": bell_obs["ZZ"].pauli,
+    }
 
+    final_ops, deps = _propagate_logicals_through_measurements(
+        n_total=n_total,
+        logicals=tracked_ops,
+        meas_meta=builder._meas_meta,
+    )
+
+    xx_logical = final_ops["XX"]
+    zz_logical = final_ops["ZZ"]
+
+    frame_xx = deps["XX"]   # all measurement indices whose bits must be included for XX
+    frame_zz = deps["ZZ"]
+
+    if verbose:
+        print("[physics] frame_xx indices:", frame_xx)
+        print("[physics] frame_zz indices:", frame_zz)
+
+    # Measure the derived Bell operators
     circuit.append_operation("TICK")
     xx_idx = builder.measure_logical_once(circuit, xx_logical)
 
     circuit.append_operation("TICK")
     zz_idx = builder.measure_logical_once(circuit, zz_logical)
 
-
     # --------------------------------------------------------------
-    # Resolve symbolic frame_bits into measurement indices
-    # --------------------------------------------------------------
-
-    def _collect_phase_indices(
-        pauli_strings: list[str],
-        *,
-        family: str,
-        phase_name: str,
-    ) -> list[int]:
-        """For each Pauli in pauli_strings, find the last-round measurement index
-        in builder._meas_meta with matching family and phase."""
-        out: list[int] = []
-        for p in pauli_strings:
-            candidates: list[tuple[int, int]] = []
-            for idx, meta in builder._meas_meta.items():
-                if (
-                    meta.get("pauli") == p
-                    and meta.get("family") == family
-                    and meta.get("phase") == phase_name
-                ):
-                    candidates.append((idx, meta["round"]))
-            if not candidates:
-                print(f"[physics] WARNING: no measurement found for {p!r} in {phase_name!r}")
-                continue
-            best_idx = max(candidates, key=lambda t: t[1])[0]
-            out.append(best_idx)
-        return out
-
-    def resolve_frame_bits(labels: list[str]) -> list[int]:
-        """Map symbolic frame bit labels from LogicalObservable.frame_bits
-        to concrete measurement indices via layout + builder._meas_meta."""
-        indices: list[int] = []
-
-        for label in labels:
-            kind, left, right = label.split(":")
-
-            if kind == "SMOOTH_Z_SEAM":
-                # triple-Z seam checks in smooth C–INT merge
-                boundary_left = layout.boundary_qubits[left]["smooth"]
-                boundary_right = layout.boundary_qubits[right]["smooth"]
-                seam = layout.get_seam_qubits(left, right)
-
-                paulis: list[str] = []
-                for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
-                    chars = ["I"] * n_total
-                    chars[q_l] = "Z"
-                    chars[q_sea] = "Z"
-                    chars[q_r] = "Z"
-                    paulis.append("".join(chars))
-
-                phase_name = f"{left}+{right} smooth merge"
-                indices.extend(
-                    _collect_phase_indices(paulis, family="Z", phase_name=phase_name)
-                )
-
-            elif kind == "ROUGH_X_SEAM":
-                # triple-X seam checks in rough INT–T merge
-                boundary_left = layout.boundary_qubits[left]["rough"]
-                boundary_right = layout.boundary_qubits[right]["rough"]
-                seam = layout.get_seam_qubits(left, right)
-
-                paulis: list[str] = []
-                for q_l, q_r, q_sea in zip(boundary_left, boundary_right, seam):
-                    chars = ["I"] * n_total
-                    chars[q_l] = "X"
-                    chars[q_sea] = "X"
-                    chars[q_r] = "X"
-                    paulis.append("".join(chars))
-
-                phase_name = f"{left}+{right} rough merge"
-                indices.extend(
-                    _collect_phase_indices(paulis, family="X", phase_name=phase_name)
-                )
-
-            elif kind == "LOGICAL_Z_PARITY":
-                # The stabilizer Z_L(left) Z_L(right) measured in the smooth merge window
-                local_z = surgery.single_model.logical_z
-                if local_z is None:
-                    if verbose:
-                        print("[physics] WARNING: no logical Z defined on single patch")
-                    continue
-                z_left = surgery._embed_patch(local_z, left)
-                z_right = surgery._embed_patch(local_z, right)
-                parity_pauli = _multiply_paulis_disjoint(z_left, z_right)
-
-                phase_name = f"{left}+{right} smooth merge"
-                indices.extend(
-                    _collect_phase_indices([parity_pauli], family="Z", phase_name=phase_name)
-                )
-
-            elif kind == "LOGICAL_X_PARITY":
-                # The stabilizer X_L(left) X_L(right) measured in the rough merge window.
-                # Use the same aligned logical X representative the surgery code uses.
-                local_x = surgery.single_model.logical_x
-                if local_x is None:
-                    if verbose:
-                        print("[physics] WARNING: no logical X defined on single patch")
-                    continue
-                x_left = surgery._embed_patch(local_x, left)
-                x_right = surgery._embed_patch(local_x, right)
-                parity_pauli = _multiply_paulis_disjoint(x_left, x_right)
-
-                phase_name = f"{left}+{right} rough merge"
-                indices.extend(
-                    _collect_phase_indices([parity_pauli], family="X", phase_name=phase_name)
-                )
-
-            else:
-                if verbose:
-                    print(f"[physics] WARNING: unknown frame bit label {label!r}")
-                continue
-
-        return indices
-
-        # Resolve frame bits for XX and ZZ coming from the merge windows
-    frame_xx = resolve_frame_bits(bell_obs["XX"].frame_bits)
-    frame_zz = resolve_frame_bits(bell_obs["ZZ"].frame_bits)
-
-    if verbose:
-        print("[physics] frame_xx indices:", frame_xx)
-        print("[physics] frame_zz indices:", frame_zz)
-
-    # --------------------------------------------------------------
-    # Include initial logical measurements in the Pauli frame
-    # --------------------------------------------------------------
-    # By construction:
-    #   * We measured X_C at init_indices["C"] to "prepare" C in X-basis.
-    #   * We measured Z_T at init_indices["T"] to "prepare" T in Z-basis.
+    # Build dressed Bell correlators including prep measurements.
     #
-    # These are random ±1 but *known per shot*, so they must be part of the
-    # dressed Bell stabilizers.
+    # By design of build_cnot_surgery_circuit_physics we prepared:
+    #   * C in X basis  -> logical X_C measured at init_indices["C"]
+    #   * INT in X basis -> logical X_INT measured at init_indices["INT"]
+    #   * T in Z basis  -> logical Z_T measured at init_indices["T"]
+    #
+    # These prep measurements are random ±1 per shot but known, so they
+    # must be included in the logical Bell stabilizers in order to
+    # cancel the preparation randomness. They do *not* appear in the
+    # propagated frame_xx / frame_zz lists because they commute with
+    # XX / ZZ and therefore do not flip the Bell eigenvalues.
+    #
+    # We therefore define:
+    #   XX_dressed = X_C(init) * X_INT(init) * (frame_xx bits) * XX_final
+    #   ZZ_dressed = Z_T(init) * (frame_zz bits) * ZZ_final
+    # --------------------------------------------------------------
     xx_indices: list[int] = []
+    # Initial X prep on control and ancilla
     if init_indices.get("C") is not None:
-        xx_indices.append(init_indices["C"])   # X_C^{init} factor
+        xx_indices.append(init_indices["C"])
     if init_indices.get("INT") is not None:
-        xx_indices.append(init_indices["INT"]) # X_INT^{init} factor
-    xx_indices.extend(frame_xx)                # rough seam X parities
-    xx_indices.append(xx_idx)                  # final X_C X_T
+        xx_indices.append(init_indices["INT"])
+    # Pauli-frame bits found by propagation
+    xx_indices.extend(frame_xx)
+    # Final XX Bell measurement
+    xx_indices.append(xx_idx)
 
     zz_indices: list[int] = []
+    # Initial Z prep on target
     if init_indices.get("T") is not None:
-        zz_indices.append(init_indices["T"])   # Z_T^{init} factor
-    zz_indices.extend(frame_zz)                # smooth seam Z parities
-    zz_indices.append(zz_idx)                  # final Z_C Z_T
+        zz_indices.append(init_indices["T"])
+    # Pauli-frame bits found by propagation
+    zz_indices.extend(frame_zz)
+    # Final ZZ Bell measurement
+    zz_indices.append(zz_idx)
 
     if verbose:
         print("[physics] XX indices (init + frame + final):", xx_indices)
@@ -596,7 +615,7 @@ def run_cnot_physics_experiment(
 
     # Quick diagnostic: look at the first few shots by hand
     if verbose:
-        small_mc = MonteCarloConfig(shots=8, seed=seed)
+        small_mc = MonteCarloConfig(shots=8 , seed=seed)
         import numpy as np
         sampler = circuit.compile_sampler(seed=seed)
         small_samples = np.asarray(sampler.sample(small_mc.shots), dtype=np.float64)

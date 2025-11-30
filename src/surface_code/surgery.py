@@ -142,23 +142,32 @@ class LatticeSurgery:
     ) -> Dict[str, LogicalObservable]:
         """Attach *symbolic* Pauli-frame dependencies to XX and ZZ.
 
-        For this first version we just record that:
-          * ZZ depends on the smooth-merge Z parity between control and ancilla.
-          * XX depends on the rough-merge X parity between ancilla and target.
+        Teleportation-style CNOT byproducts:
+          * The smooth-merge Z measurement (Z_C Z_anc + seam) flips X-type
+            frame signs → it must dress the XX Bell stabilizer.
+          * The rough-merge X measurement (X_anc X_T + seam) flips Z-type
+            frame signs → it must dress the ZZ Bell stabilizer.
 
-        These labels are later resolved to actual measurement indices by the
-        physics experiment code using builder._meas_meta and the Layout.
+        We therefore record that:
+          * XX depends on the smooth Z seam + logical Z parity between
+            `control` and `ancilla`.
+          * ZZ depends on the rough X seam + logical X parity between
+            `ancilla` and `target`.
+
+        These labels are resolved later to actual measurement indices.
         """
-        # We'll use a simple "KIND:left:right" convention for labels.
-        # KIND is one of: "SMOOTH_Z_SEAM", "ROUGH_X_SEAM", etc.
         zz = bell_observables.get("ZZ")
         xx = bell_observables.get("XX")
 
-        if zz is not None:
-            zz.frame_bits.append(f"SMOOTH_Z_SEAM:{control}:{ancilla}")
-
         if xx is not None:
-            xx.frame_bits.append(f"ROUGH_X_SEAM:{ancilla}:{target}")
+            # XX gets the *Z-type* frame bits from the smooth merge.
+            xx.frame_bits.append(f"SMOOTH_Z_SEAM:{control}:{ancilla}")
+            xx.frame_bits.append(f"LOGICAL_Z_PARITY:{control}:{ancilla}")
+
+        if zz is not None:
+            # ZZ gets the *X-type* frame bits from the rough merge.
+            zz.frame_bits.append(f"ROUGH_X_SEAM:{ancilla}:{target}")
+            zz.frame_bits.append(f"LOGICAL_X_PARITY:{ancilla}:{target}")
 
         return bell_observables
 

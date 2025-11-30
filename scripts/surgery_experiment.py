@@ -30,8 +30,8 @@ from surface_code import (
     PhenomenologicalStimConfig,
     Layout,
     SeamSpec,
-    PhaseSpec,
     LatticeSurgery,
+    _multiply_paulis_disjoint,
 )
 from simulation import MonteCarloConfig, run_circuit_logical_error_rate, run_circuit_physics
 
@@ -351,7 +351,7 @@ def build_cnot_surgery_circuit_physics(
             kind, left, right = label.split(":")
 
             if kind == "SMOOTH_Z_SEAM":
-                # Construct the joint Z checks across the smooth C–INT seam
+                # triple-Z seam checks in smooth C–INT merge
                 boundary_left = layout.boundary_qubits[left]["smooth"]
                 boundary_right = layout.boundary_qubits[right]["smooth"]
                 seam = layout.get_seam_qubits(left, right)
@@ -370,7 +370,7 @@ def build_cnot_surgery_circuit_physics(
                 )
 
             elif kind == "ROUGH_X_SEAM":
-                # Construct the joint X checks across the rough INT–T seam
+                # triple-X seam checks in rough INT–T merge
                 boundary_left = layout.boundary_qubits[left]["rough"]
                 boundary_right = layout.boundary_qubits[right]["rough"]
                 seam = layout.get_seam_qubits(left, right)
@@ -388,8 +388,40 @@ def build_cnot_surgery_circuit_physics(
                     _collect_phase_indices(paulis, family="X", phase_name=phase_name)
                 )
 
+            elif kind == "LOGICAL_Z_PARITY":
+                # The stabilizer Z_L(left) Z_L(right) measured in the smooth merge window
+                local_z = surgery.single_model.logical_z
+                if local_z is None:
+                    if verbose:
+                        print("[physics] WARNING: no logical Z defined on single patch")
+                    continue
+                z_left = surgery._embed_patch(local_z, left)
+                z_right = surgery._embed_patch(local_z, right)
+                parity_pauli = _multiply_paulis_disjoint(z_left, z_right)
+
+                phase_name = f"{left}+{right} smooth merge"
+                indices.extend(
+                    _collect_phase_indices([parity_pauli], family="Z", phase_name=phase_name)
+                )
+
+            elif kind == "LOGICAL_X_PARITY":
+                # The stabilizer X_L(left) X_L(right) measured in the rough merge window.
+                # Use the same aligned logical X representative the surgery code uses.
+                local_x = surgery.single_model.logical_x
+                if local_x is None:
+                    if verbose:
+                        print("[physics] WARNING: no logical X defined on single patch")
+                    continue
+                x_left = surgery._embed_patch(local_x, left)
+                x_right = surgery._embed_patch(local_x, right)
+                parity_pauli = _multiply_paulis_disjoint(x_left, x_right)
+
+                phase_name = f"{left}+{right} rough merge"
+                indices.extend(
+                    _collect_phase_indices([parity_pauli], family="X", phase_name=phase_name)
+                )
+
             else:
-                # Unknown label: ignore for now or raise
                 if verbose:
                     print(f"[physics] WARNING: unknown frame bit label {label!r}")
                 continue
@@ -487,9 +519,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
-    parser.add_argument("--distance", type=int, default=7, help="Code distance d")
-    parser.add_argument("--px", type=float, default=1e-2, help="X error probability")
-    parser.add_argument("--pz", type=float, default=1e-2, help="Z error probability")
+    parser.add_argument("--distance", type=int, default=3, help="Code distance d")
+    parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
+    parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(

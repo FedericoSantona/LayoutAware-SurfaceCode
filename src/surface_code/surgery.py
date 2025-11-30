@@ -66,10 +66,42 @@ class LatticeSurgery:
         # Single-patch stabilizer data
         self.z_single = list(self.single_model.z_stabilizers)
         self.x_single = list(self.single_model.x_stabilizers)
+        # Single-patch logicals
+        self.logical_z_single = self.single_model.logical_z
+        self.logical_x_single = self.single_model.logical_x
 
     # ------------------------------------------------------------------
     # Basic helpers
     # ------------------------------------------------------------------
+
+    def _seam_idle_stabilizers(
+        self, skip_seam: tuple[str, str] | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Return stabilizers that pin seam ancillas when they are idle.
+
+        We pin each seam ancilla with a single-qubit Z check. The optional
+        `skip_seam` lets us omit the seam currently used in a merge window so
+        those ancillas can participate in joint checks instead.
+        """
+        z_pins: list[str] = []
+        x_pins: list[str] = []
+
+        def _is_skip(seam: tuple[str, str]) -> bool:
+            if skip_seam is None:
+                return False
+            a, b = seam
+            sa, sb = skip_seam
+            return (a == sa and b == sb) or (a == sb and b == sa)
+
+        for seam, ancillas in self.layout.seam_qubits.items():
+            if _is_skip(seam):
+                continue
+            for q in ancillas:
+                chars = ["I"] * self.n_total
+                chars[q] = "Z"
+                z_pins.append("".join(chars))
+
+        return z_pins, x_pins
 
     def _phase_k(self, z_stabs: list[str], x_stabs: list[str]) -> int:
         S = stabs_to_symplectic(z_stabs, x_stabs)
@@ -225,6 +257,12 @@ class LatticeSurgery:
             chars[q_r] = "Z"
             z_merge.append("".join(chars))
 
+        # Explicitly include the logical Z parity Z_L(left) * Z_L(right) as a stabilizer
+        if self.logical_z_single is not None:
+            z_left = self._embed_patch(self.logical_z_single, left)
+            z_right = self._embed_patch(self.logical_z_single, right)
+            z_merge.append(_multiply_paulis_disjoint(z_left, z_right))
+
         return z_merge, x_merge
 
     def _rough_merge_stabilizers(
@@ -272,6 +310,12 @@ class LatticeSurgery:
             chars[q_sea] = "X"
             chars[q_r] = "X"
             x_merge.append("".join(chars))
+
+        # Explicitly include the logical X parity X_L(left) * X_L(right) as a stabilizer
+        if logical_x_aligned is not None:
+            x_left = self._embed_patch(logical_x_aligned, left)
+            x_right = self._embed_patch(logical_x_aligned, right)
+            x_merge.append(_multiply_paulis_disjoint(x_left, x_right))
 
         return z_merge, x_merge, logical_x_aligned
 
@@ -369,6 +413,8 @@ class LatticeSurgery:
 
         # Disjoint 3-patch memory stabilizers
         base_z, base_x = self._base_stabilizers(patches)
+        # Pin seam ancillas during idle phases so they don't contribute spurious k.
+        all_seam_z, all_seam_x = self._seam_idle_stabilizers()
 
         # C+INT smooth merge
         smooth_merge_z, smooth_merge_x = self._smooth_merge_stabilizers(
@@ -377,6 +423,8 @@ class LatticeSurgery:
             all_patches=patches,
             verbose=verbose,
         )
+        # Only INT–T seam is idle during the smooth merge, so pin that one.
+        smooth_merge_z += self._seam_idle_stabilizers(skip_seam=(control, ancilla))[0]
 
         # INT+T rough merge
         rough_merge_z, rough_merge_x, logical_x_aligned = self._rough_merge_stabilizers(
@@ -385,10 +433,17 @@ class LatticeSurgery:
             all_patches=patches,
             verbose=verbose,
         )
+        # Only C–INT seam is idle during the rough merge, so pin that one.
+        rough_merge_z += self._seam_idle_stabilizers(skip_seam=(ancilla, target))[0]
+
+        # If we needed to align logical X for commutation, use the aligned version everywhere
+        # (so init and final logicals stay in the same Pauli class).
+        if logical_x_aligned is not None:
+            patch_logicals[target]["X"] = self._embed_patch(logical_x_aligned, target)
 
         # Build phase list
         phases: List[PhaseSpec] = [
-            PhaseSpec("pre-merge", base_z, base_x, rounds_pre),
+            PhaseSpec("pre-merge", base_z + all_seam_z, base_x + all_seam_x, rounds_pre),
             PhaseSpec(
                 f"{control}+{ancilla} smooth merge",
                 smooth_merge_z,
@@ -399,8 +454,8 @@ class LatticeSurgery:
             ),
             PhaseSpec(
                 f"{control}|{ancilla} smooth split",
-                base_z,
-                base_x,
+                base_z + all_seam_z,
+                base_x + all_seam_x,
                 rounds_merge,
             ),
             PhaseSpec(
@@ -413,11 +468,11 @@ class LatticeSurgery:
             ),
             PhaseSpec(
                 f"{ancilla}|{target} rough split",
-                base_z,
-                base_x,
+                base_z + all_seam_z,
+                base_x + all_seam_x,
                 rounds_merge,
             ),
-            PhaseSpec("post-merge", base_z, base_x, rounds_post),
+            PhaseSpec("post-merge", base_z + all_seam_z, base_x + all_seam_x, rounds_post),
         ]
 
         # Embedded logical observables

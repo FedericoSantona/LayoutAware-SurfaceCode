@@ -465,31 +465,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--code-type",
         type=str,
-        default="heavy_hex",
+        default="standard",
         choices=["heavy_hex", "standard"],
         help="Type of surface code: 'heavy_hex' or 'standard'",
     )
     parser.add_argument(
         "--rounds-pre",
         type=int,
-        default=1,
+        default=None,
         help="Number of pre-surgery memory rounds (three disjoint patches, default: distance)",
     )
     parser.add_argument(
         "--rounds-merge",
         type=int,
-        default=1,
+        default=None,
         help="Number of rounds in each merge/split window (default: distance)",
     )
     parser.add_argument(
         "--rounds-post",
         type=int,
-        default=1,
+        default=None,
         help="Number of post-surgery memory rounds (default: distance)",
     )
     parser.add_argument("--distance", type=int, default=3, help="Code distance d")
-    parser.add_argument("--px", type=float, default=0, help="X error probability")
-    parser.add_argument("--pz", type=float, default=0, help="Z error probability")
+    parser.add_argument("--px", type=float, default=1e-2, help="X error probability")
+    parser.add_argument("--pz", type=float, default=1e-2, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(

@@ -160,50 +160,6 @@ def _canonicalize_logical(pauli: str, stab_basis: list[list[int]]) -> str:
     return _vec_to_pauli_str(v_red)
 
 
-# ---------------------------------------------------------------------------
-# GF(2) matrix inversion and logical-basis diagnostic helpers
-# ---------------------------------------------------------------------------
-def _gf2_matrix_inverse(M: list[list[int]]) -> list[list[int]]:
-    """Invert a square matrix over GF(2).
-
-    M is given as a list of rows. Raises ValueError if the matrix is
-    not invertible.
-    """
-    n = len(M)
-    if any(len(row) != n for row in M):
-        raise ValueError("Matrix must be square for GF(2) inversion.")
-
-    # Build augmented matrix [M | I]
-    aug: list[list[int]] = []
-    for i, row in enumerate(M):
-        aug.append(list(row) + [1 if i == j else 0 for j in range(n)])
-
-    # Gaussian elimination over GF(2).
-    for col in range(n):
-        # Find a pivot row with a 1 in this column.
-        pivot = None
-        for r in range(col, n):
-            if aug[r][col]:
-                pivot = r
-                break
-        if pivot is None:
-            raise ValueError("Matrix is not invertible over GF(2).")
-
-        # Swap pivot row into place.
-        if pivot != col:
-            aug[col], aug[pivot] = aug[pivot], aug[col]
-
-        # Eliminate this column in all other rows.
-        for r in range(n):
-            if r == col:
-                continue
-            if aug[r][col]:
-                aug[r] = [a ^ b for a, b in zip(aug[r], aug[col])]
-
-    # Extract the right-half as the inverse.
-    inv = [row[n:] for row in aug]
-    return inv
-
 
 def _propagate_logicals_through_measurements(
     *,

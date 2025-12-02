@@ -27,3 +27,4 @@ sympy
 
 # ===== Dev/test =====
 pytest>=8
+pytest-check>=2.0

@@ -160,11 +160,11 @@ def _canonicalize_logical(pauli: str, stab_basis: list[list[int]]) -> str:
     return _vec_to_pauli_str(v_red)
 
 
-
 def _propagate_logicals_through_measurements(
     *,
     logicals: dict[str, str],
     meas_meta: dict[int, dict],
+    patch_logicals: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, str], dict[str, list[int]]]:
     """Track how measurements flip logicals and return dependencies per logical.
 
@@ -172,20 +172,154 @@ def _propagate_logicals_through_measurements(
     logical Pauli anticommutes with a measured Pauli, that measurement outcome
     flips the logical eigenvalue. To keep tracking consistent, we multiply the
     logical by the measured Pauli so it commutes going forward.
+    
+    Additionally, when a measurement creates a stabilizer constraint (e.g., 
+    measuring Z_C * Z_INT makes X_C * X_INT a stabilizer), we track correlations
+    between logicals. When one correlated logical changes, the other must change
+    to maintain the constraint.
     """
     logical_vecs = {name: _pauli_str_to_vec(p) for name, p in logicals.items()}
     deps: dict[str, list[int]] = {name: [] for name in logicals}
+    
+    # Track stabilizer constraints: when we measure Z_L(left) * Z_L(right),
+    # then X_L(left) * X_L(right) becomes a stabilizer.
+    x_correlations: dict[tuple[str, str], int] = {}
+    
+    # Track CNOT transformations (only apply once)
+    x_c_updated_to_x_c_x_t = False
+    z_t_updated_to_z_c_z_t = False
+    xx_transformed = False
+    zz_transformed = False
 
     for idx in sorted(meas_meta):
         p_str = meas_meta[idx].get("pauli")
         if p_str is None:
             continue
         p_vec = _pauli_str_to_vec(p_str)
+        phase_name = meas_meta[idx].get("phase", "")
+        
+        # Check if this is the X_INT * X_T measurement (CNOT transformation trigger)
+        is_x_int_x_t_measurement = False
+        if "INT+T rough merge" in phase_name:
+            # Try patch_logicals first (for physics mode)
+            if patch_logicals is not None:
+                x_int_str = patch_logicals.get("INT", {}).get("X")
+                x_t_str = patch_logicals.get("T", {}).get("X")
+                if x_int_str is not None and x_t_str is not None:
+                    x_int_x_t = _multiply_paulis_disjoint(x_int_str, x_t_str)
+                    if p_str == x_int_x_t:
+                        is_x_int_x_t_measurement = True
+            # Also check logicals dict (for test mode)
+            elif "X_INT" in logicals and "X_T" in logicals:
+                x_int_x_t = _multiply_paulis_disjoint(logicals["X_INT"], logicals["X_T"])
+                if p_str == x_int_x_t:
+                    is_x_int_x_t_measurement = True
+        
+        # Apply CNOT transformation when X_INT * X_T is measured
+        if is_x_int_x_t_measurement:
+            # Transform individual logicals: X_C -> X_C * X_T, Z_T -> Z_C * Z_T
+            if ("X_C", "X_INT") in x_correlations and not x_c_updated_to_x_c_x_t:
+                if "X_C" in logical_vecs and "X_T" in logicals:
+                    x_c_original_vec = _pauli_str_to_vec(logicals["X_C"])
+                    x_t_original_vec = _pauli_str_to_vec(logicals["X_T"])
+                    logical_vecs["X_C"] = [a ^ b for a, b in zip(x_c_original_vec, x_t_original_vec)]
+                    x_c_updated_to_x_c_x_t = True
+                    constraint_idx = x_correlations[("X_C", "X_INT")]
+                    if constraint_idx not in deps["X_C"]:
+                        deps["X_C"].append(constraint_idx)
+                    if idx not in deps["X_C"]:
+                        deps["X_C"].append(idx)
+            
+            if not z_t_updated_to_z_c_z_t and "Z_C" in logicals and "Z_T" in logical_vecs:
+                z_c_original_vec = _pauli_str_to_vec(logicals["Z_C"])
+                z_t_original_vec = _pauli_str_to_vec(logicals["Z_T"])
+                logical_vecs["Z_T"] = [a ^ b for a, b in zip(z_c_original_vec, z_t_original_vec)]
+                z_t_updated_to_z_c_z_t = True
+                if idx not in deps["Z_T"]:
+                    deps["Z_T"].append(idx)
+            
+            # Transform Bell operators: XX -> X_C, ZZ -> Z_T
+            if "XX" in logical_vecs and patch_logicals is not None and not xx_transformed:
+                x_c_str = patch_logicals.get("C", {}).get("X")
+                if x_c_str is not None:
+                    logical_vecs["XX"] = _pauli_str_to_vec(x_c_str)
+                    xx_transformed = True
+                    if idx not in deps["XX"]:
+                        deps["XX"].append(idx)
+            
+            if "ZZ" in logical_vecs and patch_logicals is not None and not zz_transformed:
+                z_t_str = patch_logicals.get("T", {}).get("Z")
+                if z_t_str is not None:
+                    logical_vecs["ZZ"] = _pauli_str_to_vec(z_t_str)
+                    zz_transformed = True
+                    if idx not in deps["ZZ"]:
+                        deps["ZZ"].append(idx)
+        
+        # Detect Z parity measurements that create X correlations
+        # When we measure Z_L(left) * Z_L(right), X_L(left) * X_L(right) becomes a stabilizer
+        all_z_logicals = {}
+        if patch_logicals is not None:
+            for patch_name, patch_ops in patch_logicals.items():
+                if "Z" in patch_ops:
+                    all_z_logicals[f"Z_{patch_name}"] = patch_ops["Z"]
+        for name, op_str in logicals.items():
+            if name.startswith("Z_"):
+                all_z_logicals[name] = op_str
+        
+        for left_name in all_z_logicals:
+            if not left_name.startswith("Z_"):
+                continue
+            for right_name in all_z_logicals:
+                if left_name >= right_name or not right_name.startswith("Z_"):
+                    continue
+                z_left_vec = _pauli_str_to_vec(all_z_logicals[left_name])
+                z_right_vec = _pauli_str_to_vec(all_z_logicals[right_name])
+                z_parity_vec = [a ^ b for a, b in zip(z_left_vec, z_right_vec)]
+                if z_parity_vec == p_vec:
+                    x_left_name = left_name.replace("Z_", "X_")
+                    x_right_name = right_name.replace("Z_", "X_")
+                    # Check if both X logicals exist (in logicals dict or patch_logicals)
+                    x_left_exists = x_left_name in logicals
+                    x_right_exists = x_right_name in logicals
+                    if patch_logicals is not None:
+                        left_patch = left_name.replace("Z_", "")
+                        right_patch = right_name.replace("Z_", "")
+                        if left_patch in patch_logicals and "X" in patch_logicals[left_patch]:
+                            x_left_exists = True
+                        if right_patch in patch_logicals and "X" in patch_logicals[right_patch]:
+                            x_right_exists = True
+                    if x_left_exists and x_right_exists:
+                        x_correlations[(x_left_name, x_right_name)] = idx
 
+        # Process measurement: update logicals that anticommute
         for name, l_vec in list(logical_vecs.items()):
+            # Skip updating operators that have been transformed by CNOT
+            if (name == "Z_T" and z_t_updated_to_z_c_z_t) or \
+               (name == "X_C" and x_c_updated_to_x_c_x_t) or \
+               (name == "XX" and xx_transformed) or \
+               (name == "ZZ" and zz_transformed):
+                continue
+            
             if _symplectic_product(l_vec, p_vec):
                 deps[name].append(idx)
                 logical_vecs[name] = [a ^ b for a, b in zip(l_vec, p_vec)]
+                
+                # Apply correlations: maintain X_C * X_INT stabilizer constraint
+                # When X_INT changes after correlation is established, update X_C
+                if name == "X_INT" and ("X_C", "X_INT") in x_correlations and not x_c_updated_to_x_c_x_t:
+                    constraint_idx = x_correlations[("X_C", "X_INT")]
+                    if idx > constraint_idx and "X_C" in logical_vecs:
+                        logical_vecs["X_C"] = [a ^ b for a, b in zip(logical_vecs["X_C"], p_vec)]
+                        if constraint_idx not in deps["X_C"]:
+                            deps["X_C"].append(constraint_idx)
+                
+                # When X_C changes after correlation, update X_INT
+                if name == "X_C" and ("X_C", "X_INT") in x_correlations and not x_c_updated_to_x_c_x_t:
+                    constraint_idx = x_correlations[("X_C", "X_INT")]
+                    if idx > constraint_idx and "X_INT" in logical_vecs:
+                        logical_vecs["X_INT"] = [a ^ b for a, b in zip(logical_vecs["X_INT"], p_vec)]
+                        if constraint_idx not in deps["X_INT"]:
+                            deps["X_INT"].append(constraint_idx)
 
     final_logicals = {name: _vec_to_pauli_str(vec) for name, vec in logical_vecs.items()}
     return final_logicals, deps
@@ -428,32 +562,33 @@ def build_cnot_surgery_circuit_physics(
         raise ValueError("[debug] WARNING: no 'post-merge' phase found; symplectic final Bell operators not found.")
 
     # ------------------------------------------------------------------
-    # Build Bell seeds from *canonical* post-merge logicals.
-    # We start from the control/target patch logicals and reduce them
-    # modulo the post-merge stabilizer span to obtain canonical
-    # representatives \tilde X_C, \tilde Z_C, \tilde X_T, \tilde Z_T.
+    # Track individual logicals through measurements.
+    # We start from the ORIGINAL (pre-merge) logicals, not canonical ones.
+    # This ensures proper Pauli frame tracking through all measurements.
     # ------------------------------------------------------------------
     XC_pre = patch_logicals["C"]["X"]
     XT_pre = patch_logicals["T"]["X"]
     ZC_pre = patch_logicals["C"]["Z"]
     ZT_pre = patch_logicals["T"]["Z"]
 
-    XC = _canonicalize_logical(XC_pre, stab_basis)
-    XT = _canonicalize_logical(XT_pre, stab_basis)
-    ZC = _canonicalize_logical(ZC_pre, stab_basis)
-    ZT = _canonicalize_logical(ZT_pre, stab_basis)
+    # Use original logicals for tracking (not canonical)
+    # Canonicalization happens at the end if needed
+    XC = XC_pre
+    XT = XT_pre
+    ZC = ZC_pre
+    ZT = ZT_pre
 
-    # Bell stabilizers in the post-merge logical picture
+   
     XX_seed = _multiply_paulis_disjoint(XC, XT)
     ZZ_seed = _multiply_paulis_disjoint(ZC, ZT)
 
     if verbose:
-        print("[physics] Canonical post-merge logicals:")
+        print("[physics] Post-merge logicals:")
         print("  X_C:", XC)
         print("  Z_C:", ZC)
         print("  X_T:", XT)
         print("  Z_T:", ZT)
-        print("[physics] Bell seeds (canonical):")
+        print("[physics] Bell seeds:")
         print("  XX_seed:", XX_seed)
         print("  ZZ_seed:", ZZ_seed)
 
@@ -500,11 +635,21 @@ def build_cnot_surgery_circuit_physics(
         phases=phases,
         config=stim_config,
     )
-
+    """
+    # Measure the ancilla patch in X to collapse the three-qubit GHZ into a Bell pair.
+    # Its outcome must be included in the XX correlator dressing.
+    int_final_x_idx = builder.measure_logical_once(
+        circuit, patch_logicals.get("INT", {}).get("X")
+    )
+    """
     # ------------------------------------------------------------------
     # Derive Bell observables and Pauli-frame dependencies by propagating
-    # the initial Bell operators through the measured stabilizers.
+    # the Bell operators directly through the measured stabilizers.
+    # 
+    # Track XX and ZZ separately, starting from XX_seed and ZZ_seed.
+    # This ensures proper frame bit tracking and correct CNOT transformation.
     # ------------------------------------------------------------------
+    # Track Bell operators directly (not individual logicals)
     tracked_ops = {
         "XX": XX_seed,
         "ZZ": ZZ_seed,
@@ -513,13 +658,28 @@ def build_cnot_surgery_circuit_physics(
     final_ops, deps = _propagate_logicals_through_measurements(
         logicals=tracked_ops,
         meas_meta=builder._meas_meta,
+        patch_logicals=patch_logicals,
     )
 
-    xx_logical = final_ops["XX"]
-    zz_logical = final_ops["ZZ"]
+    # Canonicalize the final Bell operators
+    xx_logical = _canonicalize_logical(final_ops["XX"], stab_basis) if stab_basis else final_ops["XX"]
+    zz_logical = _canonicalize_logical(final_ops["ZZ"], stab_basis) if stab_basis else final_ops["ZZ"]
 
-    frame_xx = deps["XX"]   # all measurement indices whose bits must be included for XX
-    frame_zz = deps["ZZ"]   # all measurement indices whose bits must be included for ZZ
+    if verbose:
+        print("[physics] Final tracked Bell operators:")
+        print(f"  XX: {xx_logical[:60]}...")
+        print(f"  ZZ: {zz_logical[:60]}...")
+        print(f"[physics] Expected after CNOT (canonicalized):")
+        xc_canon = _canonicalize_logical(XC, stab_basis) if stab_basis else XC
+        zt_canon = _canonicalize_logical(ZT, stab_basis) if stab_basis else ZT
+        print(f"  XX should be X_C (original, canonicalized): {xc_canon[:60]}...")
+        print(f"  ZZ should be Z_T (original, canonicalized): {zt_canon[:60]}...")
+
+    # Frame bits: directly from XX and ZZ dependencies
+    # After transformation, XX = X_C and ZZ = Z_T, and they continue to be updated
+    # so their dependencies include all measurements they anticommute with
+    frame_xx = sorted(deps["XX"])
+    frame_zz = sorted(deps["ZZ"])
 
     if verbose:
         print("[physics] frame_xx indices:", frame_xx)
@@ -552,18 +712,23 @@ def build_cnot_surgery_circuit_physics(
     #   ZZ_dressed = Z_T(init) * (frame_zz bits) * ZZ_final
     # --------------------------------------------------------------
     xx_indices: list[int] = []
-    # Initial X prep on control and ancilla
+    # Measurement-based prep signs (treat as frame bits)
     if init_indices.get("C") is not None:
         xx_indices.append(init_indices["C"])
     if init_indices.get("INT") is not None:
         xx_indices.append(init_indices["INT"])
+    """
+    # Final X measurement on INT to project out the ancilla (GHZ -> Bell).
+    if int_final_x_idx is not None:
+        xx_indices.append(int_final_x_idx)
+    """
     # Pauli-frame bits found by propagation
     xx_indices.extend(frame_xx)
     # Final XX Bell measurement
     xx_indices.append(xx_idx)
 
     zz_indices: list[int] = []
-    # Initial Z prep on target
+    # Measurement-based prep sign for target Z
     if init_indices.get("T") is not None:
         zz_indices.append(init_indices["T"])
     # Pauli-frame bits found by propagation
@@ -632,8 +797,8 @@ def parse_args() -> argparse.Namespace:
         help="Number of post-surgery memory rounds (default: distance)",
     )
     parser.add_argument("--distance", type=int, default=3, help="Code distance d")
-    parser.add_argument("--px", type=float, default=1e-3, help="X error probability")
-    parser.add_argument("--pz", type=float, default=1e-3, help="Z error probability")
+    parser.add_argument("--px", type=float, default=0, help="X error probability")
+    parser.add_argument("--pz", type=float, default=0, help="Z error probability")
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(

@@ -10,6 +10,7 @@ if SRC_PATH not in sys.path:
     sys.path.insert(0, SRC_PATH)
 
 import stim
+import pytest
 import pytest_check as check
 
 from surface_code import (
@@ -25,7 +26,9 @@ from scripts.surgery_experiment import (
     _canonicalize_logical,
     _propagate_logicals_through_measurements,
     _multiply_paulis_disjoint,
+    build_cnot_surgery_circuit_physics,
 )
+from simulation import MonteCarloConfig, run_circuit_physics
 
 
 def _post_stabilizer_basis(phases):
@@ -257,4 +260,38 @@ def test_cnot_logical_clifford_map_distance_3_standard():
     check.equal(
         final_zt, exp_zt,
         f"Z_T transformation failed: expected {exp_zt}, got {final_zt}"
+    )
+
+
+@pytest.mark.xfail(reason="Bell-frame tracking still under investigation", strict=False)
+def test_cnot_bell_correlators_noise_free():
+    """In physics mode with zero noise, Bell correlators should be near ±1."""
+    circuit, correlator_map = build_cnot_surgery_circuit_physics(
+        distance=3,
+        code_type="standard",
+        p_x=0,
+        p_z=0,
+        rounds_pre=1,
+        rounds_merge=1,
+        rounds_post=1,
+        verbose=False,
+    )
+
+    result = run_circuit_physics(
+        circuit=circuit,
+        correlator_map=correlator_map,
+        mc_config=MonteCarloConfig(shots=512, seed=123),
+        keep_samples=False,
+        verbose=False,
+    )
+
+    check.greater(
+        abs(result.correlators.get("XX", 0.0)),
+        0.9,
+        f"Expected |<XX>| ~ 1, got {result.correlators.get('XX')}",
+    )
+    check.greater(
+        abs(result.correlators.get("ZZ", 0.0)),
+        0.9,
+        f"Expected |<ZZ>| ~ 1, got {result.correlators.get('ZZ')}",
     )

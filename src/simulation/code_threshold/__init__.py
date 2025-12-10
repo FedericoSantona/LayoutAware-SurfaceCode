@@ -2,6 +2,7 @@
 
 from .threshold import (
     DistanceSweepResult,
+    ThresholdEstimate,
     ThresholdPoint,
     ThresholdScenario,
     ThresholdScenarioResult,
@@ -11,12 +12,14 @@ from .threshold import (
     SymmetricScenario,
     create_standard_scenarios,
     estimate_crossings,
+    estimate_threshold,
     run_scenario,
 )
 from .plotting import export_csv, plot_scenario
 
 __all__ = [
     "DistanceSweepResult",
+    "ThresholdEstimate",
     "ThresholdPoint",
     "ThresholdScenario",
     "ThresholdScenarioResult",
@@ -26,6 +29,7 @@ __all__ = [
     "SymmetricScenario",
     "create_standard_scenarios",
     "estimate_crossings",
+    "estimate_threshold",
     "run_scenario",
     "export_csv",
     "plot_scenario",

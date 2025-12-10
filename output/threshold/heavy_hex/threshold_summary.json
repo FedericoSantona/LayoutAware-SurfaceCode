@@ -12,6 +12,13 @@
       "5-7": 0.01531069113619623,
       "7-9": 0.00540239104162796
     },
+    "threshold_estimate": {
+      "best_estimate": 0.00540239104162796,
+      "weighted_average": 0.010582291173186717,
+      "simple_average": 0.011833713462099606,
+      "num_crossings": 3,
+      "highest_distance_pair": "7-9"
+    },
     "json": "output/threshold/heavy_hex/x_only.json"
   },
   "z_only": {
@@ -26,6 +33,13 @@
       "3-5": 0.04361396887248837,
       "5-7": 0.05985997017670396,
       "7-9": 0.056976898517880126
+    },
+    "threshold_estimate": {
+      "best_estimate": 0.056976898517880126,
+      "weighted_average": 0.055265336475076386,
+      "simple_average": 0.053483612522357483,
+      "num_crossings": 3,
+      "highest_distance_pair": "7-9"
     },
     "json": "output/threshold/heavy_hex/z_only.json"
   },
@@ -42,6 +56,13 @@
       "5-7": 0.0160723057872777,
       "7-9": 0.0052152888886507764
     },
+    "threshold_estimate": {
+      "best_estimate": 0.0052152888886507764,
+      "weighted_average": 0.008059204045306223,
+      "simple_average": 0.007542477061159427,
+      "num_crossings": 3,
+      "highest_distance_pair": "7-9"
+    },
     "json": "output/threshold/heavy_hex/symmetric_Zinit.json"
   },
   "symmetric_Xinit": {
@@ -56,6 +77,13 @@
       "3-5": 0.04618461797247305,
       "5-7": 0.05092829622412404,
       "7-9": 0.007139911989121913
+    },
+    "threshold_estimate": {
+      "best_estimate": 0.007139911989121913,
+      "weighted_average": 0.02954498126412618,
+      "simple_average": 0.034750942061906334,
+      "num_crossings": 3,
+      "highest_distance_pair": "7-9"
     },
     "json": "output/threshold/heavy_hex/symmetric_Xinit.json"
   }

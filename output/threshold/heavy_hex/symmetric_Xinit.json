@@ -589,5 +589,12 @@
         }
       ]
     }
-  ]
+  ],
+  "threshold_estimate": {
+    "best_estimate": 0.007139911989121913,
+    "weighted_average": 0.02954498126412618,
+    "simple_average": 0.034750942061906334,
+    "num_crossings": 3,
+    "highest_distance_pair": "7-9"
+  }
 }

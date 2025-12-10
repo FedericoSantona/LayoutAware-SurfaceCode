@@ -32,6 +32,7 @@ from simulation.code_threshold import (
     ThresholdStudyConfig,
     create_standard_scenarios,
     estimate_crossings,
+    estimate_threshold,
     run_scenario,
     export_csv,
     plot_scenario,
@@ -162,21 +163,50 @@ def main() -> None:
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
         crossings = estimate_crossings(result)
+        threshold_est = estimate_threshold(crossings)
+        
+        # Build threshold estimate dict for JSON output
+        threshold_dict = {
+            "best_estimate": threshold_est.best_estimate,
+            "weighted_average": threshold_est.weighted_average,
+            "simple_average": threshold_est.simple_average,
+            "num_crossings": threshold_est.num_crossings,
+            "highest_distance_pair": (
+                f"{threshold_est.highest_distance_pair[0]}-{threshold_est.highest_distance_pair[1]}"
+                if threshold_est.highest_distance_pair else None
+            ),
+        }
+        
         summary[scenario.name] = {
             "csv": {str(distance): str(path.relative_to(PROJECT_ROOT)) for distance, path in csv_paths.items()},
             "plot": str(plot_path.relative_to(PROJECT_ROOT)),
             "crossings": {f"{d1}-{d2}": crossing for (d1, d2), crossing in crossings.items()},
+            "threshold_estimate": threshold_dict,
         }
+        
+        # Include threshold estimate in per-scenario JSON
+        scenario_data = scenario_to_dict(result)
+        scenario_data["threshold_estimate"] = threshold_dict
+        
         json_path = data_dir / f"{scenario.name}.json"
         with json_path.open("w") as fh:
-            json.dump(scenario_to_dict(result), fh, indent=2)
+            json.dump(scenario_data, fh, indent=2)
         summary[scenario.name]["json"] = str(json_path.relative_to(PROJECT_ROOT))
+        
         for pair, crossing in crossings.items():
             d1, d2 = pair
             if crossing is None:
                 log(f"  d={d1} vs d={d2}: no crossing within sampled range")
             else:
                 log(f"  d={d1} vs d={d2}: estimated crossing at p ~ {crossing:.3e}")
+        
+        # Log the threshold estimate
+        if threshold_est.best_estimate is not None:
+            log(f"  THRESHOLD ESTIMATE: p ~ {threshold_est.best_estimate:.4e} "
+                f"(from d={threshold_est.highest_distance_pair[0]} vs d={threshold_est.highest_distance_pair[1]})")
+        else:
+            log(f"  THRESHOLD ESTIMATE: could not be determined (no valid crossings)")
+        
         log(f"  plot saved to {plot_path}")
 
         if progress_bar is not None:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -162,6 +162,72 @@ def estimate_crossings(result: ThresholdScenarioResult) -> Dict[tuple[int, int],
                 break
         crossings[(sweep_low.distance, sweep_high.distance)] = crossing_p
     return crossings
+
+
+@dataclass
+class ThresholdEstimate:
+    """Threshold estimate derived from pairwise crossings."""
+    best_estimate: Optional[float]  # From highest distance pair
+    weighted_average: Optional[float]  # Weighted by distance (higher = more weight)
+    simple_average: Optional[float]  # Simple mean of all crossings
+    num_crossings: int  # Number of valid crossings used
+    highest_distance_pair: Optional[tuple[int, int]]  # Which distance pair gave best_estimate
+
+
+def estimate_threshold(crossings: Dict[tuple[int, int], float | None]) -> ThresholdEstimate:
+    """
+    Estimate a single threshold value from pairwise crossing data.
+    
+    Uses multiple methods:
+    - best_estimate: The crossing from the highest distance pair (most accurate)
+    - weighted_average: Average weighted by the minimum distance in each pair
+    - simple_average: Simple mean of all valid crossings
+    
+    Args:
+        crossings: Dictionary mapping (d_low, d_high) pairs to crossing values
+        
+    Returns:
+        ThresholdEstimate with the computed values
+    """
+    # Filter to valid (non-None) crossings
+    valid_crossings = {k: v for k, v in crossings.items() if v is not None}
+    
+    if not valid_crossings:
+        return ThresholdEstimate(
+            best_estimate=None,
+            weighted_average=None,
+            simple_average=None,
+            num_crossings=0,
+            highest_distance_pair=None,
+        )
+    
+    # Simple average
+    values = list(valid_crossings.values())
+    simple_avg = float(np.mean(values))
+    
+    # Weighted average (weight by minimum distance in pair)
+    weights = []
+    weighted_values = []
+    for (d1, d2), val in valid_crossings.items():
+        weight = min(d1, d2)  # Higher distances get more weight
+        weights.append(weight)
+        weighted_values.append(val)
+    
+    weights_arr = np.array(weights, dtype=float)
+    weighted_values_arr = np.array(weighted_values)
+    weighted_avg = float(np.average(weighted_values_arr, weights=weights_arr))
+    
+    # Best estimate from highest distance pair
+    highest_pair = max(valid_crossings.keys(), key=lambda x: min(x))
+    best_est = valid_crossings[highest_pair]
+    
+    return ThresholdEstimate(
+        best_estimate=best_est,
+        weighted_average=weighted_avg,
+        simple_average=simple_avg,
+        num_crossings=len(valid_crossings),
+        highest_distance_pair=highest_pair,
+    )
 
 
 def create_standard_scenarios(distances: Sequence[int], physical_grid: Sequence[float]) -> List[ThresholdScenario]:

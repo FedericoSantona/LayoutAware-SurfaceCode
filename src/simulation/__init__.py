@@ -3,6 +3,7 @@
 from .ler_runner import (
     SimulationResult,
     run_circuit_logical_error_rate,
+    run_cnot_logical_error_rate,
     run_logical_error_rate,
 )
 from .physics_runner import (
@@ -13,6 +14,7 @@ from .montecarlo import MonteCarloConfig
 __all__ = [
     "SimulationResult",
     "run_circuit_logical_error_rate",
+    "run_cnot_logical_error_rate",
     "run_logical_error_rate",
     "PhysicsResult",
     "run_circuit_physics",

@@ -1,0 +1,101 @@
+{
+  "_metadata": {
+    "experiment_type": "cnot",
+    "layout": "standard",
+    "distances": [
+      3,
+      5,
+      7
+    ],
+    "shots": 10000,
+    "p_min": 0.0005,
+    "p_max": 0.1,
+    "num_points": 20
+  },
+  "scenarios": {
+    "x_only": {
+      "experiment_type": "cnot",
+      "csv": {
+        "3": "output/threshold/standard/cnot/x_only_d3.csv",
+        "5": "output/threshold/standard/cnot/x_only_d5.csv",
+        "7": "output/threshold/standard/cnot/x_only_d7.csv"
+      },
+      "plot": "plots/threshold/standard/cnot/x_only.png",
+      "crossings": {
+        "3-5": 0.05649635363094137,
+        "5-7": 0.07173529525662319
+      },
+      "threshold_estimate": {
+        "best_estimate": 0.07173529525662319,
+        "weighted_average": 0.06602069214699251,
+        "simple_average": 0.06411582444378228,
+        "num_crossings": 2,
+        "highest_distance_pair": "5-7"
+      },
+      "json": "output/threshold/standard/cnot/x_only.json"
+    },
+    "z_only": {
+      "experiment_type": "cnot",
+      "csv": {
+        "3": "output/threshold/standard/cnot/z_only_d3.csv",
+        "5": "output/threshold/standard/cnot/z_only_d5.csv",
+        "7": "output/threshold/standard/cnot/z_only_d7.csv"
+      },
+      "plot": "plots/threshold/standard/cnot/z_only.png",
+      "crossings": {
+        "3-5": 0.06923962531200943,
+        "5-7": 0.07074804693448196
+      },
+      "threshold_estimate": {
+        "best_estimate": 0.07074804693448196,
+        "weighted_average": 0.07018238882605476,
+        "simple_average": 0.0699938361232457,
+        "num_crossings": 2,
+        "highest_distance_pair": "5-7"
+      },
+      "json": "output/threshold/standard/cnot/z_only.json"
+    },
+    "symmetric_Zinit": {
+      "experiment_type": "cnot",
+      "csv": {
+        "3": "output/threshold/standard/cnot/symmetric_Zinit_d3.csv",
+        "5": "output/threshold/standard/cnot/symmetric_Zinit_d5.csv",
+        "7": "output/threshold/standard/cnot/symmetric_Zinit_d7.csv"
+      },
+      "plot": "plots/threshold/standard/cnot/symmetric_Zinit.png",
+      "crossings": {
+        "3-5": 0.06180301586305152,
+        "5-7": 0.0720064120161601
+      },
+      "threshold_estimate": {
+        "best_estimate": 0.0720064120161601,
+        "weighted_average": 0.06818013845874438,
+        "simple_average": 0.06690471393960581,
+        "num_crossings": 2,
+        "highest_distance_pair": "5-7"
+      },
+      "json": "output/threshold/standard/cnot/symmetric_Zinit.json"
+    },
+    "symmetric_Xinit": {
+      "experiment_type": "cnot",
+      "csv": {
+        "3": "output/threshold/standard/cnot/symmetric_Xinit_d3.csv",
+        "5": "output/threshold/standard/cnot/symmetric_Xinit_d5.csv",
+        "7": "output/threshold/standard/cnot/symmetric_Xinit_d7.csv"
+      },
+      "plot": "plots/threshold/standard/cnot/symmetric_Xinit.png",
+      "crossings": {
+        "3-5": 0.06311551802725637,
+        "5-7": null
+      },
+      "threshold_estimate": {
+        "best_estimate": 0.06311551802725637,
+        "weighted_average": 0.06311551802725637,
+        "simple_average": 0.06311551802725637,
+        "num_crossings": 1,
+        "highest_distance_pair": "3-5"
+      },
+      "json": "output/threshold/standard/cnot/symmetric_Xinit.json"
+    }
+  }
+}

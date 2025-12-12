@@ -12,8 +12,12 @@ from surface_code import (
     build_surface_code_model,
 )
 
-from ..ler_runner import SimulationResult, run_logical_error_rate
+from ..ler_runner import SimulationResult, run_logical_error_rate, run_cnot_logical_error_rate
 from ..montecarlo import MonteCarloConfig
+
+# Supported experiment types
+EXPERIMENT_TYPE_MEMORY = "memory"
+EXPERIMENT_TYPE_CNOT = "cnot"
 
 
 @dataclass
@@ -88,45 +92,112 @@ def run_scenario(
     study_cfg: ThresholdStudyConfig,
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
     code_type: str = "heavy_hex",
+    experiment_type: str = EXPERIMENT_TYPE_MEMORY,
 ) -> ThresholdScenarioResult:
+    """
+    Run a threshold scenario sweep using either memory or CNOT experiment.
+    
+    Args:
+        scenario: The threshold scenario to run
+        study_cfg: Study configuration (shots, seed)
+        progress: Optional progress callback
+        code_type: Surface code layout ("heavy_hex" or "standard")
+        experiment_type: Either "memory" (default) or "cnot"
+        
+    Returns:
+        ThresholdScenarioResult with logical error rates for each (distance, p) point
+    """
+    if experiment_type not in (EXPERIMENT_TYPE_MEMORY, EXPERIMENT_TYPE_CNOT):
+        raise ValueError(f"Unknown experiment_type: {experiment_type}. "
+                        f"Must be '{EXPERIMENT_TYPE_MEMORY}' or '{EXPERIMENT_TYPE_CNOT}'.")
+    
     sweeps: List[DistanceSweepResult] = []
+    
     for distance in scenario.distances:
-        model = build_surface_code_model(distance, code_type=code_type)
-        builder = PhenomenologicalStimBuilder(
-            code=model.code,
-            z_stabilizers=model.z_stabilizers,
-            x_stabilizers=model.x_stabilizers,
-            logical_z=model.logical_z,
-            logical_x=model.logical_x,
-        )
         points: List[ThresholdPoint] = []
-        for p_x, p_z in scenario.px_pz_pairs():
-            stim_cfg = PhenomenologicalStimConfig(
-                rounds=scenario.rounds_for_distance(distance),
-                p_x_error=p_x,
-                p_z_error=p_z,
-                init_label=scenario.init_label,
-                family=("Z" if isinstance(scenario, XOnlyScenario) else
-                        "X" if isinstance(scenario, ZOnlyScenario) else None)
+        
+        if experiment_type == EXPERIMENT_TYPE_MEMORY:
+            # Memory experiment: build surface code model and use standard builder
+            model = build_surface_code_model(distance, code_type=code_type)
+            builder = PhenomenologicalStimBuilder(
+                code=model.code,
+                z_stabilizers=model.z_stabilizers,
+                x_stabilizers=model.x_stabilizers,
+                logical_z=model.logical_z,
+                logical_x=model.logical_x,
             )
-            result: SimulationResult = run_logical_error_rate(
-                builder,
-                stim_cfg,
-                MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
-            )
+            
+            for p_x, p_z in scenario.px_pz_pairs():
+                stim_cfg = PhenomenologicalStimConfig(
+                    rounds=scenario.rounds_for_distance(distance),
+                    p_x_error=p_x,
+                    p_z_error=p_z,
+                    init_label=scenario.init_label,
+                    family=("Z" if isinstance(scenario, XOnlyScenario) else
+                            "X" if isinstance(scenario, ZOnlyScenario) else None)
+                )
+                result: SimulationResult = run_logical_error_rate(
+                    builder,
+                    stim_cfg,
+                    MonteCarloConfig(shots=study_cfg.shots, seed=study_cfg.seed),
+                )
 
-            points.append(
-                ThresholdPoint(
+                points.append(
+                    ThresholdPoint(
+                        p_x=p_x,
+                        p_z=p_z,
+                        logical_error_rate=result.logical_error_rate,
+                        avg_syndrome_weight=result.avg_syndrome_weight,
+                        click_rate=result.click_rate,
+                    )
+                )
+                if progress is not None:
+                    progress(scenario, distance, p_x, p_z)
+        
+        else:  # CNOT experiment
+            # CNOT experiment: use lattice-surgery CNOT circuit
+            # The CNOT circuit tracks two observables:
+            #   - Observable 0: Z on control (Z_C) - sensitive to X errors
+            #   - Observable 1: X on target (X_T) - sensitive to Z errors
+            # Select based on scenario.track:
+            #   - track="Z" means we're tracking Z logical (use observable 0)
+            #   - track="X" means we're tracking X logical (use observable 1)
+            observable_idx = 0 if scenario.track == "Z" else 1
+            rounds = scenario.rounds_for_distance(distance)
+            
+            for p_x, p_z in scenario.px_pz_pairs():
+                result: SimulationResult = run_cnot_logical_error_rate(
+                    distance=distance,
+                    code_type=code_type,
                     p_x=p_x,
                     p_z=p_z,
-                    logical_error_rate=result.logical_error_rate,
-                    avg_syndrome_weight=result.avg_syndrome_weight,
-                    click_rate=result.click_rate,
+                    shots=study_cfg.shots,
+                    seed=study_cfg.seed,
+                    rounds_pre=rounds,
+                    rounds_merge=rounds,
+                    rounds_post=rounds,
+                    verbose=False,
                 )
-            )
-            if progress is not None:
-                progress(scenario, distance, p_x, p_z)
+
+                # Pick the correct logical error rate based on what we're tracking
+                ler = (result.logical_error_rates[observable_idx] 
+                       if len(result.logical_error_rates) > observable_idx 
+                       else result.logical_error_rate)
+
+                points.append(
+                    ThresholdPoint(
+                        p_x=p_x,
+                        p_z=p_z,
+                        logical_error_rate=ler,
+                        avg_syndrome_weight=result.avg_syndrome_weight,
+                        click_rate=result.click_rate,
+                    )
+                )
+                if progress is not None:
+                    progress(scenario, distance, p_x, p_z)
+        
         sweeps.append(DistanceSweepResult(distance=distance, points=points))
+    
     return ThresholdScenarioResult(
         name=scenario.name,
         init_label=scenario.init_label,

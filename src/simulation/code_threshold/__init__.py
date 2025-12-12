@@ -2,6 +2,8 @@
 
 from .threshold import (
     DistanceSweepResult,
+    EXPERIMENT_TYPE_CNOT,
+    EXPERIMENT_TYPE_MEMORY,
     ThresholdEstimate,
     ThresholdPoint,
     ThresholdScenario,
@@ -19,6 +21,8 @@ from .plotting import export_csv, plot_scenario
 
 __all__ = [
     "DistanceSweepResult",
+    "EXPERIMENT_TYPE_CNOT",
+    "EXPERIMENT_TYPE_MEMORY",
     "ThresholdEstimate",
     "ThresholdPoint",
     "ThresholdScenario",

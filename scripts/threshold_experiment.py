@@ -27,6 +27,8 @@ except ImportError:  # pragma: no cover - tqdm is optional at runtime
     tqdm = None  # type: ignore[assignment]
 
 from simulation.code_threshold import (
+    EXPERIMENT_TYPE_CNOT,
+    EXPERIMENT_TYPE_MEMORY,
     ThresholdScenario,
     ThresholdScenarioResult,
     ThresholdStudyConfig,
@@ -56,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=[3, 5, 7, 9],
+        default=[3, 5, 7],
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
@@ -73,13 +75,21 @@ def parse_args() -> argparse.Namespace:
         "--plot-dir",
         type=Path,
         default=None,
-        help="Directory to store generated plots (default: plots/threshold/{layout})",
+        help="Directory to store generated plots (default: plots/threshold/{layout}/{experiment_type})",
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=None,
-        help="Directory to store CSV/JSON results (default: output/threshold/{layout})",
+        help="Directory to store CSV/JSON results (default: output/threshold/{layout}/{experiment_type})",
+    )
+    parser.add_argument(
+        "--experiment-type",
+        type=str,
+        choices=[EXPERIMENT_TYPE_MEMORY, EXPERIMENT_TYPE_CNOT],
+        default=EXPERIMENT_TYPE_CNOT,
+        help=f"Experiment type: '{EXPERIMENT_TYPE_MEMORY}' for memory threshold or "
+             f"'{EXPERIMENT_TYPE_CNOT}' for CNOT lattice-surgery threshold (default: {EXPERIMENT_TYPE_MEMORY})",
     )
     return parser.parse_args()
 
@@ -115,9 +125,9 @@ def main() -> None:
     distances = parse_distances(args.distances or [])
     physical_grid = make_physical_grid(args.p_min, args.p_max, args.num_points)
 
-    # Set default directories based on layout type if not provided
-    plot_dir: Path = args.plot_dir or (PROJECT_ROOT / "plots" / "threshold" / args.layout)
-    data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / args.layout)
+    # Set default directories based on layout type and experiment type if not provided
+    plot_dir: Path = args.plot_dir or (PROJECT_ROOT / "plots" / "threshold" / args.layout / args.experiment_type)
+    data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / args.layout / args.experiment_type)
     plot_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -153,12 +163,13 @@ def main() -> None:
             )
             progress_bar.update()
 
-        log(f"Running scenario {scenario.name} (init {scenario.init_label})")
+        log(f"Running scenario {scenario.name} (init {scenario.init_label}) [{args.experiment_type}]")
         result = run_scenario(
             scenario,
             study_cfg,
             progress=update_progress if progress_bar is not None else None,
             code_type=args.layout,
+            experiment_type=args.experiment_type,
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
@@ -178,14 +189,16 @@ def main() -> None:
         }
         
         summary[scenario.name] = {
+            "experiment_type": args.experiment_type,
             "csv": {str(distance): str(path.relative_to(PROJECT_ROOT)) for distance, path in csv_paths.items()},
             "plot": str(plot_path.relative_to(PROJECT_ROOT)),
             "crossings": {f"{d1}-{d2}": crossing for (d1, d2), crossing in crossings.items()},
             "threshold_estimate": threshold_dict,
         }
         
-        # Include threshold estimate in per-scenario JSON
+        # Include threshold estimate and experiment type in per-scenario JSON
         scenario_data = scenario_to_dict(result)
+        scenario_data["experiment_type"] = args.experiment_type
         scenario_data["threshold_estimate"] = threshold_dict
         
         json_path = data_dir / f"{scenario.name}.json"
@@ -212,9 +225,23 @@ def main() -> None:
         if progress_bar is not None:
             progress_bar.close()
 
+    # Add top-level metadata to the summary
+    full_summary = {
+        "_metadata": {
+            "experiment_type": args.experiment_type,
+            "layout": args.layout,
+            "distances": distances,
+            "shots": args.shots,
+            "p_min": args.p_min,
+            "p_max": args.p_max,
+            "num_points": args.num_points,
+        },
+        "scenarios": summary,
+    }
+    
     summary_path = data_dir / "threshold_summary.json"
     with summary_path.open("w") as fh:
-        json.dump(summary, fh, indent=2)
+        json.dump(full_summary, fh, indent=2)
 
     print(f"Summary saved to {summary_path}")
 

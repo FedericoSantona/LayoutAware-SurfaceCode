@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Dict, List, Tuple
+from typing import Literal, Dict, FrozenSet, List, Optional, Tuple
 
 from .geometry_utils import (
     find_smooth_boundary_data_qubits,
@@ -21,7 +21,7 @@ class Layout:
         code_type: str,
         patch_order: List[str],
         seams: List[SeamSpec],
-        patch_metadata: Dict[str, str] | None = None,
+        patch_metadata: Optional[Dict[str, str]] = None,
     ):
         # Lazy import to avoid circular dependency with __init__.py
         from . import build_surface_code_model
@@ -85,7 +85,7 @@ class Layout:
 
         # Convenience: index seams by the unordered pair of endpoints
         # so we can look up a seam for (prev, curr) regardless of left/right
-        seams_by_pair: Dict[frozenset[str], SeamSpec] = {}
+        seams_by_pair: Dict[FrozenSet[str], SeamSpec] = {}
         for seam in self.seams:
             pair_key = frozenset({seam.left, seam.right})
             seams_by_pair[pair_key] = seam
@@ -156,7 +156,7 @@ class Layout:
 
         # Reconstruct the same adjacency we used when building the layout,
         # so we can interleave patches and seams in order.
-        seams_by_pair: Dict[frozenset[str], SeamSpec] = {}
+        seams_by_pair: Dict[FrozenSet[str], SeamSpec] = {}
         for seam in self.seams:
             seams_by_pair[frozenset({seam.left, seam.right})] = seam
 

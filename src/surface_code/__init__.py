@@ -11,9 +11,11 @@ from .geometry_utils import (
     find_rough_boundary_data_qubits,
     find_smooth_boundary_data_qubits,
 )
+_heavy_hex_import_error = None
 try:
     from .heavy_hex import HeavyHexModel, build_heavy_hex_model
-except ImportError as _heavy_hex_import_error:  # pragma: no cover - optional dependency
+except ImportError as e:  # pragma: no cover - optional dependency
+    _heavy_hex_import_error = e
     HeavyHexModel = None
 
     def build_heavy_hex_model(*args, **kwargs):
@@ -23,9 +25,11 @@ except ImportError as _heavy_hex_import_error:  # pragma: no cover - optional de
             "Install qiskit-qec to enable heavy-hex builders."
         ) from _heavy_hex_import_error
 
+_standard_import_error = None
 try:
     from .standard import StandardSurfaceCodeModel, build_standard_surface_code_model
-except ImportError as _standard_import_error:  # pragma: no cover - optional dependency
+except ImportError as e:  # pragma: no cover - optional dependency
+    _standard_import_error = e
     StandardSurfaceCodeModel = None
 
     def build_standard_surface_code_model(*args, **kwargs):

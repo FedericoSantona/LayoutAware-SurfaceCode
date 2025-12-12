@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
 from collections import Counter
 
 import numpy as np
@@ -11,6 +11,9 @@ import stim
 
 from surface_code.stim_builder import PhenomenologicalStimBuilder, PhenomenologicalStimConfig
 from .montecarlo import MonteCarloConfig
+
+if TYPE_CHECKING:
+    pass  # For any future type-only imports
 
 @dataclass
 class SimulationResult:
@@ -205,4 +208,87 @@ def run_circuit_logical_error_rate(
         num_detectors=dem.num_detectors,
     )
 
+
+def run_cnot_logical_error_rate(
+    distance: int,
+    code_type: str,
+    p_x: float,
+    p_z: float,
+    shots: int,
+    seed: Optional[int] = None,
+    rounds_pre: Optional[int] = None,
+    rounds_merge: Optional[int] = None,
+    rounds_post: Optional[int] = None,
+    verbose: bool = False,
+) -> SimulationResult:
+    """
+    Build a CNOT surgery circuit and return its logical error rate.
+    
+    This is a helper for threshold sweeps that uses the lattice-surgery
+    CNOT construction from surgery_experiment.
+    
+    Args:
+        distance: Code distance
+        code_type: Surface code layout ("heavy_hex" or "standard")
+        p_x: X error probability
+        p_z: Z error probability
+        shots: Number of Monte Carlo shots
+        seed: Random seed for sampling
+        rounds_pre: Pre-merge rounds (default: distance)
+        rounds_merge: Merge/split rounds (default: distance)
+        rounds_post: Post-merge rounds (default: distance)
+        verbose: Enable verbose output
+        
+    Returns:
+        SimulationResult with logical error rate and diagnostics
+    """
+    # Lazy import to avoid circular dependency
+    import sys
+    from pathlib import Path
+    
+    # Ensure scripts/ is importable
+    project_root = Path(__file__).resolve().parents[2]
+    scripts_path = project_root / "scripts"
+    if str(scripts_path) not in sys.path:
+        sys.path.insert(0, str(scripts_path))
+    
+    from surgery_experiment import build_cnot_surgery_circuit
+    
+    # Default rounds to distance if not specified
+    if rounds_pre is None:
+        rounds_pre = distance
+    if rounds_merge is None:
+        rounds_merge = distance
+    if rounds_post is None:
+        rounds_post = distance
+    
+    # Build the CNOT surgery circuit
+    circuit, observable_pairs = build_cnot_surgery_circuit(
+        distance=distance,
+        code_type=code_type,
+        p_x=p_x,
+        p_z=p_z,
+        rounds_pre=rounds_pre,
+        rounds_merge=rounds_merge,
+        rounds_post=rounds_post,
+        verbose=verbose,
+    )
+    
+    # Create a dummy stim config for run_circuit_logical_error_rate
+    stim_config = PhenomenologicalStimConfig(
+        rounds=1,
+        p_x_error=p_x,
+        p_z_error=p_z,
+        init_label=None,
+    )
+    
+    mc_config = MonteCarloConfig(shots=shots, seed=seed)
+    
+    return run_circuit_logical_error_rate(
+        circuit=circuit,
+        observable_pairs=observable_pairs,
+        stim_config=stim_config,
+        mc_config=mc_config,
+        verbose=verbose,
+    )
 

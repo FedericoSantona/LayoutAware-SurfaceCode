@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=[3, 5, 7],
+        default=[3, 5, 7, 9],
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         "--layout",
         type=str,
         choices=["heavy_hex", "standard"],
-        default="heavy_hex",
+        default="standard",
         help="Surface code layout type: 'heavy_hex' or 'standard' (default: heavy_hex)",
     )
     parser.add_argument(
@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         "--experiment-type",
         type=str,
         choices=[EXPERIMENT_TYPE_MEMORY, EXPERIMENT_TYPE_CNOT],
-        default=EXPERIMENT_TYPE_CNOT,
+        default=EXPERIMENT_TYPE_MEMORY,
         help=f"Experiment type: '{EXPERIMENT_TYPE_MEMORY}' for memory threshold or "
              f"'{EXPERIMENT_TYPE_CNOT}' for CNOT lattice-surgery threshold (default: {EXPERIMENT_TYPE_MEMORY})",
     )
@@ -133,6 +133,8 @@ def main() -> None:
 
     scenarios = create_standard_scenarios(distances, physical_grid)
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
+    # Ignore sign flips that occur while logical error rates are below the MC noise floor.
+    noise_floor = 5 / study_cfg.shots if study_cfg.shots else None
 
     summary = {}
     use_tqdm = tqdm is not None and sys.stdout.isatty()
@@ -173,7 +175,7 @@ def main() -> None:
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
-        crossings = estimate_crossings(result)
+        crossings = estimate_crossings(result, min_logical_error_rate=noise_floor)
         threshold_est = estimate_threshold(crossings)
         
         # Build threshold estimate dict for JSON output

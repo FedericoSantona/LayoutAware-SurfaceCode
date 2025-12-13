@@ -207,8 +207,19 @@ def run_scenario(
     )
 
 
-def estimate_crossings(result: ThresholdScenarioResult) -> Dict[tuple[int, int], float | None]:
-    """Estimate threshold crossings by comparing neighbouring distances."""
+def estimate_crossings(
+    result: ThresholdScenarioResult,
+    min_logical_error_rate: float | None = None,
+) -> Dict[tuple[int, int], float | None]:
+    """Estimate threshold crossings by comparing neighbouring distances.
+
+    Args:
+        result: Threshold sweep data for one scenario
+        min_logical_error_rate: Ignore sign flips that only occur while all
+            neighbouring points are below this rate (default: no filtering).
+            This avoids spurious “thresholds” triggered by single-count noise
+            when logical error rates are effectively zero.
+    """
     if len(result.sweeps) < 2:
         return {}
     crossings: Dict[tuple[int, int], float | None] = {}
@@ -222,6 +233,16 @@ def estimate_crossings(result: ThresholdScenarioResult) -> Dict[tuple[int, int],
         diff = low - high
         crossing_p = None
         for i in range(len(diff) - 1):
+            if min_logical_error_rate is not None:
+                rates = (
+                    low[i],
+                    high[i],
+                    low[i + 1],
+                    high[i + 1],
+                )
+                # Require all four neighbouring points to clear the noise floor
+                if any(r < min_logical_error_rate for r in rates):
+                    continue
             # Skip exact or near-zero differences (flat floor region)
             if diff[i] == 0 or diff[i + 1] == 0:
                 continue

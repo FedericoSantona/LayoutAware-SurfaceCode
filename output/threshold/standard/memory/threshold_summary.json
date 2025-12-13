@@ -26,12 +26,12 @@
       "crossings": {
         "3-5": 0.06239342384360165,
         "5-7": 0.06327981705779803,
-        "7-9": 0.011175403075618793
+        "7-9": 0.07921537886624422
       },
       "threshold_estimate": {
-        "best_estimate": 0.011175403075618793,
-        "weighted_average": 0.038787145223275116,
-        "simple_average": 0.045616214659006164,
+        "best_estimate": 0.07921537886624422,
+        "weighted_average": 0.07053913392556697,
+        "simple_average": 0.06829620658921463,
         "num_crossings": 3,
         "highest_distance_pair": "7-9"
       },

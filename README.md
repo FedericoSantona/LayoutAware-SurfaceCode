@@ -185,5 +185,5 @@ Suggested citation (replace fields as appropriate):
 
 ## License
 
-No `LICENSE` file is currently present in the repository. If you plan to release/publish this publicly, add an explicit license file (e.g., BSD-3-Clause / MIT / Apache-2.0) and update this section accordingly.
+To do
 

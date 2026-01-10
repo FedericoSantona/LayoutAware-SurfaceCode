@@ -23,15 +23,17 @@
         "9": "output/threshold/heavy_hex/memory/x_only_d9.csv"
       },
       "plot": "plots/threshold/heavy_hex/memory/x_only.png",
+      "logical": "Z",
+      "sensitive_to": "X",
       "crossings": {
         "3-5": 0.014788058208474631,
         "5-7": 0.01531069113619623,
-        "7-9": 0.00540239104162796
+        "7-9": 0.014331181384404283
       },
       "threshold_estimate": {
-        "best_estimate": 0.00540239104162796,
-        "weighted_average": 0.010582291173186717,
-        "simple_average": 0.011833713462099606,
+        "best_estimate": 0.014331181384404283,
+        "weighted_average": 0.014749059999815668,
+        "simple_average": 0.014809976909691715,
         "num_crossings": 3,
         "highest_distance_pair": "7-9"
       },
@@ -46,6 +48,8 @@
         "9": "output/threshold/heavy_hex/memory/z_only_d9.csv"
       },
       "plot": "plots/threshold/heavy_hex/memory/z_only.png",
+      "logical": "X",
+      "sensitive_to": "Z",
       "crossings": {
         "3-5": 0.04361396887248837,
         "5-7": 0.05985997017670396,
@@ -69,15 +73,17 @@
         "9": "output/threshold/heavy_hex/memory/symmetric_Zinit_d9.csv"
       },
       "plot": "plots/threshold/heavy_hex/memory/symmetric_Zinit.png",
+      "logical": "Z",
+      "sensitive_to": "X",
       "crossings": {
-        "3-5": 0.0013398365075498059,
+        "3-5": 0.01572102630248745,
         "5-7": 0.0160723057872777,
-        "7-9": 0.0052152888886507764
+        "7-9": 0.00917480941786546
       },
       "threshold_estimate": {
-        "best_estimate": 0.0052152888886507764,
-        "weighted_average": 0.008059204045306223,
-        "simple_average": 0.007542477061159427,
+        "best_estimate": 0.00917480941786546,
+        "weighted_average": 0.012783218251260605,
+        "simple_average": 0.0136560471692102,
         "num_crossings": 3,
         "highest_distance_pair": "7-9"
       },
@@ -92,15 +98,17 @@
         "9": "output/threshold/heavy_hex/memory/symmetric_Xinit_d9.csv"
       },
       "plot": "plots/threshold/heavy_hex/memory/symmetric_Xinit.png",
+      "logical": "X",
+      "sensitive_to": "Z",
       "crossings": {
         "3-5": 0.04618461797247305,
         "5-7": 0.05092829622412404,
-        "7-9": 0.007139911989121913
+        "7-9": 0.06007673986842041
       },
       "threshold_estimate": {
-        "best_estimate": 0.007139911989121913,
-        "weighted_average": 0.02954498126412618,
-        "simple_average": 0.034750942061906334,
+        "best_estimate": 0.06007673986842041,
+        "weighted_average": 0.05424883427446548,
+        "simple_average": 0.05239655135500584,
         "num_crossings": 3,
         "highest_distance_pair": "7-9"
       },

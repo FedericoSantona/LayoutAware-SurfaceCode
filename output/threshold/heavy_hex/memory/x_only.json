@@ -2,6 +2,8 @@
   "name": "x_only",
   "init_label": "0",
   "track": "Z",
+  "logical": "Z",
+  "sensitive_to": "X",
   "distances": [
     3,
     5,
@@ -592,9 +594,9 @@
   ],
   "experiment_type": "memory",
   "threshold_estimate": {
-    "best_estimate": 0.00540239104162796,
-    "weighted_average": 0.010582291173186717,
-    "simple_average": 0.011833713462099606,
+    "best_estimate": 0.014331181384404283,
+    "weighted_average": 0.014749059999815668,
+    "simple_average": 0.014809976909691715,
     "num_crossings": 3,
     "highest_distance_pair": "7-9"
   }

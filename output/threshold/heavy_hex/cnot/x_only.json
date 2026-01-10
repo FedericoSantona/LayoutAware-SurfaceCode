@@ -2,6 +2,8 @@
   "name": "x_only",
   "init_label": "0",
   "track": "Z",
+  "logical": "Z",
+  "sensitive_to": "X",
   "distances": [
     3,
     5,

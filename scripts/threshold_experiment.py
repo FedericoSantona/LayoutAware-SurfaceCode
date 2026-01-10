@@ -41,6 +41,16 @@ from simulation.code_threshold import (
 )
 
 
+def _logical_metadata(track: str | None) -> tuple[str | None, str | None]:
+    """Return (logical_measured, physical_sensitivity) for a scenario track."""
+    logical = track if track in {"X", "Z"} else None
+    if logical == "Z":
+        return logical, "X"
+    if logical == "X":
+        return logical, "Z"
+    return logical, None
+
+
 def parse_distances(values: Sequence[str]) -> list[int]:
     if not values:
         return [3, 5, 7, 9]
@@ -58,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distances",
         nargs="*",
-        default=[3, 5, 7, 9],
+        default=[3, 5, 7],
         help="Code distances to include (default: 3 5 7 9)",
     )
     parser.add_argument("--p-min", type=float, default=5e-4, help="Minimum physical error rate")
@@ -68,7 +78,7 @@ def parse_args() -> argparse.Namespace:
         "--layout",
         type=str,
         choices=["heavy_hex", "standard"],
-        default="standard",
+        default="heavy_hex",
         help="Surface code layout type: 'heavy_hex' or 'standard' (default: heavy_hex)",
     )
     parser.add_argument(
@@ -87,7 +97,7 @@ def parse_args() -> argparse.Namespace:
         "--experiment-type",
         type=str,
         choices=[EXPERIMENT_TYPE_MEMORY, EXPERIMENT_TYPE_CNOT],
-        default=EXPERIMENT_TYPE_MEMORY,
+        default=EXPERIMENT_TYPE_CNOT,
         help=f"Experiment type: '{EXPERIMENT_TYPE_MEMORY}' for memory threshold or "
              f"'{EXPERIMENT_TYPE_CNOT}' for CNOT lattice-surgery threshold (default: {EXPERIMENT_TYPE_MEMORY})",
     )
@@ -95,10 +105,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def scenario_to_dict(result: ThresholdScenarioResult) -> dict:
+    logical, physical = _logical_metadata(result.track)
     data = {
         "name": result.name,
         "init_label": result.init_label,
         "track": result.track,
+        "logical": logical,
+        "sensitive_to": physical,
         "distances": result.distances,
         "sweeps": [],
     }
@@ -166,6 +179,9 @@ def main() -> None:
             progress_bar.update()
 
         log(f"Running scenario {scenario.name} (init {scenario.init_label}) [{args.experiment_type}]")
+        logical, physical = _logical_metadata(scenario.track)
+        if logical:
+            log(f"  measuring logical {logical}, primarily sensitive to physical {physical} errors")
         result = run_scenario(
             scenario,
             study_cfg,
@@ -177,6 +193,7 @@ def main() -> None:
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
         crossings = estimate_crossings(result, min_logical_error_rate=noise_floor)
         threshold_est = estimate_threshold(crossings)
+        logical, physical = _logical_metadata(result.track)
         
         # Build threshold estimate dict for JSON output
         threshold_dict = {
@@ -194,6 +211,8 @@ def main() -> None:
             "experiment_type": args.experiment_type,
             "csv": {str(distance): str(path.relative_to(PROJECT_ROOT)) for distance, path in csv_paths.items()},
             "plot": str(plot_path.relative_to(PROJECT_ROOT)),
+            "logical": logical,
+            "sensitive_to": physical,
             "crossings": {f"{d1}-{d2}": crossing for (d1, d2), crossing in crossings.items()},
             "threshold_estimate": threshold_dict,
         }

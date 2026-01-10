@@ -2,6 +2,8 @@
   "name": "symmetric_Zinit",
   "init_label": "0",
   "track": "Z",
+  "logical": "Z",
+  "sensitive_to": "X",
   "distances": [
     3,
     5,
@@ -592,9 +594,9 @@
   ],
   "experiment_type": "memory",
   "threshold_estimate": {
-    "best_estimate": 0.0052152888886507764,
-    "weighted_average": 0.008059204045306223,
-    "simple_average": 0.007542477061159427,
+    "best_estimate": 0.00917480941786546,
+    "weighted_average": 0.012783218251260605,
+    "simple_average": 0.0136560471692102,
     "num_crossings": 3,
     "highest_distance_pair": "7-9"
   }

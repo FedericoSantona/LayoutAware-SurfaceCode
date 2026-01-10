@@ -2,6 +2,8 @@
   "name": "symmetric_Xinit",
   "init_label": "+",
   "track": "X",
+  "logical": "X",
+  "sensitive_to": "Z",
   "distances": [
     3,
     5,
@@ -592,9 +594,9 @@
   ],
   "experiment_type": "memory",
   "threshold_estimate": {
-    "best_estimate": 0.007139911989121913,
-    "weighted_average": 0.02954498126412618,
-    "simple_average": 0.034750942061906334,
+    "best_estimate": 0.06007673986842041,
+    "weighted_average": 0.05424883427446548,
+    "simple_average": 0.05239655135500584,
     "num_crossings": 3,
     "highest_distance_pair": "7-9"
   }

@@ -65,6 +65,29 @@ class DeviceCalibration:
         """Sorted list of qubit indices."""
         return sorted(self.qubit_params.keys())
     
+    def get_recommended_layout(self) -> str:
+        """Get the recommended surface code layout type for this device.
+        
+        Returns:
+            "heavy_hex" for IBM devices, "standard" for IQM Crystal,
+            or "heavy_hex" as default.
+        """
+        backend_lower = self.backend_name.lower()
+        
+        # Check for IBM devices
+        if "ibm" in backend_lower or any(
+            name in backend_lower 
+            for name in ["sherbrooke", "kyoto", "osaka", "kolkata", "mumbai", "perth"]
+        ):
+            return "heavy_hex"
+        
+        # Check for IQM Crystal
+        if "iqm" in backend_lower or "crystal" in backend_lower:
+            return "standard"
+        
+        # Default to heavy_hex for unknown devices
+        return "heavy_hex"
+    
     def to_noise_model(
         self,
         default_round_duration: float = 1.0,

@@ -130,19 +130,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_noise_model(args: argparse.Namespace) -> Optional[NoiseModel]:
+def load_noise_model(args: argparse.Namespace) -> tuple[Optional[NoiseModel], Optional[DeviceCalibration]]:
     """Load and configure the noise model based on CLI arguments.
     
     Args:
         args: Parsed command-line arguments.
         
     Returns:
-        NoiseModel instance, or None for legacy phenomenological mode.
+        Tuple of (NoiseModel instance or None, DeviceCalibration or None).
+        The calibration is returned so layout can be auto-detected.
     """
     if args.noise_model == "phenomenological":
         # Return None to use the legacy p_x_error/p_z_error approach
         # (noise rates are set per data point in the sweep)
-        return None
+        return None, None
     
     elif args.noise_model == "device-aware":
         if args.calibration_file is None:
@@ -162,7 +163,7 @@ def load_noise_model(args: argparse.Namespace) -> Optional[NoiseModel]:
         noise_model = calibration.to_noise_model(
             default_round_duration=args.round_duration,
         )
-        return noise_model
+        return noise_model, calibration
     
     else:
         raise ValueError(f"Unknown noise model type: {args.noise_model}")
@@ -202,18 +203,35 @@ def main() -> None:
     distances = parse_distances(args.distances or [])
     physical_grid = make_physical_grid(args.p_min, args.p_max, args.num_points)
 
-    # Set default directories based on layout type and experiment type if not provided
-    plot_dir: Path = args.plot_dir or (PROJECT_ROOT / "plots" / "threshold" / args.layout / args.experiment_type)
-    data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / args.layout / args.experiment_type)
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load noise model if device-aware mode is selected
-    noise_model = load_noise_model(args)
+    # Load noise model and calibration (if device-aware mode)
+    noise_model, calibration = load_noise_model(args)
+    
+    # Auto-detect layout from calibration if device-aware mode
+    layout = args.layout
+    if calibration is not None:
+        recommended_layout = calibration.get_recommended_layout()
+        if layout != recommended_layout:
+            print(f"\n⚠️  Layout mismatch detected:")
+            print(f"   Calibration device: {calibration.backend_name}")
+            print(f"   Recommended layout: {recommended_layout}")
+            print(f"   Specified layout: {layout}")
+            print(f"   Auto-switching to recommended layout: {recommended_layout}")
+            layout = recommended_layout
+        else:
+            print(f"✓ Using layout '{layout}' (matches calibration device: {calibration.backend_name})")
+    else:
+        layout = args.layout  # Use user-specified layout for phenomenological mode
+    
     if noise_model is not None:
         print(f"Using device-aware noise model with round duration {args.round_duration} µs")
     else:
         print("Using phenomenological noise model (uniform error rates)")
+
+    # Set default directories based on layout type and experiment type if not provided
+    plot_dir: Path = args.plot_dir or (PROJECT_ROOT / "plots" / "threshold" / layout / args.experiment_type)
+    data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / layout / args.experiment_type)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     scenarios = create_standard_scenarios(distances, physical_grid)
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
@@ -257,7 +275,7 @@ def main() -> None:
             scenario,
             study_cfg,
             progress=update_progress if progress_bar is not None else None,
-            code_type=args.layout,
+            code_type=layout,
             experiment_type=args.experiment_type,
             noise_model=noise_model,
         )
@@ -329,7 +347,8 @@ def main() -> None:
     full_summary = {
         "_metadata": {
             "experiment_type": args.experiment_type,
-            "layout": args.layout,
+            "layout": layout,
+            "layout_auto_detected": calibration is not None and layout != args.layout,
             "distances": distances,
             "shots": args.shots,
             "p_min": args.p_min,

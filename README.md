@@ -1,6 +1,6 @@
 # Layout-Aware Surface Code Builder for Lattice Surgery
 
-Research code for building **layout-aware surface-code circuits** (standard + heavy-hex) with **lattice-surgery protocols** and running **phenomenological-noise** simulations in **Stim**, including **threshold sweeps** for both **memory** and **CNOT (lattice surgery)** experiments.
+Research code for building **layout-aware surface-code circuits** (standard + heavy-hex) with **lattice-surgery protocols** and running **device-aware noise simulations** in **Stim**, including **threshold sweeps** for both **memory** and **CNOT (lattice surgery)** experiments. Features **per-qubit T1/T2 decoherence modeling** from device calibration data with automatic layout selection based on device type.
 
 If you are reading this to reproduce results/figures: start from **Reproducibility (threshold sweeps)** below. For the underlying design/algorithms, see `documentation/TECHNICAL_SPECIFICATION.md`.
 
@@ -20,6 +20,11 @@ If you are reading this to reproduce results/figures: start from **Reproducibili
   - run single experiments (memory / surgery physics / surgery logical error rate)
   - run **threshold sweeps** and write results as CSV/JSON
   - compute **bootstrap confidence intervals** for threshold estimators (post-processing only; no resimulation)
+- **Device-aware noise modeling** with:
+  - Per-qubit T1/T2 decoherence parameters from device calibration
+  - Support for IBM Quantum and IQM Crystal device calibration data
+  - Automatic layout selection (heavy-hex for IBM, standard for IQM Crystal)
+  - JSON-based calibration file format for reproducibility
 
 ---
 
@@ -55,7 +60,7 @@ python -m pip install qiskit-qec
 
 ### Memory experiment (single distance)
 
-Runs a phenomenological-noise memory experiment and prints logical error rate diagnostics:
+Runs a memory experiment with device-aware noise and prints logical error rate diagnostics:
 
 ```bash
 python scripts/memory_experiment.py \
@@ -67,6 +72,8 @@ python scripts/memory_experiment.py \
 ```
 
 This script also saves a tiling figure to `plots/` (e.g. `plots/surface_code_d3.png`).
+
+**Note**: For device-aware noise with calibration data, use `threshold_experiment.py` with `--noise-model device-aware`.
 
 ### Lattice-surgery CNOT (physics-mode sanity check)
 
@@ -93,10 +100,17 @@ The main reproducibility entrypoint is:
 
 ### Run a threshold sweep
 
-Example: **memory threshold**, heavy-hex layout, distances \(d \in \{3,5,7,9\}\):
+**Device-aware noise** (recommended for realistic hardware simulations):
+
+See the "Device-aware noise model" section below for examples using calibration data.
+
+**Uniform error rate model** (for theoretical/comparative studies):
+
+You can also run threshold sweeps with uniform error rates across all qubits:
 
 ```bash
 python scripts/threshold_experiment.py \
+  --noise-model phenomenological \
   --layout heavy_hex \
   --experiment-type memory \
   --distances 3 5 7 9 \
@@ -106,11 +120,22 @@ python scripts/threshold_experiment.py \
   --num-points 20
 ```
 
-Example: **CNOT (lattice-surgery) threshold**, standard layout:
+This is useful for theoretical studies or comparing against device-specific results.
+
+### Device-aware noise model
+
+The code features **device-aware noise modeling** using real device calibration data (T1/T2, gate errors, readout errors). The layout is automatically selected based on the device type:
+
+- **IBM devices** → `heavy_hex` layout
+- **IQM Crystal** → `standard` layout
+
+**Example: Device-aware threshold sweep with IQM Crystal calibration:**
 
 ```bash
 python scripts/threshold_experiment.py \
-  --layout standard \
+  --noise-model device-aware \
+  --calibration-file output/iqm_crystal_calibration.json \
+  --round-duration 1.0 \
   --experiment-type cnot \
   --distances 3 5 7 9 \
   --shots 10000 \
@@ -118,6 +143,73 @@ python scripts/threshold_experiment.py \
   --p-max 1e-1 \
   --num-points 20
 ```
+
+The layout will be automatically set to `standard` for IQM Crystal. If you specify `--layout heavy_hex`, you'll get a warning and the layout will be auto-switched to the recommended value.
+
+**Example: Device-aware threshold sweep with IBM device calibration:**
+
+```bash
+# First, load calibration from IBM backend (requires Qiskit IBM Runtime)
+python -c "
+from qiskit_ibm_runtime import QiskitRuntimeService
+from surface_code import DeviceCalibration
+service = QiskitRuntimeService()
+backend = service.backend('ibm_sherbrooke')
+cal = DeviceCalibration.from_ibm_backend(backend)
+cal.to_json('ibm_calibration.json')
+"
+
+# Then run threshold sweep
+python scripts/threshold_experiment.py \
+  --noise-model device-aware \
+  --calibration-file ibm_calibration.json \
+  --round-duration 1.0 \
+  --experiment-type memory \
+  --distances 3 5 7 9 \
+  --shots 10000
+```
+
+The layout will be automatically set to `heavy_hex` for IBM devices.
+
+### Calibration files
+
+Example calibration files are provided in the `output/` directory:
+- `output/iqm_crystal_calibration.json`: Synthetic IQM Crystal calibration (20 qubits)
+- `output/example_calibration.json`: Generic example calibration file
+
+You can create your own calibration files by:
+1. Loading from IBM Quantum backends (requires Qiskit IBM Runtime)
+2. Manually creating JSON files following the format shown in the examples
+3. Using `DeviceCalibration.uniform()` for synthetic calibration for theoretical studies
+
+### Noise model implementation
+
+The **device-aware noise model** computes per-qubit error rates from T1/T2 decoherence times and gate errors from device calibration. It converts T1/T2 coherence times to Pauli error rates:
+- Amplitude damping: `p_ad = 1 - exp(-t/T1)`
+- Pure dephasing: `p_deph = 0.5 * (1 - exp(-t/T2_phi))` where `T2_phi = 1/(1/T2 - 1/(2*T1))`
+- Pauli X rate: `p_x ≈ p_ad/4`
+- Pauli Z rate: `p_z ≈ p_deph/2 + p_ad/4`
+
+### Command-line options
+
+When using `threshold_experiment.py`:
+
+```bash
+--noise-model {device-aware,phenomenological}
+    Select noise model type (recommended: device-aware)
+
+--calibration-file PATH
+    Path to device calibration JSON file (required for device-aware mode)
+
+--round-duration FLOAT
+    Measurement round duration in microseconds (default: 1.0)
+    Used to compute decoherence error rates from T1/T2
+
+--layout {heavy_hex,standard}
+    Surface code layout (auto-detected from calibration when using device-aware mode)
+```
+
+**Note**: The `--layout` option is automatically set when using device-aware noise to match the device type. You'll see a warning if you specify a conflicting layout, and it will be auto-switched.
 
 ### Where results go (files)
 
@@ -157,12 +249,12 @@ python scripts/threshold_bootstrap.py \
 
 ## Project structure
 
-- `src/surface_code/`: geometry, stabilizers/logicals utilities, layout management, multi-phase Stim builder, lattice surgery protocols
+- `src/surface_code/`: geometry, stabilizers/logicals utilities, layout management, multi-phase Stim builder, lattice surgery protocols, noise models, device calibration
 - `src/simulation/`: Monte Carlo wrappers, logical error rate evaluation, and threshold utilities
 - `scripts/`: reproducibility CLIs (memory, surgery, thresholds, bootstrap)
-- `plots/` and `output/`: generated artefacts (figures, CSV/JSON summaries)
+- `plots/` and `output/`: generated artefacts (figures, CSV/JSON summaries, calibration files)
 - `documentation/TECHNICAL_SPECIFICATION.md`: algorithmic/design documentation (recommended reading for method details)
-- `test/`: unit tests for surgery geometry/masking and transpilation utilities
+- `test/`: unit tests for surgery geometry/masking, transpilation utilities, and noise models
 
 ---
 

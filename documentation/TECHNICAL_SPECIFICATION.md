@@ -19,14 +19,15 @@
 9. [Technique 6: Seam Ancilla Management](#9-technique-6-seam-ancilla-management)
 10. [Technique 7: Pauli Frame Tracking](#10-technique-7-pauli-frame-tracking)
 11. [Technique 8: GF(2) Linear Algebra Utilities](#11-technique-8-gf2-linear-algebra-utilities)
-12. [Module Reference](#12-module-reference)
-13. [Known Limitations and Future Work](#13-known-limitations-and-future-work)
+12. [Technique 9: Device-Aware Noise Modeling](#12-technique-9-device-aware-noise-modeling)
+13. [Module Reference](#13-module-reference)
+14. [Known Limitations and Future Work](#14-known-limitations-and-future-work)
 
 ---
 
 ## 1. Executive Summary
 
-This document describes the techniques developed to build a **phenomenological Stim circuit builder** for surface codes that supports **lattice surgery** operations. The primary goal is to enable fault-tolerant CNOT gates via smooth and rough merges between logical qubit patches.
+This document describes the techniques developed to build a **Stim circuit builder** for surface codes that supports **lattice surgery** operations and **device-aware noise modeling**. The primary goal is to enable fault-tolerant CNOT gates via smooth and rough merges between logical qubit patches, with realistic noise modeling using device calibration data.
 
 ### Key Achievements
 
@@ -34,6 +35,8 @@ This document describes the techniques developed to build a **phenomenological S
 - **Lattice surgery CNOT** implementation following Horsman et al. (2013)
 - Correct **time-like detector** wiring across multi-phase protocols
 - **Physics mode** for Bell correlator verification of CNOT action
+- **Device-aware noise modeling** with per-qubit T1/T2 decoherence from device calibration
+- **Automatic layout selection** based on device type (IBM → heavy-hex, IQM Crystal → standard)
 - Modular architecture supporting arbitrary code distances
 
 ### Critical Problems Solved
@@ -642,7 +645,148 @@ def _pauli_commutes(a: str, b: str) -> bool:
 
 ---
 
-## 12. Module Reference
+## 12. Technique 9: Device-Aware Noise Modeling
+
+### 12.1 Overview
+
+The codebase features **device-aware noise modeling** as the primary approach, using per-qubit error rates computed from device calibration data (T1/T2, gate errors, readout errors). This enables realistic simulations using actual hardware parameters from quantum processors.
+
+An alternative **uniform error rate model** is available for theoretical studies or comparative experiments where idealized uniform noise is desired.
+
+### 12.2 Noise Model Architecture
+
+The noise model system uses an abstract base class `NoiseModel` with two implementations:
+
+```python
+class NoiseModel(ABC):
+    @abstractmethod
+    def apply_data_qubit_noise(circuit, qubits, duration) -> None
+    @abstractmethod
+    def apply_measurement_noise(circuit, qubits) -> None
+    @abstractmethod
+    def get_effective_error_rate(qubit, error_type) -> float
+```
+
+**DeviceAwareNoiseModel** (primary implementation): Uses per-qubit calibration data:
+- Computes error rates from T1/T2 decoherence times
+- Applies per-qubit readout errors
+- Supports gate-dependent errors (optional)
+- Enables realistic simulations with actual device parameters
+
+**PhenomenologicalNoiseModel** (alternative experimental approach): Uniform error rate model:
+- Applies uniform `p_x` and `p_z` errors to all qubits
+- Useful for theoretical studies with idealized uniform noise or when comparing against device-specific results
+
+### 12.3 T1/T2 to Pauli Error Conversion
+
+The device-aware model converts coherence times to Pauli error rates using physics-based formulas:
+
+**Amplitude damping** (T1 relaxation):
+```
+p_ad = 1 - exp(-t/T1)
+```
+
+**Pure dephasing** (T2* contribution):
+```
+T2_phi = 1/(1/T2 - 1/(2*T1))
+p_deph = 0.5 * (1 - exp(-t/T2_phi))
+```
+
+**Pauli error rates** (approximate for small errors):
+```
+p_x ≈ p_ad / 4
+p_z ≈ p_deph / 2 + p_ad / 4
+```
+
+These approximations are valid when error rates are small (typical for surface code threshold studies).
+
+### 12.4 Device Calibration System
+
+The `DeviceCalibration` class provides a unified interface for loading device parameters:
+
+**Sources:**
+- IBM Quantum backends: `DeviceCalibration.from_ibm_backend(backend)` (primary method for real device data)
+- JSON files: `DeviceCalibration.from_json(path)` (for saved/reproducible calibration)
+- Synthetic: `DeviceCalibration.uniform(...)` (for theoretical studies with idealized parameters)
+
+**Calibration data structure:**
+```json
+{
+  "backend_name": "ibm_sherbrooke",
+  "timestamp": "2026-01-22T12:00:00Z",
+  "qubits": {
+    "0": {
+      "t1": 150.0,           // microseconds
+      "t2": 100.0,           // microseconds
+      "readout_error_0to1": 0.015,
+      "readout_error_1to0": 0.020,
+      "gate_error": 0.0005,
+      "frequency": 5.05      // GHz (optional)
+    }
+  },
+  "couplers": {
+    "0-1": {
+      "cx_error": 0.008,
+      "crosstalk": 0.001
+    }
+  },
+  "gate_times": {
+    "sx": 0.035,    // microseconds
+    "cx": 0.300,
+    "measure": 1.0
+  }
+}
+```
+
+### 12.5 Automatic Layout Selection
+
+The system automatically selects the appropriate surface code layout based on the device type:
+
+- **IBM devices** → `heavy_hex` layout (native to IBM's heavy-hex architecture)
+- **IQM Crystal** → `standard` layout (planar surface code)
+
+This is implemented via `DeviceCalibration.get_recommended_layout()`, which detects the device type from the backend name and returns the appropriate layout string.
+
+**Detection logic:**
+```python
+def get_recommended_layout(self) -> str:
+    backend_lower = self.backend_name.lower()
+    if "ibm" in backend_lower or known_ibm_device(backend_lower):
+        return "heavy_hex"
+    if "iqm" in backend_lower or "crystal" in backend_lower:
+        return "standard"
+    return "heavy_hex"  # default
+```
+
+When using device-aware noise in `threshold_experiment.py`, if the user-specified layout conflicts with the recommended layout, a warning is displayed and the layout is automatically switched.
+
+### 12.6 Integration with Stim Builder
+
+The noise model is integrated into `PhenomenologicalStimConfig`:
+
+```python
+@dataclass
+class PhenomenologicalStimConfig:
+    rounds: int = 5
+    p_x_error: float = 1e-3      # Used if noise_model is None
+    p_z_error: float = 1e-3
+    noise_model: Optional[NoiseModel] = None  # Device-aware noise (recommended)
+```
+
+The `PhenomenologicalStimBuilder._apply_noise()` method delegates to the noise model if provided, otherwise uses uniform error rates.
+
+### 12.7 Current Limitations
+
+The device-aware noise model applies errors **phenomenologically** (after each measurement round) rather than at the circuit level:
+- Errors are applied after each measurement round, not during explicit gate execution
+- Syndrome extraction uses MPP operations (not explicit ancilla + CNOT gates)
+- Idle noise is approximated based on round duration
+
+**Future extension**: Circuit-level noise with explicit gate decomposition would provide even more realistic modeling by applying noise after each individual gate operation.
+
+---
+
+## 13. Module Reference
 
 | Module | Purpose | Key Functions/Classes |
 |--------|---------|----------------------|
@@ -656,25 +800,29 @@ def _pauli_commutes(a: str, b: str) -> bool:
 | `linalg.py` | GF(2) linear algebra | `rank_gf2()`, `nullspace_gf2()`, `_solve_gf2()` |
 | `stim_builder.py` | Stim circuit construction | `PhenomenologicalStimBuilder`, `PhaseSpec` |
 | `surgery.py` | Lattice surgery protocols | `LatticeSurgery`, `CNOTSpec` |
+| `noise_model.py` | Noise model abstraction | `NoiseModel`, `PhenomenologicalNoiseModel`, `DeviceAwareNoiseModel` |
+| `device_calibration.py` | Device calibration loader | `DeviceCalibration`, `QubitNoiseParams`, `CouplerNoiseParams` |
 
 ---
 
-## 13. Known Limitations and Future Work
+## 14. Known Limitations and Future Work
 
-### 13.1 Current Limitations
+### 14.1 Current Limitations
 
-1. **Phenomenological noise only**: No circuit-level noise model
+1. **Phenomenological error application**: Device-aware noise uses T1/T2 but applies errors after measurement rounds (not circuit-level with explicit gates)
 2. **Single logical qubit per patch**: No support for multi-qubit patches
 3. **Linear patch arrangement**: Patches arranged in 1D order only
 4. **Fixed merge sequences**: Hardcoded smooth→rough for CNOT
 
-### 13.2 Future Extensions
+### 14.2 Future Extensions
 
-1. **Circuit-level noise**: Model gate errors, measurement errors, idle errors
-2. **Arbitrary patch topologies**: Support 2D patch arrangements
-3. **Additional gates**: Hadamard, S gate via surgery/injection
-4. **State injection**: Magic state preparation and distillation
-5. **Real-time decoding**: Integration with streaming decoders
+1. **Circuit-level noise**: Decompose MPP operations into explicit gates (H, CNOT, measure) with noise applied after each gate
+2. **Explicit ancilla qubits**: Allocate ancilla qubits for each stabilizer measurement
+3. **Arbitrary patch topologies**: Support 2D patch arrangements
+4. **Additional gates**: Hadamard, S gate via surgery/injection
+5. **State injection**: Magic state preparation and distillation
+6. **Real-time decoding**: Integration with streaming decoders
+7. **More device support**: Additional calibration loaders for other quantum processors
 
 ### 13.3 Performance Considerations
 

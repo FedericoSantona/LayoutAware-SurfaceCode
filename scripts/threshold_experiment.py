@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -38,6 +38,11 @@ from simulation.code_threshold import (
     run_scenario,
     export_csv,
     plot_scenario,
+)
+from surface_code import (
+    DeviceCalibration,
+    NoiseModel,
+    PhenomenologicalNoiseModel,
 )
 
 
@@ -101,7 +106,66 @@ def parse_args() -> argparse.Namespace:
         help=f"Experiment type: '{EXPERIMENT_TYPE_MEMORY}' for memory threshold or "
              f"'{EXPERIMENT_TYPE_CNOT}' for CNOT lattice-surgery threshold (default: {EXPERIMENT_TYPE_MEMORY})",
     )
+    # Noise model options
+    parser.add_argument(
+        "--noise-model",
+        type=str,
+        choices=["phenomenological", "device-aware"],
+        default="phenomenological",
+        help="Noise model type: 'phenomenological' (uniform p_x/p_z) or "
+             "'device-aware' (per-qubit T1/T2 from calibration)",
+    )
+    parser.add_argument(
+        "--calibration-file",
+        type=Path,
+        default=None,
+        help="Path to device calibration JSON file (required for device-aware noise model)",
+    )
+    parser.add_argument(
+        "--round-duration",
+        type=float,
+        default=1.0,
+        help="Measurement round duration in microseconds (for device-aware noise, default: 1.0)",
+    )
     return parser.parse_args()
+
+
+def load_noise_model(args: argparse.Namespace) -> Optional[NoiseModel]:
+    """Load and configure the noise model based on CLI arguments.
+    
+    Args:
+        args: Parsed command-line arguments.
+        
+    Returns:
+        NoiseModel instance, or None for legacy phenomenological mode.
+    """
+    if args.noise_model == "phenomenological":
+        # Return None to use the legacy p_x_error/p_z_error approach
+        # (noise rates are set per data point in the sweep)
+        return None
+    
+    elif args.noise_model == "device-aware":
+        if args.calibration_file is None:
+            print("Error: --calibration-file is required for device-aware noise model")
+            print("  Use --calibration-file <path> to specify device calibration JSON")
+            sys.exit(1)
+        
+        if not args.calibration_file.exists():
+            print(f"Error: Calibration file not found: {args.calibration_file}")
+            sys.exit(1)
+        
+        # Load calibration and create noise model
+        print(f"Loading device calibration from: {args.calibration_file}")
+        calibration = DeviceCalibration.from_json(args.calibration_file)
+        print(calibration.summary())
+        
+        noise_model = calibration.to_noise_model(
+            default_round_duration=args.round_duration,
+        )
+        return noise_model
+    
+    else:
+        raise ValueError(f"Unknown noise model type: {args.noise_model}")
 
 
 def scenario_to_dict(result: ThresholdScenarioResult) -> dict:
@@ -143,6 +207,13 @@ def main() -> None:
     data_dir: Path = args.data_dir or (PROJECT_ROOT / "output" / "threshold" / args.layout / args.experiment_type)
     plot_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load noise model if device-aware mode is selected
+    noise_model = load_noise_model(args)
+    if noise_model is not None:
+        print(f"Using device-aware noise model with round duration {args.round_duration} µs")
+    else:
+        print("Using phenomenological noise model (uniform error rates)")
 
     scenarios = create_standard_scenarios(distances, physical_grid)
     study_cfg = ThresholdStudyConfig(shots=args.shots, seed=args.seed)
@@ -188,6 +259,7 @@ def main() -> None:
             progress=update_progress if progress_bar is not None else None,
             code_type=args.layout,
             experiment_type=args.experiment_type,
+            noise_model=noise_model,
         )
         csv_paths = export_csv(result, data_dir)
         plot_path = plot_scenario(result, plot_dir ,1 / args.shots)
@@ -247,6 +319,13 @@ def main() -> None:
             progress_bar.close()
 
     # Add top-level metadata to the summary
+    noise_metadata = {
+        "noise_model": args.noise_model,
+    }
+    if args.noise_model == "device-aware" and args.calibration_file:
+        noise_metadata["calibration_file"] = str(args.calibration_file)
+        noise_metadata["round_duration_us"] = args.round_duration
+    
     full_summary = {
         "_metadata": {
             "experiment_type": args.experiment_type,
@@ -256,6 +335,7 @@ def main() -> None:
             "p_min": args.p_min,
             "p_max": args.p_max,
             "num_points": args.num_points,
+            **noise_metadata,
         },
         "scenarios": summary,
     }

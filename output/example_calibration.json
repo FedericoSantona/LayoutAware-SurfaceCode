@@ -1,0 +1,40 @@
+{
+  "backend_name": "example_device",
+  "timestamp": "2026-01-22T12:00:00Z",
+  "qubits": {
+    "0": {"t1": 150.0, "t2": 100.0, "readout_error_0to1": 0.015, "readout_error_1to0": 0.020, "gate_error": 0.0005, "frequency": 5.05},
+    "1": {"t1": 140.0, "t2": 95.0, "readout_error_0to1": 0.018, "readout_error_1to0": 0.022, "gate_error": 0.0006, "frequency": 5.10},
+    "2": {"t1": 160.0, "t2": 110.0, "readout_error_0to1": 0.012, "readout_error_1to0": 0.015, "gate_error": 0.0004, "frequency": 5.15},
+    "3": {"t1": 130.0, "t2": 85.0, "readout_error_0to1": 0.020, "readout_error_1to0": 0.025, "gate_error": 0.0008, "frequency": 5.00},
+    "4": {"t1": 145.0, "t2": 98.0, "readout_error_0to1": 0.016, "readout_error_1to0": 0.018, "gate_error": 0.0005, "frequency": 5.08},
+    "5": {"t1": 155.0, "t2": 105.0, "readout_error_0to1": 0.014, "readout_error_1to0": 0.016, "gate_error": 0.0004, "frequency": 5.12},
+    "6": {"t1": 135.0, "t2": 90.0, "readout_error_0to1": 0.019, "readout_error_1to0": 0.023, "gate_error": 0.0007, "frequency": 5.03},
+    "7": {"t1": 148.0, "t2": 102.0, "readout_error_0to1": 0.015, "readout_error_1to0": 0.017, "gate_error": 0.0005, "frequency": 5.09},
+    "8": {"t1": 142.0, "t2": 96.0, "readout_error_0to1": 0.017, "readout_error_1to0": 0.020, "gate_error": 0.0006, "frequency": 5.07}
+  },
+  "couplers": {
+    "0-1": {"cx_error": 0.008, "crosstalk": 0.0005},
+    "1-2": {"cx_error": 0.009, "crosstalk": 0.0006},
+    "3-4": {"cx_error": 0.010, "crosstalk": 0.0004},
+    "4-5": {"cx_error": 0.007, "crosstalk": 0.0005},
+    "6-7": {"cx_error": 0.011, "crosstalk": 0.0007},
+    "7-8": {"cx_error": 0.008, "crosstalk": 0.0004},
+    "0-3": {"cx_error": 0.012, "crosstalk": 0.0006},
+    "1-4": {"cx_error": 0.009, "crosstalk": 0.0005},
+    "2-5": {"cx_error": 0.010, "crosstalk": 0.0005},
+    "3-6": {"cx_error": 0.011, "crosstalk": 0.0006},
+    "4-7": {"cx_error": 0.008, "crosstalk": 0.0004},
+    "5-8": {"cx_error": 0.009, "crosstalk": 0.0005}
+  },
+  "gate_times": {
+    "sx": 0.035,
+    "x": 0.035,
+    "rz": 0.0,
+    "cx": 0.300,
+    "measure": 1.0
+  },
+  "metadata": {
+    "description": "Example calibration file for testing device-aware noise model",
+    "notes": "T1/T2 times in microseconds, gate times in microseconds, error rates are probabilities"
+  }
+}

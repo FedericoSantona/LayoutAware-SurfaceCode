@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 
@@ -11,6 +11,9 @@ from surface_code import (
     PhenomenologicalStimConfig,
     build_surface_code_model,
 )
+
+if TYPE_CHECKING:
+    from surface_code.noise_model import NoiseModel
 
 from ..ler_runner import SimulationResult, run_logical_error_rate, run_cnot_logical_error_rate
 from ..montecarlo import MonteCarloConfig
@@ -93,6 +96,7 @@ def run_scenario(
     progress: Callable[[ThresholdScenario, int, float, float], None] | None = None,
     code_type: str = "heavy_hex",
     experiment_type: str = EXPERIMENT_TYPE_MEMORY,
+    noise_model: Optional["NoiseModel"] = None,
 ) -> ThresholdScenarioResult:
     """
     Run a threshold scenario sweep using either memory or CNOT experiment.
@@ -103,6 +107,9 @@ def run_scenario(
         progress: Optional progress callback
         code_type: Surface code layout ("heavy_hex" or "standard")
         experiment_type: Either "memory" (default) or "cnot"
+        noise_model: Optional device-aware noise model. If provided, overrides
+            the phenomenological p_x/p_z error rates with per-qubit noise.
+            The scenario's physical_error_grid is still used to scale the noise.
         
     Returns:
         ThresholdScenarioResult with logical error rates for each (distance, p) point
@@ -134,7 +141,8 @@ def run_scenario(
                     p_z_error=p_z,
                     init_label=scenario.init_label,
                     family=("Z" if isinstance(scenario, XOnlyScenario) else
-                            "X" if isinstance(scenario, ZOnlyScenario) else None)
+                            "X" if isinstance(scenario, ZOnlyScenario) else None),
+                    noise_model=noise_model,
                 )
                 result: SimulationResult = run_logical_error_rate(
                     builder,

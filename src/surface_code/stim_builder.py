@@ -1,10 +1,13 @@
 """Stim circuit builders for phenomenological surface-code experiments."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Any
+from dataclasses import dataclass, field
+from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Any, TYPE_CHECKING
 
 import stim
+
+if TYPE_CHECKING:
+    from .noise_model import NoiseModel
 
 
 @dataclass
@@ -15,12 +18,18 @@ class PhenomenologicalStimConfig:
         None  -> interleave Z and X halves (measure both each round)
         "Z"   -> Z-only family (CSS split, measure only Z stabilizers)
         "X"   -> X-only family (CSS split, measure only X stabilizers)
+    
+    noise_model:
+        Optional NoiseModel instance for device-aware noise. If provided,
+        overrides p_x_error and p_z_error with per-qubit noise rates.
+        If None, uses the legacy uniform error rate behavior.
     """
     rounds: int = 5
     p_x_error: float = 1e-3
     p_z_error: float = 1e-3
     init_label: Optional[str] = None  # one of {"0", "1", "+", "-"}
     family: Optional[str] = None
+    noise_model: Optional["NoiseModel"] = None
    
 
 @dataclass
@@ -172,14 +181,50 @@ class PhenomenologicalStimBuilder:
         return measure_Z, measure_X
 
     def _apply_x_noise(self, circuit: stim.Circuit, config: "PhenomenologicalStimConfig") -> None:
+        """Apply X errors using legacy uniform rate (internal fallback)."""
         if config.p_x_error:
             n = self.code.n
             circuit.append_operation("X_ERROR", list(range(n)), config.p_x_error)
 
     def _apply_z_noise(self, circuit: stim.Circuit, config: "PhenomenologicalStimConfig") -> None:
+        """Apply Z errors using legacy uniform rate (internal fallback)."""
         if config.p_z_error:
             n = self.code.n
             circuit.append_operation("Z_ERROR", list(range(n)), config.p_z_error)
+    
+    def _apply_noise(
+        self,
+        circuit: stim.Circuit,
+        config: "PhenomenologicalStimConfig",
+        error_type: str = "both",
+    ) -> None:
+        """Apply noise to data qubits, delegating to noise model if available.
+        
+        For device-aware noise models (T1/T2 based), both X and Z errors are
+        applied together since they arise from the same decoherence process.
+        For phenomenological models, errors can be applied separately.
+        
+        Args:
+            circuit: Stim circuit to append noise operations to.
+            config: Configuration with noise model or legacy error rates.
+            error_type: Which errors to apply - "x", "z", or "both".
+                       Ignored when using device-aware noise model.
+        """
+        n = self.code.n
+        qubits = list(range(n))
+        
+        if config.noise_model is not None:
+            # Device-aware noise model applies both X and Z from decoherence.
+            # Only apply once per round to avoid double-counting.
+            # We apply when error_type="x" (the first call in the round).
+            if error_type in ("x", "both"):
+                config.noise_model.apply_data_qubit_noise(circuit, qubits)
+        else:
+            # Legacy fallback: apply uniform error rates separately
+            if error_type in ("x", "both"):
+                self._apply_x_noise(circuit, config)
+            if error_type in ("z", "both"):
+                self._apply_z_noise(circuit, config)
 
 
     # ----- logical observable helpers ---------------------------------------
@@ -260,7 +305,8 @@ class PhenomenologicalStimBuilder:
         for round_idx in range(rounds):
             if measure_Z and z_stabs:
                 circuit.append_operation("TICK")
-                self._apply_x_noise(circuit, config)
+                # X errors affect Z measurements
+                self._apply_noise(circuit, config, error_type="x")
                 sz_curr = self._measure_list(
                     circuit, z_stabs, family="Z", round_index=round_idx, phase_name=phase_name
                 )
@@ -270,7 +316,8 @@ class PhenomenologicalStimBuilder:
 
             if measure_X and x_stabs:
                 circuit.append_operation("TICK")
-                self._apply_z_noise(circuit, config)
+                # Z errors affect X measurements
+                self._apply_noise(circuit, config, error_type="z")
                 sx_curr = self._measure_list(
                     circuit, x_stabs, family="X", round_index=round_idx, phase_name=phase_name
                 )

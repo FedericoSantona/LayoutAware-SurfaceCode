@@ -11,6 +11,14 @@ from .geometry_utils import (
     find_rough_boundary_data_qubits,
     find_smooth_boundary_data_qubits,
 )
+from .noise_model import (
+    NoiseModel,
+    QubitNoiseParams,
+    CouplerNoiseParams,
+    PhenomenologicalNoiseModel,
+    DeviceAwareNoiseModel,
+)
+from .device_calibration import DeviceCalibration
 _heavy_hex_import_error = None
 try:
     from .heavy_hex import HeavyHexModel, build_heavy_hex_model
@@ -64,25 +72,37 @@ def build_surface_code_model(distance: int, code_type: str = "heavy_hex") -> Sur
 
 
 __all__ = [
+    # Surface code models
     "SurfaceCodeModel",
     "HeavyHexModel",
     "StandardSurfaceCodeModel",
     "build_heavy_hex_model",
     "build_standard_surface_code_model",
     "build_surface_code_model",
+    # Stim circuit builders
     "PhenomenologicalStimBuilder",
     "PhenomenologicalStimConfig",
+    "PhaseSpec",
+    # Noise models
+    "NoiseModel",
+    "QubitNoiseParams",
+    "CouplerNoiseParams",
+    "PhenomenologicalNoiseModel",
+    "DeviceAwareNoiseModel",
+    "DeviceCalibration",
+    # Layout and surgery
     "Layout",
     "SeamSpec",
+    "LatticeSurgery",
+    # Geometry utilities
     "find_boundary_data_qubits",
     "find_rough_boundary_data_qubits",
     "find_smooth_boundary_data_qubits",
-    "PhaseSpec",
+    # Internal utilities (exported for advanced use)
     "_pauli_commutes",
     "_solve_gf2",
     "_align_logical_x_to_masked_z",
     "_commuting_boundary_mask",
-    "LatticeSurgery",
     "stabs_to_symplectic",
     "_multiply_paulis_disjoint",
 ]

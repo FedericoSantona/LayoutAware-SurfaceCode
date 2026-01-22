@@ -181,9 +181,5 @@ Suggested citation (replace fields as appropriate):
 }
 ```
 
----
 
-## License
-
-To do
 

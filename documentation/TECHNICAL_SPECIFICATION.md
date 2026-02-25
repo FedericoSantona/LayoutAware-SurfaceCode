@@ -649,9 +649,12 @@ def _pauli_commutes(a: str, b: str) -> bool:
 
 ### 12.1 Overview
 
-The codebase features **device-aware noise modeling** as the primary approach, using per-qubit error rates computed from device calibration data (T1/T2, gate errors, readout errors). This enables realistic simulations using actual hardware parameters from quantum processors.
+For **threshold studies**, noise is expressed in terms of **Pauli X and Z error rates** (`p_x`, `p_z`) per qubit per round (or per step): the decoder sees the same kind of syndrome statistics whether those rates come from a simple phenomenological model or from device calibration. The codebase supports both:
 
-An alternative **uniform error rate model** is available for theoretical studies or comparative experiments where idealized uniform noise is desired.
+- **Device-aware noise:** Per-qubit `p_x` and `p_z` are *computed* from calibration (T1/T2, gate errors, readout errors). The simulator still applies `X_ERROR` and `Z_ERROR` with these effective rates, so threshold curves and logical error rates are directly comparable to phenomenological studies.
+- **Phenomenological noise:** The user sets uniform `p_x` and `p_z` directly; useful for theory, scaling plots, or as a baseline.
+
+So for threshold study one always uses **p_x and p_z errors** in the underlying Stim circuit; the device-aware model is a way to obtain those rates from real device parameters rather than from hand-picked values.
 
 ### 12.2 Noise Model Architecture
 
@@ -677,7 +680,100 @@ class NoiseModel(ABC):
 - Applies uniform `p_x` and `p_z` errors to all qubits
 - Useful for theoretical studies with idealized uniform noise or when comparing against device-specific results
 
-### 12.3 T1/T2 to Pauli Error Conversion
+### 12.3 Device-Aware Noise Model: Technical Specification
+
+The **DeviceAwareNoiseModel** (`src/surface_code/noise_model.py`) implements per-qubit and per-coupler noise from device calibration. For threshold studies, it still injects noise as **p_x and p_z** (via Stim `X_ERROR` and `Z_ERROR`); those rates are derived from T1/T2 and gate errors instead of being set directly. The model supports four error channels: idle decoherence (→ p_x, p_z), gate errors (depolarizing), readout errors, and optional ZZ crosstalk.
+
+#### 12.3.1 Parameter Structures
+
+**Per-qubit parameters** (`QubitNoiseParams`):
+
+| Field | Type | Unit | Description |
+|-------|------|------|-------------|
+| `t1` | float | µs | T1 relaxation time (amplitude damping). Must be > 0. |
+| `t2` | float | µs | T2 dephasing time (includes T1). Must satisfy T2 ≤ 2·T1. |
+| `readout_error_0to1` | float | — | Probability of measuring 1 given state \|0⟩. |
+| `readout_error_1to0` | float | — | Probability of measuring 0 given state \|1⟩. |
+| `single_qubit_gate_error` | float | — | Average single-qubit gate error rate (depolarizing). |
+| `frequency` | float or None | GHz | Optional; reserved for crosstalk/frequency-dependent modeling. |
+
+Derived quantities:
+- **Pure dephasing time:** `T2_phi = 1 / (1/T2 - 1/(2*T1))`. If T2 = 2·T1, pure dephasing is infinite (no dephasing channel).
+- **Average readout error:** `(readout_error_0to1 + readout_error_1to0) / 2`, used when applying readout noise.
+
+**Per-coupler parameters** (`CouplerNoiseParams`), keyed by qubit pair `(q1, q2)` with q1 < q2:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `two_qubit_gate_error` | float | Two-qubit gate error rate (e.g. CX/CZ), applied as two-qubit depolarizing noise. |
+| `crosstalk_strength` | float | ZZ crosstalk rate; Z error probability on the idle qubit when the neighbor is active. |
+
+**Model configuration:**
+- `default_round_duration` (float, µs): Default idle duration for decoherence when `duration` is not provided (e.g. 1.0 µs).
+- `gate_times` (dict): Gate name → duration in µs. Defaults include: `sx`/`x`/`h` 0.035, `s` 0 (virtual Z), `cx`/`cz` 0.3, `measure` 1.0.
+
+#### 12.3.2 Idle / Data-Qubit Noise (Decoherence)
+
+**Method:** `apply_data_qubit_noise(circuit, qubits, duration=None)`.
+
+For each qubit in `qubits`, the model computes Pauli error rates from T1/T2 and optional gate-error contribution, then appends Stim noise operations.
+
+1. **Amplitude damping (T1):**  
+   `p_ad = 1 - exp(-t / T1)` with `t = duration` (µs) or `default_round_duration`.
+
+2. **Pure dephasing (T2_phi):**  
+   `p_deph = 0.5 * (1 - exp(-t / T2_phi))` if T2_phi is finite; else 0.
+
+3. **Pauli rates from decoherence (small-error approximation):**  
+   `p_x = p_ad/4`,  
+   `p_z = p_deph/2 + p_ad/4`.
+
+4. **Depolarizing contribution from single-qubit gate error:**  
+   `p_x += single_qubit_gate_error/3`,  
+   `p_z += single_qubit_gate_error/3`.
+
+5. **Clamping:** `p_x` and `p_z` are clamped to [0, 0.5].
+
+6. **Stim operations:** For each qubit, append `X_ERROR(qubit, p_x)` and `Z_ERROR(qubit, p_z)` when the rate is > 0. Qubits not present in `qubit_params` receive no idle noise.
+
+#### 12.3.3 Gate Noise
+
+**Method:** `apply_gate_noise(circuit, gate_name, qubits)`.
+
+- **Single-qubit gates:** After the gate, append `DEPOLARIZE1(qubit, single_qubit_gate_error)` using that qubit’s `single_qubit_gate_error` from `QubitNoiseParams`.
+- **Two-qubit gates:** After the gate, append `DEPOLARIZE2(q1, q2, two_qubit_gate_error)` using the coupler’s `two_qubit_gate_error` for the pair `(min(q1,q2), max(q1,q2))`. If the pair is not in `coupler_params`, no gate noise is applied.
+
+Gate names are matched case-insensitively (e.g. `"CX"`, `"cx"`).
+
+#### 12.3.4 Measurement / Readout Noise
+
+**Method:** `apply_measurement_noise(circuit, qubits)`.
+
+For each qubit in `qubits` that exists in `qubit_params`, the model uses the average readout error `p_readout = (readout_error_0to1 + readout_error_1to0) / 2` and appends `X_ERROR(qubit, p_readout)` before the measurement. This approximates asymmetric readout errors as a symmetric bit-flip channel. Qubits not in `qubit_params` are skipped.
+
+#### 12.3.5 Crosstalk (Optional)
+
+**Method:** `apply_crosstalk(circuit, active_qubits, all_qubits)`.
+
+For each coupler `(q1, q2)` with `crosstalk_strength > 0`: if one of `q1`, `q2` is in `active_qubits` and the other is idle (in `all_qubits` but not in `active_qubits`), append `Z_ERROR(idle_qubit, crosstalk_strength)`. This models ZZ crosstalk as a Z error on the idle qubit. This method is only applied when explicitly invoked by the circuit construction path (e.g. circuit-level builder).
+
+#### 12.3.6 Effective Error Rates and Unknown Qubits
+
+**Method:** `get_effective_error_rate(qubit, error_type)` with `error_type` in `'x'`, `'z'`, `'readout'`, `'gate'`.
+
+- For `'x'` and `'z'`: uses `_compute_pauli_rates(qubit, default_round_duration)` and returns the corresponding rate.
+- For `'readout'`: returns the qubit’s average readout error.
+- For `'gate'`: returns the qubit’s `single_qubit_gate_error`.
+- If the qubit is not in `qubit_params`, returns 0.0.
+
+#### 12.3.7 Integration Points
+
+- **Phenomenological Stim builder:** Uses `apply_data_qubit_noise` once per measurement round (when applying “x” or “both”); does not call `apply_gate_noise` or `apply_measurement_noise` in the MPP flow.
+- **Circuit-level Stim builder:** Calls `apply_gate_noise` after each single- and two-qubit gate, and `apply_data_qubit_noise` for idle qubits during each gate (with the gate duration as `duration`). Does not call `apply_measurement_noise` or `apply_crosstalk` unless explicitly wired elsewhere.
+
+Calibration is supplied via `DeviceCalibration.to_noise_model(default_round_duration)` (see §12.5).
+
+### 12.4 T1/T2 to Pauli Error Conversion (Formulas)
 
 The device-aware model converts coherence times to Pauli error rates using physics-based formulas:
 
@@ -700,7 +796,7 @@ p_z ≈ p_deph / 2 + p_ad / 4
 
 These approximations are valid when error rates are small (typical for surface code threshold studies).
 
-### 12.4 Device Calibration System
+### 12.5 Device Calibration System
 
 The `DeviceCalibration` class provides a unified interface for loading device parameters:
 
@@ -738,7 +834,7 @@ The `DeviceCalibration` class provides a unified interface for loading device pa
 }
 ```
 
-### 12.5 Automatic Layout Selection
+### 12.6 Automatic Layout Selection
 
 The system automatically selects the appropriate surface code layout based on the device type:
 
@@ -760,7 +856,27 @@ def get_recommended_layout(self) -> str:
 
 When using device-aware noise in `threshold_experiment.py`, if the user-specified layout conflicts with the recommended layout, a warning is displayed and the layout is automatically switched.
 
-### 12.6 Integration with Stim Builder
+#### 12.6.1 Qubit requirements for threshold experiments (heavy-hex)
+
+For **heavy-hex** layout, the number of physical data qubits is \(n = (5d^2 - 2d - 1)/2\) (one logical qubit, distance \(d\)). Typical threshold sweeps use distances 3, 5, 7, and optionally 9:
+
+| Distance \(d\) | Physical qubits \(n\) |
+|----------------|------------------------|
+| 3              | 19                     |
+| 5              | 57                     |
+| 7              | 115                    |
+| 9              | 193                    |
+
+The phenomenological Stim builder uses only these **data** qubits (no explicit ancilla wires in the circuit), so a device must have **at least \(n\) qubits** to run (or to supply calibration for) a threshold experiment at that distance.
+
+**IBM devices that can support threshold experiments (calibration source):**
+
+- **127-qubit systems** (e.g. **ibm_sherbrooke**, **ibm_kyoto**): \(n = 115\) for \(d = 7\), so they **can** support threshold experiments up to **distance 7** (e.g. distances 3, 5, 7). Calibration from these backends is suitable for device-aware threshold studies with `--distances 3 5 7`.
+- **Larger systems** (e.g. 133+ qubits): Still cap at \(d = 7\) for the formula above; \(d = 9\) requires **193 qubits**, so no current IBM device has enough qubits for a full heavy-hex \(d = 9\) threshold run. For \(d = 9\) one would need either a future device with ≥193 qubits or a different code/layout.
+
+**Recommendation:** Use **ibm_sherbrooke** or **ibm_kyoto** (127 qubits) to pull calibration via `DeviceCalibration.from_ibm_backend(backend)` for device-aware threshold experiments with default distances 3, 5, 7. Save calibration to JSON for reproducibility (see §12.5).
+
+### 12.7 Integration with Stim Builder
 
 The noise model is integrated into `PhenomenologicalStimConfig`:
 
@@ -775,7 +891,7 @@ class PhenomenologicalStimConfig:
 
 The `PhenomenologicalStimBuilder._apply_noise()` method delegates to the noise model if provided, otherwise uses uniform error rates.
 
-### 12.7 Current Limitations
+### 12.8 Current Limitations
 
 The device-aware noise model applies errors **phenomenologically** (after each measurement round) rather than at the circuit level:
 - Errors are applied after each measurement round, not during explicit gate execution

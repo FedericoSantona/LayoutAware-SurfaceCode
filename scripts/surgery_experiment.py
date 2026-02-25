@@ -14,6 +14,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import fmean
 from typing import List, Sequence, Tuple
 import matplotlib.pyplot as plt
 
@@ -31,6 +32,7 @@ from surface_code import (
     Layout,
     SeamSpec,
     LatticeSurgery,
+    DeviceCalibration,
     stabs_to_symplectic,
     _multiply_paulis_disjoint,
 )
@@ -763,6 +765,31 @@ def build_cnot_surgery_circuit_physics(
 # ---------------------------------------------------------------------------
 
 
+def derive_effective_pauli_rates_from_calibration(
+    calibration_file: Path,
+    round_duration: float,
+) -> tuple[DeviceCalibration, float, float, tuple[float, float], tuple[float, float]]:
+    """Load calibration and derive effective uniform p_x/p_z for surgery runs.
+
+    The derived rates are arithmetic means of per-qubit effective rates from
+    DeviceAwareNoiseModel at the requested round duration.
+    """
+    calibration = DeviceCalibration.from_json(calibration_file)
+    noise_model = calibration.to_noise_model(default_round_duration=round_duration)
+    qubits = calibration.qubit_indices
+    if not qubits:
+        raise ValueError(f"No qubit calibration entries found in: {calibration_file}")
+
+    p_x_values = [noise_model.get_effective_error_rate(q, "x") for q in qubits]
+    p_z_values = [noise_model.get_effective_error_rate(q, "z") for q in qubits]
+
+    p_x_mean = fmean(p_x_values)
+    p_z_mean = fmean(p_z_values)
+    p_x_range = (min(p_x_values), max(p_x_values))
+    p_z_range = (min(p_z_values), max(p_z_values))
+    return calibration, p_x_mean, p_z_mean, p_x_range, p_z_range
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -799,6 +826,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance", type=int, default=3, help="Code distance d")
     parser.add_argument("--px", type=float, default=0, help="X error probability")
     parser.add_argument("--pz", type=float, default=0, help="Z error probability")
+    parser.add_argument(
+        "--calibration-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional device calibration JSON. If provided, effective uniform "
+            "p_x/p_z are derived from DeviceAwareNoiseModel and override --px/--pz."
+        ),
+    )
+    parser.add_argument(
+        "--round-duration",
+        type=float,
+        default=1.0,
+        help=(
+            "Measurement round duration in microseconds used when deriving "
+            "p_x/p_z from --calibration-file (default: 1.0)."
+        ),
+    )
     parser.add_argument("--shots", type=int, default=10**5, help="Monte Carlo shots")
     parser.add_argument("--seed", type=int, default=46, help="Stim / DEM seed")
     parser.add_argument(
@@ -956,12 +1001,78 @@ def run_cnot_experiment(
     print(f"avg_syndrome_weight = {result.avg_syndrome_weight:.3f}")
     print(f"click_rate(any_detector) = {result.click_rate:.3f}")
     print(f"num_detectors = {result.num_detectors}")
+    physical_ref = 0.5 * (p_x + p_z)
+    if physical_ref > 0:
+        print(f"physical_error_reference = {physical_ref:.3e} ((p_x + p_z) / 2)")
+        if len(result.logical_error_rates) > 0:
+            print(
+                "logical/physical ratio (Control) = "
+                f"{result.logical_error_rates[0] / physical_ref:.3f}"
+            )
+            if p_x > 0:
+                print(
+                    "logical/control-to-p_x ratio = "
+                    f"{result.logical_error_rates[0] / p_x:.3f}"
+                )
+        if len(result.logical_error_rates) > 1:
+            print(
+                "logical/physical ratio (Target) = "
+                f"{result.logical_error_rates[1] / physical_ref:.3f}"
+            )
+            if p_z > 0:
+                print(
+                    "logical/target-to-p_z ratio = "
+                    f"{result.logical_error_rates[1] / p_z:.3f}"
+                )
 
     return result
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.calibration_file is not None:
+        if not args.calibration_file.exists():
+            print(f"Error: calibration file not found: {args.calibration_file}")
+            sys.exit(1)
+
+        try:
+            calibration, p_x_mean, p_z_mean, p_x_range, p_z_range = (
+                derive_effective_pauli_rates_from_calibration(
+                    calibration_file=args.calibration_file,
+                    round_duration=args.round_duration,
+                )
+            )
+        except Exception as exc:
+            print(f"Error while deriving p_x/p_z from calibration: {exc}")
+            sys.exit(1)
+
+        print(f"Loaded calibration: {args.calibration_file}")
+        print(calibration.summary())
+        print(
+            "Derived effective rates from calibration "
+            f"(round_duration={args.round_duration:.3f} us):"
+        )
+        print(
+            f"  p_x(mean)={p_x_mean:.3e} "
+            f"[min={p_x_range[0]:.3e}, max={p_x_range[1]:.3e}]"
+        )
+        print(
+            f"  p_z(mean)={p_z_mean:.3e} "
+            f"[min={p_z_range[0]:.3e}, max={p_z_range[1]:.3e}]"
+        )
+
+        args.px = p_x_mean
+        args.pz = p_z_mean
+
+        recommended_layout = calibration.get_recommended_layout()
+        if args.code_type != recommended_layout:
+            print(
+                "Layout override: calibration recommends "
+                f"'{recommended_layout}' but '--code-type {args.code_type}' was set. "
+                f"Using '{recommended_layout}'."
+            )
+            args.code_type = recommended_layout
 
     if args.mode in ("ler", "both"):
         run_cnot_experiment(

@@ -653,6 +653,7 @@ For **threshold studies**, noise is expressed in terms of **Pauli X and Z error 
 
 - **Device-aware noise:** Per-qubit `p_x` and `p_z` are *computed* from calibration (T1/T2, gate errors, readout errors). The simulator still applies `X_ERROR` and `Z_ERROR` with these effective rates, so threshold curves and logical error rates are directly comparable to phenomenological studies.
 - **Phenomenological noise:** The user sets uniform `p_x` and `p_z` directly; useful for theory, scaling plots, or as a baseline.
+- **Case-mapped CNOT snapshots:** For each `(layout, distance)` case, simulation qubits are mapped to a backend-specific qubit subset and a remapped `DeviceAwareNoiseModel` is used directly (no single global chip-average `p_x/p_z`).
 
 So for threshold study one always uses **p_x and p_z errors** in the underlying Stim circuit; the device-aware model is a way to obtain those rates from real device parameters rather than from hand-picked values.
 
@@ -770,6 +771,7 @@ For each coupler `(q1, q2)` with `crosstalk_strength > 0`: if one of `q1`, `q2` 
 
 - **Phenomenological Stim builder:** Uses `apply_data_qubit_noise` once per measurement round (when applying “x” or “both”); does not call `apply_gate_noise` or `apply_measurement_noise` in the MPP flow.
 - **Circuit-level Stim builder:** Calls `apply_gate_noise` after each single- and two-qubit gate, and `apply_data_qubit_noise` for idle qubits during each gate (with the gate duration as `duration`). Does not call `apply_measurement_noise` or `apply_crosstalk` unless explicitly wired elsewhere.
+- **CNOT lattice-surgery runner:** `run_cnot_logical_error_rate(..., noise_model=...)` forwards the model to `build_cnot_surgery_circuit(..., noise_model=...)`, which injects it through `PhenomenologicalStimConfig`. If `noise_model` is provided, scalar `p_x/p_z` become fallback-only.
 
 Calibration is supplied via `DeviceCalibration.to_noise_model(default_round_duration)` (see §12.5).
 
@@ -876,6 +878,21 @@ The phenomenological Stim builder uses only these **data** qubits (no explicit a
 
 **Recommendation:** Use **ibm_sherbrooke** or **ibm_kyoto** (127 qubits) to pull calibration via `DeviceCalibration.from_ibm_backend(backend)` for device-aware threshold experiments with default distances 3, 5, 7. Save calibration to JSON for reproducibility (see §12.5).
 
+#### 12.6.2 Qubit Mapping for CNOT Snapshot Tables
+
+The CNOT snapshot workflow (`scripts/cnot_snapshot_table.py`) now performs **per-case calibration remapping**:
+
+1. Compute required qubits for the 3-patch CNOT layout at each `(layout, d)`:
+   - Heavy-hex (this repository's implementation): `n_single = d^2`, `n_total = 3*n_single + 2d`
+   - Standard: `n_single = 2d^2 - 2d + 1`, `n_total = 3*n_single + 2d`
+2. Select backend qubits for that case:
+   - Prefer a connected subset when coupler data is available (`mapping_mode = unique_connected`).
+   - Otherwise use a deterministic strided unique subset (`mapping_mode = unique_strided`).
+3. Remap calibration to local simulation indices `0..n_total-1` and construct a case-specific `DeviceAwareNoiseModel`.
+4. Run the CNOT circuit with `noise_model` directly, then report case-specific mapped `p_x/p_z` and logical error rates.
+
+If `n_total` exceeds available calibrated backend qubits, the workflow enters `mapping_mode = reused_strided` and deterministically reuses backend qubits while preserving heterogeneity statistics. This supports scaling studies but should not be interpreted as a physically embeddable placement on that device.
+
 ### 12.7 Integration with Stim Builder
 
 The noise model is integrated into `PhenomenologicalStimConfig`:
@@ -929,6 +946,7 @@ The device-aware noise model applies errors **phenomenologically** (after each m
 2. **Single logical qubit per patch**: No support for multi-qubit patches
 3. **Linear patch arrangement**: Patches arranged in 1D order only
 4. **Fixed merge sequences**: Hardcoded smooth→rough for CNOT
+5. **Large-distance hardware embedding**: For snapshot studies with `n_total` above device qubit count, qubit reuse (`reused_strided`) is an approximation rather than a physical one-to-one embedding
 
 ### 14.2 Future Extensions
 

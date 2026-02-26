@@ -29,6 +29,7 @@ if str(SRC_PATH) not in sys.path:
 from surface_code import (
     PhenomenologicalStimBuilder,
     PhenomenologicalStimConfig,
+    NoiseModel,
     Layout,
     SeamSpec,
     LatticeSurgery,
@@ -337,6 +338,7 @@ def build_cnot_surgery_circuit(
     rounds_pre: int,
     rounds_merge: int,
     rounds_post: int,
+    noise_model: NoiseModel | None = None,
     verbose: bool = False,
 ) -> Tuple[stim.Circuit, List[Tuple[int, int]]]:
     """Return a Stim circuit implementing a *lattice-surgery* CNOT scaffold.
@@ -456,6 +458,7 @@ def build_cnot_surgery_circuit(
         p_x_error=p_x,
         p_z_error=p_z,
         init_label=None,
+        noise_model=noise_model,
     )
 
     # Run all phases (pre-merge, merges/splits, post-merge) using the
@@ -503,6 +506,7 @@ def build_cnot_surgery_circuit_physics(
     rounds_pre: int,
     rounds_merge: int,
     rounds_post: int,
+    noise_model: NoiseModel | None = None,
     verbose: bool = False,
 ) -> Tuple[stim.Circuit, dict[str, list[int]]]:
     """Build a CNOT surgery circuit plus Bell-type logical measurements.
@@ -630,6 +634,7 @@ def build_cnot_surgery_circuit_physics(
         p_x_error=p_x,
         p_z_error=p_z,
         init_label=None,
+        noise_model=noise_model,
     )
 
     builder.run_phases(
@@ -875,6 +880,7 @@ def run_cnot_physics_experiment(
     p_z: float,
     shots: int,
     seed: int | None,
+    noise_model: NoiseModel | None = None,
     verbose: bool = False,
 ):
     """Top-level driver for Bell-state physics diagnostics.
@@ -897,6 +903,7 @@ def run_cnot_physics_experiment(
         rounds_pre=rounds_pre,
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
+        noise_model=noise_model,
         verbose=verbose,
     )
 
@@ -945,6 +952,7 @@ def run_cnot_experiment(
     p_z: float,
     shots: int,
     seed: int | None,
+    noise_model: NoiseModel | None = None,
     verbose: bool = False,
 ):
     """Top-level driver for the CNOT experiment.
@@ -972,6 +980,7 @@ def run_cnot_experiment(
         rounds_pre=rounds_pre,
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
+        noise_model=noise_model,
         verbose=verbose,
     )
 
@@ -984,6 +993,7 @@ def run_cnot_experiment(
         p_x_error=p_x,
         p_z_error=p_z,
         init_label=None,
+        noise_model=noise_model,
     )
 
     mc_config = MonteCarloConfig(shots=shots, seed=seed)

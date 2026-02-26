@@ -13,7 +13,7 @@ from surface_code.stim_builder import PhenomenologicalStimBuilder, Phenomenologi
 from .montecarlo import MonteCarloConfig
 
 if TYPE_CHECKING:
-    pass  # For any future type-only imports
+    from surface_code.noise_model import NoiseModel
 
 @dataclass
 class SimulationResult:
@@ -229,6 +229,7 @@ def run_cnot_logical_error_rate(
     rounds_pre: Optional[int] = None,
     rounds_merge: Optional[int] = None,
     rounds_post: Optional[int] = None,
+    noise_model: Optional["NoiseModel"] = None,
     verbose: bool = False,
 ) -> SimulationResult:
     """
@@ -281,6 +282,7 @@ def run_cnot_logical_error_rate(
         rounds_pre=rounds_pre,
         rounds_merge=rounds_merge,
         rounds_post=rounds_post,
+        noise_model=noise_model,
         verbose=verbose,
     )
     
@@ -290,6 +292,7 @@ def run_cnot_logical_error_rate(
         p_x_error=p_x,
         p_z_error=p_z,
         init_label=None,
+        noise_model=noise_model,
     )
     
     mc_config = MonteCarloConfig(shots=shots, seed=seed)
